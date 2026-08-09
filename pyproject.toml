@@ -1,0 +1,21 @@
+[project]
+name = "kokoro-emacs-reader"
+version = "0.1.0"
+description = "Local Kokoro TTS server for the Emacs reader"
+readme = "README-kokoro-emacs.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "fastapi>=0.115",
+    "misaki[en]>=0.9",
+    "mlx-audio[server]>=0.1",
+    "numpy>=1.26",
+    "spacy>=3.8,<4",
+    "uvicorn[standard]>=0.34",
+]
+
+[project.scripts]
+kokoro-server = "kokoro_server:main"
+
+[tool.uv]
+# kokoro_server.py is an application entry point, not an installable package.
+package = false
