@@ -16,6 +16,23 @@
   "Kokoro speech endpoint."
   :type 'string)
 
+(defcustom kokoro-reader-health-endpoint
+  "http://127.0.0.1:8000/health"
+  "Kokoro health endpoint used to start the local server on demand."
+  :type 'string)
+
+(defcustom kokoro-reader-server-command
+  '("uv" "run" "python" "kokoro_server.py"
+    "--host" "127.0.0.1" "--port" "8000")
+  "Command used to start Kokoro when its health endpoint is unavailable."
+  :type '(repeat string))
+
+(defcustom kokoro-reader-server-directory
+  (file-name-directory (or load-file-name buffer-file-name))
+  "Working directory for `kokoro-reader-server-command'."
+  :type '(choice (const :tag "Directory containing kokoro-reader.el" nil)
+                 directory))
+
 (defcustom kokoro-reader-model
   "mlx-community/Kokoro-82M-bf16"
   "Model identifier sent to the server."
@@ -53,8 +70,94 @@
 
 (defvar kokoro-reader--request-process nil)
 (defvar kokoro-reader--player-process nil)
+(defvar kokoro-reader--server-process nil)
+(defvar kokoro-reader--server-health-process nil)
+(defvar kokoro-reader--server-health-timer nil)
 (defvar kokoro-reader--audio-file nil)
 (defvar kokoro-reader--overlay nil)
+
+(defun kokoro-reader--server-ready-p ()
+  (and (process-live-p kokoro-reader--server-process)
+       (string= (process-name kokoro-reader--server-process) "kokoro-server")))
+
+(defun kokoro-reader--server-failed (message-text on-error)
+  (when (timerp kokoro-reader--server-health-timer)
+    (cancel-timer kokoro-reader--server-health-timer)
+    (setq kokoro-reader--server-health-timer nil))
+  (when (functionp on-error)
+    (funcall on-error message-text))
+  (message "Kokoro server failed: %s" message-text))
+
+(defun kokoro-reader--ensure-server (on-ready on-error)
+  "Call ON-READY after the API is reachable, starting it if necessary.
+Call ON-ERROR with a diagnostic string when startup cannot be completed."
+  (let ((buffer (generate-new-buffer " *kokoro-reader-health*")))
+    (setq kokoro-reader--server-health-process
+          (make-process
+           :name "kokoro-health"
+           :buffer buffer
+           :noquery t
+           :command (list kokoro-reader-curl-program
+                          "--silent" "--show-error" "--fail"
+                          "--max-time" "1"
+                          kokoro-reader-health-endpoint)
+           :sentinel
+           (lambda (process _event)
+             (when (and (eq process kokoro-reader--server-health-process)
+                        (memq (process-status process) '(exit signal)))
+               (let ((ok (= (process-exit-status process) 0))
+                     (error-text
+                      (with-current-buffer (process-buffer process)
+                        (string-trim (buffer-string)))))
+                 (setq kokoro-reader--server-health-process nil)
+                 (when (buffer-live-p (process-buffer process))
+                   (kill-buffer (process-buffer process)))
+                 (cond
+                  (ok (funcall on-ready))
+                  ((kokoro-reader--server-ready-p)
+                   (setq kokoro-reader--server-health-timer
+                         (run-at-time 0.2 nil
+                                      #'kokoro-reader--ensure-server
+                                      on-ready on-error)))
+                  ((not (file-directory-p
+                         (or kokoro-reader-server-directory default-directory)))
+                   (kokoro-reader--server-failed
+                    (format "server directory does not exist: %s"
+                            (or kokoro-reader-server-directory default-directory))
+                    on-error))
+                  (t
+                   (condition-case err
+                       (progn
+                         (let ((default-directory
+                                (file-name-as-directory
+                                 (or kokoro-reader-server-directory
+                                     default-directory))))
+                           (setq kokoro-reader--server-process
+                                 (make-process
+                                  :name "kokoro-server"
+                                  :buffer "*kokoro-server*"
+                                  :command kokoro-reader-server-command
+                                  :coding 'utf-8
+                                  :noquery t
+                                  :sentinel
+                                  (lambda (server _server-event)
+                                    (when (and (memq (process-status server)
+                                                      '(exit signal))
+                                               (eq server
+                                                   kokoro-reader--server-process))
+                                      (setq kokoro-reader--server-process nil)
+                                      (kokoro-reader--server-failed
+                                       "the server process exited"
+                                       on-error))))))
+                         (setq kokoro-reader--server-health-timer
+                               (run-at-time 0.2 nil
+                                            #'kokoro-reader--ensure-server
+                                            on-ready on-error)))
+                     (error
+                      (kokoro-reader--server-failed
+                       (error-message-string err) on-error))))))))))
+    (set-process-query-on-exit-flag
+     kokoro-reader--server-health-process nil)))
 
 (defun kokoro-reader--delete-overlay ()
   (when (overlayp kokoro-reader--overlay)
@@ -73,13 +176,20 @@
   ;; Clear variables before deleting processes, so their sentinels know that the
   ;; cancellation is intentional and do not start/clean a newer request.
   (let ((request kokoro-reader--request-process)
-        (player kokoro-reader--player-process))
+        (player kokoro-reader--player-process)
+        (health kokoro-reader--server-health-process))
     (setq kokoro-reader--request-process nil
-          kokoro-reader--player-process nil)
+          kokoro-reader--player-process nil
+          kokoro-reader--server-health-process nil)
     (when (process-live-p request)
       (delete-process request))
     (when (process-live-p player)
-      (delete-process player)))
+      (delete-process player))
+    (when (process-live-p health)
+      (delete-process health)))
+  (when (timerp kokoro-reader--server-health-timer)
+    (cancel-timer kokoro-reader--server-health-timer)
+    (setq kokoro-reader--server-health-timer nil))
   (kokoro-reader--delete-overlay)
   (kokoro-reader--delete-audio-file)
   (message "Kokoro stopped"))
@@ -159,55 +269,64 @@
     (overlay-put overlay 'face 'highlight)
     (setq kokoro-reader--audio-file audio-file
           kokoro-reader--overlay overlay)
-
-    (setq process
-          (make-process
-           :name "kokoro-curl"
-           :buffer nil
-           :stderr stderr-buffer
-           :connection-type 'pipe
-           :coding 'binary
-           :noquery t
-           :command
-           (list kokoro-reader-curl-program
-                 "--silent"
-                 "--show-error"
-                 "--fail-with-body"
-                 "--request" "POST"
-                 "--header" "Content-Type: application/json"
-                 "--output" audio-file
-                 "--data-binary" "@-"
-                 kokoro-reader-endpoint)
-           :sentinel
-           (lambda (proc _event)
-             (when (and (eq proc kokoro-reader--request-process)
-                        (memq (process-status proc) '(exit signal)))
-               (setq kokoro-reader--request-process nil)
-               (let ((ok (and (= (process-exit-status proc) 0)
-                              (file-exists-p audio-file)
-                              (> (file-attribute-size
-                                  (file-attributes audio-file))
-                                 44)))
-                     (error-text
-                      (when (buffer-live-p stderr-buffer)
-                        (with-current-buffer stderr-buffer
-                          (string-trim (buffer-string))))))
-                 (when (buffer-live-p stderr-buffer)
-                   (kill-buffer stderr-buffer))
-                 (if ok
-                     (kokoro-reader--play audio-file overlay)
-                   (when (overlayp overlay)
-                     (delete-overlay overlay))
-                   (when (equal audio-file kokoro-reader--audio-file)
-                     (kokoro-reader--delete-audio-file))
-                   (message "Kokoro request failed%s"
-                            (if (string-empty-p (or error-text ""))
-                                ""
-                              (concat ": " error-text)))))))))
-    (setq kokoro-reader--request-process process)
-    (process-send-string process (encode-coding-string payload 'utf-8))
-    (process-send-eof process)
-    (message "Kokoro synthesizing…")))
+    (kokoro-reader--ensure-server
+     (lambda ()
+       (setq process
+             (make-process
+              :name "kokoro-curl"
+              :buffer nil
+              :stderr stderr-buffer
+              :connection-type 'pipe
+              :coding 'binary
+              :noquery t
+              :command
+              (list kokoro-reader-curl-program
+                    "--silent"
+                    "--show-error"
+                    "--fail-with-body"
+                    "--request" "POST"
+                    "--header" "Content-Type: application/json"
+                    "--output" audio-file
+                    "--data-binary" "@-"
+                    kokoro-reader-endpoint)
+              :sentinel
+              (lambda (proc _event)
+                (when (and (eq proc kokoro-reader--request-process)
+                           (memq (process-status proc) '(exit signal)))
+                  (setq kokoro-reader--request-process nil)
+                  (let ((ok (and (= (process-exit-status proc) 0)
+                                 (file-exists-p audio-file)
+                                 (> (file-attribute-size
+                                     (file-attributes audio-file))
+                                    44)))
+                        (error-text
+                         (when (buffer-live-p stderr-buffer)
+                           (with-current-buffer stderr-buffer
+                             (string-trim (buffer-string))))))
+                    (when (buffer-live-p stderr-buffer)
+                      (kill-buffer stderr-buffer))
+                    (if ok
+                        (kokoro-reader--play audio-file overlay)
+                      (when (overlayp overlay)
+                        (delete-overlay overlay))
+                      (when (equal audio-file kokoro-reader--audio-file)
+                        (kokoro-reader--delete-audio-file))
+                      (message "Kokoro request failed%s"
+                               (if (string-empty-p (or error-text ""))
+                                   ""
+                                 (concat ": " error-text)))))))))
+       (setq kokoro-reader--request-process process)
+       (process-send-string process (encode-coding-string payload 'utf-8))
+       (process-send-eof process)
+       (message "Kokoro synthesizing…"))
+     (lambda (error-text)
+       (when (buffer-live-p stderr-buffer)
+         (kill-buffer stderr-buffer))
+       (when (overlayp overlay)
+         (delete-overlay overlay))
+       (when (equal audio-file kokoro-reader--audio-file)
+         (kokoro-reader--delete-audio-file))
+       (message "Kokoro request not started: %s" error-text)))))
 
 ;;;###autoload
 (defun kokoro-reader-speak ()

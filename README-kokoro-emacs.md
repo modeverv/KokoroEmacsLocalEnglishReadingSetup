@@ -9,7 +9,7 @@ uv run python -m spacy download en_core_web_sm
 
 The earlier successful Kokoro CLI environment may already contain some of these.
 
-## 2. Start the dedicated server
+## 2. Start the dedicated server (optional)
 
 Place `kokoro_server.py` in the project root, then run:
 
@@ -44,6 +44,20 @@ afplay /tmp/kokoro-test.wav
 ```
 
 The server binds only to `127.0.0.1` by default, loads Kokoro at startup, and serializes inference on one dedicated worker thread.
+
+The Emacs client checks `/health` whenever speech is requested. If the server is
+not already running, it starts the command above automatically and waits for
+the health check to succeed before sending the speech request. This requires
+the client file to remain next to `kokoro_server.py` (the default server
+working directory), or an explicit configuration such as:
+
+```elisp
+(setq kokoro-reader-server-directory "/path/to/reader")
+```
+
+You can override `kokoro-reader-server-command` if your Kokoro environment uses
+a different command. `C-c k` stops the current synthesis/playback; the server
+is intentionally kept running for the next request.
 
 ## 3. Install the Emacs client
 
