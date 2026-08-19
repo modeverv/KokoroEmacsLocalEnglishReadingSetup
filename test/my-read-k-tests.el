@@ -94,6 +94,36 @@
      (my-read-k-mode -1)
      (should-not buffer-read-only))))
 
+(ert-deftest english-reading-mode-j-and-k-use-single-sentence-bounds ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (insert "First sentence. Second sentence. Third sentence.")
+     (let ((my-read-k-mode t)
+           spoken)
+       (cl-letf (((symbol-function 'kokoro-reader--speak-bounds)
+                  (lambda (beg end)
+                    (push (buffer-substring-no-properties beg end) spoken))))
+         (english-reading-mode 1)
+         (goto-char (point-min))
+         (english-reading-mode-next-sentence)
+         (should (equal (car spoken) "First sentence."))
+         (should (looking-at-p "Second sentence\\."))
+         (english-reading-mode-previous-sentence)
+         (should (equal (car spoken) "First sentence."))
+         (should (= (point) (point-min)))
+         (english-reading-mode -1))))))
+
+(ert-deftest english-reading-mode-restores-buffer-sentence-spacing-setting ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (setq-local sentence-end-double-space t)
+     (let ((my-read-k-mode t))
+       (english-reading-mode 1)
+       (should-not sentence-end-double-space)
+       (english-reading-mode -1)
+       (should sentence-end-double-space)
+       (should (local-variable-p 'sentence-end-double-space))))))
+
 (ert-deftest my-read-k-next-request-increments-generation-once ()
   (my-read-k-test--isolated
    (let (sent)

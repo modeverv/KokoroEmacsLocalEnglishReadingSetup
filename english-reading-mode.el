@@ -26,6 +26,30 @@ This also runs on synthesis failure or explicit stop.")
 
 (defvar english-reading-mode--speech-sequence 0)
 (defvar english-reading-mode--active-speech nil)
+(defvar english-reading-mode nil)
+
+(defvar-local english-reading-mode--saved-sentence-end-double-space nil)
+(defvar-local english-reading-mode--sentence-setting-saved-p nil)
+(defvar-local english-reading-mode--sentence-setting-was-local-p nil)
+
+(defun english-reading-mode--enable-single-space-sentences ()
+  "Treat normal English punctuation followed by one space as a sentence end."
+  (unless english-reading-mode--sentence-setting-saved-p
+    (setq english-reading-mode--sentence-setting-was-local-p
+          (local-variable-p 'sentence-end-double-space)
+          english-reading-mode--saved-sentence-end-double-space
+          sentence-end-double-space
+          english-reading-mode--sentence-setting-saved-p t))
+  (setq-local sentence-end-double-space nil))
+
+(defun english-reading-mode--restore-sentence-setting ()
+  "Restore the sentence spacing convention from before this mode was enabled."
+  (when english-reading-mode--sentence-setting-saved-p
+    (if english-reading-mode--sentence-setting-was-local-p
+        (setq-local sentence-end-double-space
+                    english-reading-mode--saved-sentence-end-double-space)
+      (kill-local-variable 'sentence-end-double-space))
+    (setq english-reading-mode--sentence-setting-saved-p nil)))
 
 (defun english-reading-mode--sentence-bounds ()
   "Return the sentence at point, or signal a user error."
@@ -220,11 +244,13 @@ is exposed through `english-reading-mode-speech-start-hook' and
 `english-reading-mode-speech-finish-hook'."
   :lighter " EnglishRead"
   :keymap english-reading-mode-map
-  (when english-reading-mode
-    (unless (or (derived-mode-p 'nov-mode)
-                (bound-and-true-p my-read-k-mode))
-      (message "english-reading-mode is designed for nov.el/EPUB buffers")))
-  (unless english-reading-mode
+  (if english-reading-mode
+      (progn
+        (english-reading-mode--enable-single-space-sentences)
+        (unless (or (derived-mode-p 'nov-mode)
+                    (bound-and-true-p my-read-k-mode))
+          (message "english-reading-mode is designed for nov.el/EPUB buffers")))
+    (english-reading-mode--restore-sentence-setting)
     (english-reading-mode-stop)))
 
 (provide 'english-reading-mode)
