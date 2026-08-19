@@ -221,7 +221,8 @@ is exposed through `english-reading-mode-speech-start-hook' and
   :lighter " EnglishRead"
   :keymap english-reading-mode-map
   (when english-reading-mode
-    (unless (derived-mode-p 'nov-mode)
+    (unless (or (derived-mode-p 'nov-mode)
+                (bound-and-true-p my-read-k-mode))
       (message "english-reading-mode is designed for nov.el/EPUB buffers")))
   (unless english-reading-mode
     (english-reading-mode-stop)))

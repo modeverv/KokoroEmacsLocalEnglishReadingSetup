@@ -669,8 +669,9 @@ Otherwise, translate the paragraph containing point."
         (special-mode)))
     buffer))
 
-(defun my/read--setup-frame (frame)
-  "Build the my-read layout inside FRAME."
+(defun my/read--setup-frame (frame &optional center-buffer)
+  "Build the my-read layout inside FRAME.
+When CENTER-BUFFER is live, display it instead of opening `my/read-book-path'."
   (with-selected-frame frame
     (delete-other-windows)
 
@@ -722,9 +723,11 @@ Otherwise, translate the paragraph containing point."
         (set-window-buffer translate-window buffer)
         (set-window-dedicated-p translate-window t))
 
-      ;; Center: book / book directory.
+      ;; Center: normal book source, or a caller-provided text source.
       (select-window center-window)
-      (find-file (expand-file-name my/read-book-path))
+      (if (buffer-live-p center-buffer)
+          (set-window-buffer center-window center-buffer)
+        (find-file (expand-file-name my/read-book-path)))
 
       ;; Right bottom: reading notes.
       (select-window note-window)
