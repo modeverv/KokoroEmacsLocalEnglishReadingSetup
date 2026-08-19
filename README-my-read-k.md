@@ -60,6 +60,10 @@ Primary keys in the OCR buffer:
 | --- | --- |
 | `j` | Existing Kokoro next-sentence behavior; at the page boundary, fetch the next Kindle page and continue |
 | `k` | Existing Kokoro previous-sentence behavior; at the page boundary, fetch the previous Kindle page and continue |
+| `↓` / `C-n` | Move down normally; when already at the buffer bottom, fetch the next Kindle page |
+| `↑` / `C-p` | Move up normally; when already at the buffer top, fetch the previous Kindle page |
+| `C-v` | Fetch the next Kindle page directly |
+| `M-v` | Fetch the previous Kindle page directly |
 | `C-c ]` | Direct next-page/OCR command |
 | `C-c [` | Direct previous-page/OCR command |
 | `C-c g` | OCR the current page again |
@@ -77,6 +81,11 @@ The important options are:
 - `my-read-k-crop`: `(x y width height)` normalized to the screenshot, with a
   top-left origin
 - `my-read-k-language`
+- `my-read-k-prefetch-enabled`
+- `my-read-k-prefetch-count`: number of upcoming pages kept in the FIFO; the
+  default and current maximum are `2`
+- `my-read-k-history-count`: number of already-read pages kept for instant
+  backward navigation; the default is `2`
 - `my-read-k-settle-poll-ms`, `my-read-k-settle-stable-samples`, and
   `my-read-k-settle-timeout-ms`
 
@@ -86,7 +95,21 @@ headers, or page margins are being recognized.
 ## Behavior and troubleshooting
 
 The bridge is one persistent JSON Lines process. Every request has an ID and a
-monotonic generation; stale page results are ignored. Page navigation first
+monotonic generation; stale page results are ignored. As soon as a page is
+attached, the bridge temporarily turns forward, OCRs the next two pages into
+an in-memory FIFO, and returns Chrome to the displayed page. This does not
+depend on point or sentence length. At the next boundary, Emacs displays the
+first queued page immediately, advances Chrome in the background, and refills
+the two-page queue from the new current page. Each page passed while moving
+forward is also retained in a two-page backward FIFO. Moving back displays that
+cached OCR immediately and synchronizes Chrome in the background without
+rerunning OCR; the page just left is moved into the forward FIFO, so short
+forward/backward traversals stay instant in both directions. Blank or
+illustration-only pages stop forward refill without discarding already queued
+text, so the queue can temporarily contain fewer than two pages. Both queues
+are in-memory only and are discarded by refresh, source changes, and detach.
+
+Page navigation first
 tries CDP ArrowLeft/ArrowRight. If Kindle ignores the key, it clicks the safe
 left/right viewport margin, then requires the page fingerprint to change and
 remain identical for consecutive samples before OCR.

@@ -8,7 +8,11 @@ final class CDPClient: @unchecked Sendable {
     private var nextID = 0
 
     init(webSocketURL: URL) {
-        socket = URLSession.shared.webSocketTask(with: webSocketURL)
+        let task = URLSession.shared.webSocketTask(with: webSocketURL)
+        // CDP returns PNG screenshots as base64 inside one JSON message. Dense
+        // text pages can exceed URLSessionWebSocketTask's small default limit.
+        task.maximumMessageSize = 16 * 1024 * 1024
+        socket = task
         socket.resume()
     }
 

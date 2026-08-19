@@ -53,6 +53,22 @@
   :type 'integer
   :group 'my-read-k)
 
+(defcustom my-read-k-prefetch-enabled t
+  "When non-nil, continuously OCR upcoming Kindle pages into a FIFO queue."
+  :type 'boolean
+  :group 'my-read-k)
+
+(defcustom my-read-k-prefetch-count 2
+  "Number of upcoming Kindle pages to keep ready.
+The bridge currently supports two."
+  :type 'integer
+  :group 'my-read-k)
+
+(defcustom my-read-k-history-count 2
+  "Number of previously displayed Kindle pages to keep ready in memory."
+  :type 'integer
+  :group 'my-read-k)
+
 (defcustom my-read-k-bridge-program nil
   "Bridge executable path, or nil to use the package release binary."
   :type '(choice (const :tag "Package release binary" nil) file)
@@ -68,6 +84,8 @@
 (defvar my-read-k--request-id 0)
 (defvar my-read-k--generation 0)
 (defvar my-read-k--busy-p nil)
+(defvar my-read-k--prefetch-busy-p nil)
+(defvar my-read-k--sync-busy-p nil)
 (defvar my-read-k--pending-intent nil)
 (defvar my-read-k--last-error nil)
 (defvar my-read-k--state 'detached)
@@ -75,6 +93,12 @@
 (defvar my-read-k--buffer nil)
 (defvar my-read-k--last-lines nil)
 (defvar my-read-k--last-fingerprint nil)
+(defvar my-read-k--current-result nil)
+(defvar my-read-k--prefetch-queue nil)
+(defvar my-read-k--prefetch-source-fingerprint nil)
+(defvar my-read-k--prefetch-attempted-fingerprint nil)
+(defvar my-read-k--back-queue nil)
+(defvar my-read-k--back-source-fingerprint nil)
 
 (defun my-read-k--alist-get (key alist)
   "Return KEY from JSON ALIST, accepting symbol or string keys."
@@ -111,7 +135,16 @@
       (setq my-read-k--process nil
             my-read-k--state 'detached
             my-read-k--busy-p nil
+            my-read-k--prefetch-busy-p nil
+            my-read-k--sync-busy-p nil
             my-read-k--pending-intent nil)
+      (setq my-read-k--prefetch-queue nil
+            my-read-k--prefetch-source-fingerprint nil
+            my-read-k--prefetch-attempted-fingerprint nil
+            my-read-k--back-queue nil
+            my-read-k--back-source-fingerprint nil
+            my-read-k--current-result nil)
+      (my-read-k--update-prefetch-header)
       (clrhash my-read-k--callbacks)
       (unless (or my-read-k--stopping-p
                   (string-match-p "finished" event))
@@ -199,6 +232,88 @@
                (timeoutMs . ,my-read-k-settle-timeout-ms)))
     (capture . ,(my-read-k--capture-params))))
 
+(defun my-read-k--update-prefetch-header ()
+  "Show the number of forward and backward cached pages in the header."
+  (when (buffer-live-p my-read-k--buffer)
+    (with-current-buffer my-read-k--buffer
+      (let ((base (replace-regexp-in-string
+                   (concat " | next ready\\(?:: [0-9]+\\)?"
+                           "\\(?: | prev ready: [0-9]+\\)?\\'")
+                   ""
+                   (format "%s" header-line-format))))
+        (setq header-line-format
+              (format "%s | next ready: %d | prev ready: %d"
+                      base (length my-read-k--prefetch-queue)
+                      (length my-read-k--back-queue)))))))
+
+(defun my-read-k--clear-prefetch ()
+  "Discard the transient next-page OCR queue."
+  (setq my-read-k--prefetch-queue nil
+        my-read-k--prefetch-source-fingerprint nil
+        my-read-k--prefetch-attempted-fingerprint nil)
+  (my-read-k--update-prefetch-header))
+
+(defun my-read-k--clear-history ()
+  "Discard the transient previous-page OCR queue."
+  (setq my-read-k--back-queue nil
+        my-read-k--back-source-fingerprint nil)
+  (my-read-k--update-prefetch-header))
+
+(defun my-read-k--clear-navigation-caches ()
+  "Discard all page OCR queues and the current cached result."
+  (my-read-k--clear-prefetch)
+  (my-read-k--clear-history)
+  (setq my-read-k--current-result nil))
+
+(defun my-read-k--prefetch-valid-p ()
+  "Return non-nil when the cached next page belongs to the displayed page."
+  (and my-read-k--prefetch-queue
+       (stringp my-read-k--last-fingerprint)
+       (equal my-read-k--prefetch-source-fingerprint
+              my-read-k--last-fingerprint)))
+
+(defun my-read-k--history-valid-p ()
+  "Return non-nil when the cached previous page belongs to the displayed page."
+  (and my-read-k--back-queue
+       (stringp my-read-k--last-fingerprint)
+       (equal my-read-k--back-source-fingerprint
+              my-read-k--last-fingerprint)))
+
+(defun my-read-k--trim-queue (queue count)
+  "Return at most COUNT entries from QUEUE."
+  (cl-subseq queue 0 (min (length queue) (max 0 count))))
+
+(defun my-read-k--remember-transition (old-result direction)
+  "Move OLD-RESULT into the opposite cache after DIRECTION navigation."
+  (when old-result
+    (pcase direction
+      ('next
+       (setq my-read-k--back-queue
+             (my-read-k--trim-queue
+              (cons old-result my-read-k--back-queue)
+              my-read-k-history-count)
+             my-read-k--back-source-fingerprint
+             (and my-read-k--back-queue my-read-k--last-fingerprint)))
+      ('prev
+       (setq my-read-k--prefetch-queue
+             (my-read-k--trim-queue
+              (cons old-result my-read-k--prefetch-queue)
+              (min 2 (max 1 my-read-k-prefetch-count)))
+             my-read-k--prefetch-source-fingerprint
+             (and my-read-k--prefetch-queue my-read-k--last-fingerprint))))
+    (my-read-k--update-prefetch-header)))
+
+(defun my-read-k--run-pending-intent ()
+  "Run the last serialized navigation intent when all bridge work is idle."
+  (when (and my-read-k--pending-intent
+             (not my-read-k--busy-p)
+             (not my-read-k--prefetch-busy-p)
+             (not my-read-k--sync-busy-p))
+    (pcase-let ((`(,direction . ,speak)
+                 (prog1 my-read-k--pending-intent
+                   (setq my-read-k--pending-intent nil))))
+      (my-read-k--request-page direction speak))))
+
 (defun my-read-k--response-error (response)
   "Record RESPONSE's error and return non-nil when it failed."
   (unless (my-read-k--alist-get 'ok response)
@@ -235,7 +350,8 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
     (unless (and (stringp text) (not (string-empty-p text)))
       (error "Bridge returned no OCR text"))
     (setq my-read-k--last-lines (my-read-k--alist-get 'lines result)
-          my-read-k--last-fingerprint (my-read-k--alist-get 'fingerprint result))
+          my-read-k--last-fingerprint (my-read-k--alist-get 'fingerprint result)
+          my-read-k--current-result result)
     (with-current-buffer my-read-k--buffer
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -272,22 +388,152 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
   (when (= generation my-read-k--generation)
     (unwind-protect
         (unless (my-read-k--response-error response)
-          (my-read-k--apply-page (my-read-k--alist-get 'result response)
-                                 direction speak)
+          (let ((old-result my-read-k--current-result))
+            (setq my-read-k--last-error nil)
+            (pcase direction
+              ('next
+               (unless (my-read-k--history-valid-p)
+                 (my-read-k--clear-history))
+               (my-read-k--clear-prefetch))
+              ('prev
+               (unless (my-read-k--prefetch-valid-p)
+                 (my-read-k--clear-prefetch))
+               (my-read-k--clear-history))
+              (_ (my-read-k--clear-navigation-caches)))
+            (my-read-k--apply-page (my-read-k--alist-get 'result response)
+                                   direction speak)
+            (when (memq direction '(next prev))
+              (my-read-k--remember-transition old-result direction)))
           (setq my-read-k--state 'attached))
       (setq my-read-k--busy-p nil)
       (when (eq my-read-k--state 'busy)
         (setq my-read-k--state 'error))
-      (when my-read-k--pending-intent
-        (pcase-let ((`(,pending-direction . ,pending-speak)
-                     (prog1 my-read-k--pending-intent
-                       (setq my-read-k--pending-intent nil))))
-          (my-read-k--request-page pending-direction pending-speak))))))
+      (my-read-k--run-pending-intent)
+      (my-read-k--maybe-prefetch-next))))
+
+(defun my-read-k--finish-prefetch (response source-fingerprint)
+  "Store prefetched RESPONSE when SOURCE-FINGERPRINT is still displayed."
+  (unwind-protect
+      (if (my-read-k--alist-get 'ok response)
+          (let* ((result (my-read-k--alist-get 'result response))
+                 (pages (or (my-read-k--alist-get 'pages result)
+                            (list result)))
+                 (bridge-source
+                  (my-read-k--alist-get 'prefetchSourceFingerprint result)))
+            (when (and (equal source-fingerprint my-read-k--last-fingerprint)
+                       (equal bridge-source source-fingerprint))
+              (setq my-read-k--last-error nil
+                    my-read-k--prefetch-queue pages
+                    my-read-k--prefetch-source-fingerprint source-fingerprint)
+              (my-read-k--update-prefetch-header)))
+        ;; End-of-book and transient prefetch failures must not interrupt the
+        ;; current reading page.  The normal boundary request remains usable.
+        (let ((error (my-read-k--alist-get 'error response)))
+          (my-read-k--log
+           "Prefetch skipped [%s]: %s"
+           (or (my-read-k--alist-get 'code error) "PREFETCH_ERROR")
+           (or (my-read-k--alist-get 'message error) "Unknown prefetch error"))))
+    (setq my-read-k--prefetch-busy-p nil)
+    (my-read-k--run-pending-intent)))
+
+(defun my-read-k--maybe-prefetch-next ()
+  "Keep the next-page FIFO filled independently of sentence or point position."
+  (when (and my-read-k-prefetch-enabled
+             (buffer-live-p my-read-k--buffer)
+             (eq my-read-k--state 'attached)
+             (not my-read-k--busy-p)
+             (not my-read-k--prefetch-busy-p)
+             (not my-read-k--sync-busy-p)
+             (stringp my-read-k--last-fingerprint)
+             (< (length my-read-k--prefetch-queue)
+                (min 2 (max 1 my-read-k-prefetch-count)))
+             (not (equal my-read-k--prefetch-attempted-fingerprint
+                         my-read-k--last-fingerprint)))
+    (let ((source-fingerprint my-read-k--last-fingerprint))
+      (setq my-read-k--prefetch-busy-p t
+            my-read-k--prefetch-attempted-fingerprint source-fingerprint)
+      (my-read-k--send
+       "prefetchNext"
+       (append (my-read-k--navigation-params)
+               `((prefetchCount . ,(min 2 (max 1 my-read-k-prefetch-count)))))
+       (lambda (response)
+         (my-read-k--finish-prefetch response source-fingerprint))
+       my-read-k--generation))))
+
+(defun my-read-k--finish-advance
+    (response generation expected-fingerprint direction)
+  "Finish Chrome-only DIRECTION sync for GENERATION and EXPECTED-FINGERPRINT."
+  (when (= generation my-read-k--generation)
+    (unwind-protect
+        (if (my-read-k--response-error response)
+            nil
+          (let* ((result (my-read-k--alist-get 'result response))
+                 (fingerprint (my-read-k--alist-get 'fingerprint result)))
+            (if (equal fingerprint expected-fingerprint)
+                (setq my-read-k--state 'attached
+                      my-read-k--last-error nil)
+              (my-read-k--record-error
+               "CACHE_SYNC_MISMATCH"
+               (format "Chrome moved %s to a page different from cached OCR"
+                       direction)))))
+      (setq my-read-k--sync-busy-p nil)
+      (my-read-k--run-pending-intent)
+      (my-read-k--maybe-prefetch-next))))
+
+(defun my-read-k--consume-prefetch (speak)
+  "Display the cached next page immediately, then advance Chrome without OCR."
+  (let* ((old-result my-read-k--current-result)
+         (result (pop my-read-k--prefetch-queue))
+         (expected-fingerprint (my-read-k--alist-get 'fingerprint result))
+         (generation (cl-incf my-read-k--generation)))
+    (setq my-read-k--sync-busy-p t
+          my-read-k--state 'syncing)
+    (my-read-k--apply-page result 'next speak)
+    (my-read-k--remember-transition old-result 'next)
+    (setq my-read-k--prefetch-source-fingerprint
+          (and my-read-k--prefetch-queue expected-fingerprint))
+    (my-read-k--update-prefetch-header)
+    (my-read-k--send
+     "advanceNext" (my-read-k--navigation-params)
+     (lambda (response)
+       (my-read-k--finish-advance
+        response generation expected-fingerprint 'next))
+     generation)))
+
+(defun my-read-k--consume-history (speak)
+  "Display the cached previous page immediately, then move Chrome without OCR."
+  (let* ((old-result my-read-k--current-result)
+         (result (pop my-read-k--back-queue))
+         (expected-fingerprint (my-read-k--alist-get 'fingerprint result))
+         (generation (cl-incf my-read-k--generation)))
+    (setq my-read-k--sync-busy-p t
+          my-read-k--state 'syncing)
+    (my-read-k--apply-page result 'prev speak)
+    (my-read-k--remember-transition old-result 'prev)
+    (setq my-read-k--back-source-fingerprint
+          (and my-read-k--back-queue expected-fingerprint))
+    (my-read-k--update-prefetch-header)
+    (my-read-k--send
+     "advancePrev" (my-read-k--navigation-params)
+     (lambda (response)
+       (my-read-k--finish-advance
+        response generation expected-fingerprint 'prev))
+     generation)))
 
 (defun my-read-k--request-page (direction &optional speak)
   "Request capture or navigation in DIRECTION; optionally SPEAK after update."
-  (if my-read-k--busy-p
-      (setq my-read-k--pending-intent (cons direction speak))
+  (cond
+   ;; A cache hit updates Emacs immediately even while the bridge is refilling.
+   ;; The Chrome-only move is serialized by the persistent bridge process.
+   ((and (not my-read-k--busy-p)
+         (eq direction 'next) (my-read-k--prefetch-valid-p))
+    (my-read-k--consume-prefetch speak))
+   ((and (not my-read-k--busy-p)
+         (eq direction 'prev) (my-read-k--history-valid-p))
+    (my-read-k--consume-history speak))
+   ((or my-read-k--busy-p my-read-k--prefetch-busy-p my-read-k--sync-busy-p)
+    (setq my-read-k--pending-intent (cons direction speak)))
+   (t
     (setq my-read-k--busy-p t
           my-read-k--state 'busy)
     (let* ((generation (cl-incf my-read-k--generation))
@@ -301,13 +547,16 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
        (lambda (response)
          (my-read-k--finish-page-request
           response generation direction speak))
-       generation))))
+       generation)))))
 
 ;;;###autoload
 (defun my-read-k-attach ()
   "Attach to the configured Kindle Web Reader target and capture its page."
   (interactive)
-  (setq my-read-k--state 'attaching)
+  (my-read-k--clear-navigation-caches)
+  (setq my-read-k--prefetch-busy-p nil
+        my-read-k--sync-busy-p nil
+        my-read-k--state 'attaching)
   (my-read-k--send
    "attach"
    `((cdpHost . ,my-read-k-cdp-host)
@@ -324,8 +573,11 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
   (interactive)
   (cl-incf my-read-k--generation)
   (setq my-read-k--busy-p nil
+        my-read-k--prefetch-busy-p nil
+        my-read-k--sync-busy-p nil
         my-read-k--pending-intent nil
         my-read-k--state 'detached)
+  (my-read-k--clear-navigation-caches)
   (clrhash my-read-k--callbacks)
   (when (process-live-p my-read-k--process)
     (setq my-read-k--stopping-p t)
@@ -388,19 +640,62 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
     (english-reading-mode-previous-sentence))
    (t (my-read-k--request-page 'prev t))))
 
+(defun my-read-k--move-line-or-page (move-function direction)
+  "Call MOVE-FUNCTION, or request a page in DIRECTION at a buffer edge."
+  (if my-read-k--busy-p
+      (setq my-read-k--pending-intent (cons direction nil))
+    ;; A failed vertical motion is not a page boundary: with a very long
+    ;; wrapped sentence, point can remain unchanged even though more of the
+    ;; buffer is visible.  Only the actual buffer endpoints turn Kindle pages.
+    (if (if (eq direction 'next) (eobp) (bobp))
+        (my-read-k--request-page direction)
+      (condition-case nil
+          (funcall move-function 1)
+        ((beginning-of-buffer end-of-buffer error) nil)))))
+
+(defun my-read-k-down ()
+  "Move one visual line down, or fetch the next page at buffer bottom."
+  (interactive)
+  (my-read-k--move-line-or-page #'next-line 'next))
+
+(defun my-read-k-up ()
+  "Move one visual line up, or fetch the previous page at buffer top."
+  (interactive)
+  (my-read-k--move-line-or-page #'previous-line 'prev))
+
 (defvar-keymap my-read-k-mode-map
   :doc "Keymap for the Kindle OCR source."
   "j" #'my-read-k-forward
   "k" #'my-read-k-backward
+  "<down>" #'my-read-k-down
+  "<up>" #'my-read-k-up
+  "C-n" #'my-read-k-down
+  "C-p" #'my-read-k-up
+  "C-v" #'my-read-k-next-page
+  "M-v" #'my-read-k-prev-page
   "C-c ]" #'my-read-k-next-page
   "C-c [" #'my-read-k-prev-page
   "C-c g" #'my-read-k-refresh)
+
+;; `defvar-keymap' preserves an existing map on reload; install the new binding
+;; explicitly so a live my-read-k session gains it without restarting Emacs.
+(keymap-set my-read-k-mode-map "<down>" #'my-read-k-down)
+(keymap-set my-read-k-mode-map "<up>" #'my-read-k-up)
+(keymap-set my-read-k-mode-map "C-n" #'my-read-k-down)
+(keymap-set my-read-k-mode-map "C-p" #'my-read-k-up)
+(keymap-set my-read-k-mode-map "C-v" #'my-read-k-next-page)
+(keymap-set my-read-k-mode-map "M-v" #'my-read-k-prev-page)
 
 (define-minor-mode my-read-k-mode
   "Treat the current normal text buffer as a Kindle OCR source."
   :lighter " KindleOCR"
   :keymap my-read-k-mode-map
-  (setq buffer-read-only my-read-k-mode))
+  (if my-read-k-mode
+      (progn
+        (read-only-mode 1)
+        (add-hook 'post-command-hook #'my-read-k--maybe-prefetch-next nil t))
+    (read-only-mode -1)
+    (remove-hook 'post-command-hook #'my-read-k--maybe-prefetch-next t)))
 
 ;;;###autoload
 (defun my-read-k-status ()
@@ -415,9 +710,11 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
            nil
          (let* ((result (my-read-k--alist-get 'result response))
                 (target (my-read-k--alist-get 'target result)))
-           (message "my-read-k: %s — %s"
+           (message "my-read-k: %s — %s — next %d / prev %d cached"
                     my-read-k--state
-                    (or (my-read-k--alist-get 'title target) "detached"))))))))
+                    (or (my-read-k--alist-get 'title target) "detached")
+                    (length my-read-k--prefetch-queue)
+                    (length my-read-k--back-queue))))))))
 
 ;;;###autoload
 (defun my-read-k-show-last-error ()
@@ -459,7 +756,10 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
         (let ((inhibit-read-only t))
           (erase-buffer)
           (insert "Connecting to Kindle Web Reader…\n")
-          (set-buffer-modified-p nil)))
+          (set-buffer-modified-p nil))
+        ;; Keep the caller-provided center source immutable even if another
+        ;; reading minor mode changed `buffer-read-only' during setup.
+        (read-only-mode 1))
       (condition-case err
           (progn
             (setq frame (make-frame '((name . "my-read-k"))))

@@ -30,7 +30,12 @@ enum PageSettler {
         return changed ? .timeout : .didNotChange
     }
 
-    static func wait(client: CDPClient, before: String, options: SettleOptions) async throws -> ScreenshotImage {
+    static func wait(
+        client: CDPClient,
+        before: String,
+        crop: NormalizedCrop,
+        options: SettleOptions
+    ) async throws -> ScreenshotImage {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .milliseconds(options.timeoutMilliseconds))
         var changed = false
@@ -39,7 +44,7 @@ enum PageSettler {
         while clock.now < deadline {
             try await Task.sleep(for: .milliseconds(options.pollMilliseconds))
             let image = try ScreenshotImage(pngData: await client.captureScreenshot())
-            let fingerprint = image.fingerprint
+            let fingerprint = try image.contentFingerprint(crop: crop)
             if fingerprint != before { changed = true }
             if fingerprint == previous { run += 1 } else { previous = fingerprint; run = 1 }
             if changed && run >= options.stableSamples { return image }

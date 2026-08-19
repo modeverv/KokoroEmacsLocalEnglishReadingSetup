@@ -18,10 +18,19 @@
          (my-read-k--request-id 0)
          (my-read-k--generation 0)
          (my-read-k--busy-p nil)
+         (my-read-k--prefetch-busy-p nil)
+         (my-read-k--sync-busy-p nil)
          (my-read-k--pending-intent nil)
          (my-read-k--state 'detached)
          (my-read-k--frame nil)
-         (my-read-k--buffer nil))
+         (my-read-k--buffer nil)
+         (my-read-k--last-fingerprint nil)
+         (my-read-k--current-result nil)
+         (my-read-k--prefetch-queue nil)
+         (my-read-k--prefetch-source-fingerprint nil)
+         (my-read-k--prefetch-attempted-fingerprint nil)
+         (my-read-k--back-queue nil)
+         (my-read-k--back-source-fingerprint nil))
      ,@body))
 
 (ert-deftest my-read-k-process-filter-assembles-partial-and-multiple-lines ()
@@ -73,7 +82,17 @@
      (should buffer-read-only)
      (should (equal (buffer-string) "First sentence.\n\nSecond sentence.\n"))
      (should (equal (thing-at-point 'word t) "First"))
-     (should (equal my-read-k--last-fingerprint "abc")))))
+     (should (equal my-read-k--last-fingerprint "abc"))
+     (should (equal (my-read-k--alist-get 'text my-read-k--current-result)
+                    "First sentence.\n\nSecond sentence.")))))
+
+(ert-deftest my-read-k-mode-keeps-kindle-buffer-read-only ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (my-read-k-mode 1)
+     (should buffer-read-only)
+     (my-read-k-mode -1)
+     (should-not buffer-read-only))))
 
 (ert-deftest my-read-k-next-request-increments-generation-once ()
   (my-read-k-test--isolated
@@ -85,6 +104,197 @@
        (should (equal sent '("next" 1)))
        (should my-read-k--busy-p)
        (should (= my-read-k--generation 1))))))
+
+(ert-deftest my-read-k-prefetch-starts-immediately-and-only-once-per-source ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (insert (make-string 100 ?x))
+     (setq my-read-k--buffer (current-buffer)
+           my-read-k--state 'attached
+           my-read-k--last-fingerprint "source")
+     (goto-char 40)
+     (let (sent)
+       (cl-letf (((symbol-function 'my-read-k--send)
+                  (lambda (command params _callback generation)
+                    (setq sent (list command
+                                     (my-read-k--alist-get 'prefetchCount params)
+                                     generation)))))
+         (my-read-k--maybe-prefetch-next)
+         (should (equal sent '("prefetchNext" 2 0)))
+         (should my-read-k--prefetch-busy-p)
+         (my-read-k--maybe-prefetch-next)
+         (should (equal sent '("prefetchNext" 2 0))))))))
+
+(ert-deftest my-read-k-prefetch-response-caches-matching-source ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (setq my-read-k--buffer (current-buffer)
+           my-read-k--last-fingerprint "source"
+           my-read-k--prefetch-busy-p t
+           header-line-format " Kindle: attached")
+     (my-read-k--finish-prefetch
+      '((ok . t)
+        (result . ((prefetchSourceFingerprint . "source")
+                   (pages . (((fingerprint . "next-1") (text . "Next page 1"))
+                             ((fingerprint . "next-2") (text . "Next page 2")))))))
+      "source")
+     (should (my-read-k--prefetch-valid-p))
+     (should (= (length my-read-k--prefetch-queue) 2))
+     (should-not my-read-k--prefetch-busy-p)
+     (should (string-suffix-p "next ready: 2 | prev ready: 0"
+                             header-line-format)))))
+
+(ert-deftest my-read-k-prefetch-response-rejects-stale-source ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (setq my-read-k--buffer (current-buffer)
+           my-read-k--last-fingerprint "newer"
+           my-read-k--prefetch-busy-p t)
+     (my-read-k--finish-prefetch
+      '((ok . t)
+        (result . ((prefetchSourceFingerprint . "old")
+                   (fingerprint . "next") (text . "Old next"))))
+      "old")
+     (should-not my-read-k--prefetch-queue)
+     (should-not my-read-k--prefetch-busy-p))))
+
+(ert-deftest my-read-k-next-consumes-cache-and-advances-without-ocr ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (setq my-read-k--buffer (current-buffer)
+           my-read-k--state 'attached
+           my-read-k--last-fingerprint "source"
+           my-read-k--current-result
+           '((fingerprint . "source") (text . "Current"))
+           my-read-k--prefetch-source-fingerprint "source"
+           my-read-k--prefetch-queue
+           '(((fingerprint . "next") (text . "Cached next") (ocrMs . 7))
+             ((fingerprint . "after-next") (text . "Cached after next") (ocrMs . 8))))
+     (let (applied sent)
+       (cl-letf (((symbol-function 'my-read-k--apply-page)
+                  (lambda (result direction speak)
+                    (setq applied (list result direction speak))))
+                 ((symbol-function 'my-read-k--send)
+                  (lambda (command _params _callback generation)
+                    (setq sent (list command generation)))))
+         (my-read-k--request-page 'next nil)
+         (should (equal (cdr applied) '(next nil)))
+         (should (equal sent '("advanceNext" 1)))
+         (should my-read-k--sync-busy-p)
+         (should (= (length my-read-k--prefetch-queue) 1))
+         (should (equal (my-read-k--alist-get
+                         'fingerprint (car my-read-k--prefetch-queue))
+                        "after-next"))
+         (should (equal my-read-k--prefetch-source-fingerprint "next")))))))
+
+(ert-deftest my-read-k-next-cache-remembers-current-page-for-instant-back ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (setq my-read-k--buffer (current-buffer)
+           my-read-k--state 'attached
+           my-read-k--last-fingerprint "current"
+           my-read-k--current-result
+           '((fingerprint . "current") (text . "Current page"))
+           my-read-k--prefetch-source-fingerprint "current"
+           my-read-k--prefetch-queue
+           '(((fingerprint . "next") (text . "Next page"))))
+     (cl-letf (((symbol-function 'my-read-k--send)
+                (lambda (&rest _) nil)))
+       (my-read-k--request-page 'next)
+       (should (equal (buffer-string) "Next page\n"))
+       (should (my-read-k--history-valid-p))
+       (should (equal (my-read-k--alist-get
+                       'fingerprint (car my-read-k--back-queue))
+                      "current"))))))
+
+(ert-deftest my-read-k-prev-consumes-history-and-restores-forward-cache ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (setq my-read-k--buffer (current-buffer)
+           my-read-k--state 'attached
+           my-read-k--last-fingerprint "current"
+           my-read-k--current-result
+           '((fingerprint . "current") (text . "Current page"))
+           my-read-k--back-source-fingerprint "current"
+           my-read-k--back-queue
+           '(((fingerprint . "previous") (text . "Previous page"))))
+     (let (sent)
+       (cl-letf (((symbol-function 'my-read-k--send)
+                  (lambda (command _params _callback generation)
+                    (setq sent (list command generation)))))
+         (my-read-k--request-page 'prev)
+         (should (equal (buffer-string) "Previous page\n"))
+         (should (equal sent '("advancePrev" 1)))
+         (should my-read-k--sync-busy-p)
+         (should (my-read-k--prefetch-valid-p))
+         (should (equal (my-read-k--alist-get
+                         'fingerprint (car my-read-k--prefetch-queue))
+                        "current")))))))
+
+(ert-deftest my-read-k-prev-cache-displays-while-forward-prefetch-is-running ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (setq my-read-k--buffer (current-buffer)
+           my-read-k--state 'attached
+           my-read-k--prefetch-busy-p t
+           my-read-k--last-fingerprint "current"
+           my-read-k--current-result
+           '((fingerprint . "current") (text . "Current page"))
+           my-read-k--back-source-fingerprint "current"
+           my-read-k--back-queue
+           '(((fingerprint . "previous") (text . "Previous page"))))
+     (let (sent)
+       (cl-letf (((symbol-function 'my-read-k--send)
+                  (lambda (command _params _callback _generation)
+                    (setq sent command))))
+         (my-read-k--request-page 'prev)
+         (should (equal (buffer-string) "Previous page\n"))
+         (should (equal sent "advancePrev"))
+         (should-not my-read-k--pending-intent))))))
+
+(ert-deftest my-read-k-history-keeps-only-two-nearest-pages ()
+  (my-read-k-test--isolated
+   (let ((my-read-k-history-count 2)
+         (my-read-k--last-fingerprint "page-4"))
+     (setq my-read-k--back-queue
+           '(((fingerprint . "page-2")) ((fingerprint . "page-1"))))
+     (my-read-k--remember-transition '((fingerprint . "page-3")) 'next)
+     (should (equal (mapcar (lambda (page)
+                              (my-read-k--alist-get 'fingerprint page))
+                            my-read-k--back-queue)
+                    '("page-3" "page-2")))
+     (should (equal my-read-k--back-source-fingerprint "page-4")))))
+
+(ert-deftest my-read-k-successful-advance-refills-two-page-queue ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (setq my-read-k--buffer (current-buffer)
+           my-read-k--state 'syncing
+           my-read-k--sync-busy-p t
+           my-read-k--generation 4
+           my-read-k--last-fingerprint "current"
+           my-read-k--prefetch-queue
+           '(((fingerprint . "next") (text . "Next")))
+           my-read-k--prefetch-source-fingerprint "current")
+     (let (sent)
+       (cl-letf (((symbol-function 'my-read-k--send)
+                  (lambda (command params _callback generation)
+                    (setq sent (list command
+                                     (my-read-k--alist-get 'prefetchCount params)
+                                     generation)))))
+         (my-read-k--finish-advance
+          '((ok . t) (result . ((fingerprint . "current"))))
+          4 "current" 'next)
+         (should (equal sent '("prefetchNext" 2 4)))
+         (should my-read-k--prefetch-busy-p)
+         (should-not my-read-k--sync-busy-p))))))
+
+(ert-deftest my-read-k-boundary-waits-for-running-prefetch ()
+  (my-read-k-test--isolated
+   (setq my-read-k--prefetch-busy-p t)
+   (my-read-k--request-page 'next t)
+   (should (equal my-read-k--pending-intent '(next . t)))
+   (should-not my-read-k--busy-p)))
 
 (ert-deftest my-read-k-forward-within-buffer-reuses-existing-j ()
   (my-read-k-test--isolated
@@ -130,6 +340,85 @@
    (should (equal my-read-k--pending-intent '(next . t)))
    (my-read-k-backward)
    (should (equal my-read-k--pending-intent '(prev . t)))))
+
+(ert-deftest my-read-k-down-within-buffer-keeps-normal-line-movement ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (insert "first line\nsecond line\n")
+     (goto-char (point-min))
+     (cl-letf (((symbol-function 'my-read-k--request-page)
+                (lambda (&rest _) (ert-fail "unexpected page request"))))
+       (my-read-k-down)
+       (should (= (line-number-at-pos) 2))))))
+
+(ert-deftest my-read-k-down-at-buffer-bottom-requests-next-page ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (insert "last line")
+     (goto-char (point-max))
+     (let (request)
+       (cl-letf (((symbol-function 'my-read-k--request-page)
+                  (lambda (direction &optional speak)
+                    (setq request (list direction speak)))))
+         (my-read-k-down)
+         (should (equal request '(next nil)))
+         (should (= (point) (point-max))))))))
+
+(ert-deftest my-read-k-down-at-long-page-start-never-turns-page ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (insert (make-string 300 ?x))
+     (goto-char (point-min))
+     (cl-letf (((symbol-function 'next-line) (lambda (&rest _) nil))
+               ((symbol-function 'my-read-k--request-page)
+                (lambda (&rest _) (ert-fail "unexpected page request"))))
+       (my-read-k-down)))))
+
+(ert-deftest my-read-k-down-while-busy-queues-one-next-page ()
+  (my-read-k-test--isolated
+   (setq my-read-k--busy-p t)
+   (my-read-k-down)
+   (should (equal my-read-k--pending-intent '(next)))))
+
+(ert-deftest my-read-k-up-within-buffer-keeps-normal-line-movement ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (insert "first line\nsecond line\n")
+     (goto-char (point-min))
+     (forward-line 1)
+     (cl-letf (((symbol-function 'my-read-k--request-page)
+                (lambda (&rest _) (ert-fail "unexpected page request"))))
+       (my-read-k-up)
+       (should (= (line-number-at-pos) 1))))))
+
+(ert-deftest my-read-k-up-at-buffer-top-requests-prev-page ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (insert "first line")
+     (goto-char (point-min))
+     (let (request)
+       (cl-letf (((symbol-function 'my-read-k--request-page)
+                  (lambda (direction &optional speak)
+                    (setq request (list direction speak)))))
+         (my-read-k-up)
+         (should (equal request '(prev nil)))
+         (should (= (point) (point-min))))))))
+
+(ert-deftest my-read-k-up-at-long-page-end-never-turns-page ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (insert (make-string 300 ?x))
+     (goto-char (point-max))
+     (cl-letf (((symbol-function 'previous-line) (lambda (&rest _) nil))
+               ((symbol-function 'my-read-k--request-page)
+                (lambda (&rest _) (ert-fail "unexpected page request"))))
+       (my-read-k-up)))))
+
+(ert-deftest my-read-k-up-while-busy-queues-one-prev-page ()
+  (my-read-k-test--isolated
+   (setq my-read-k--busy-p t)
+   (my-read-k-up)
+   (should (equal my-read-k--pending-intent '(prev)))))
 
 (ert-deftest my-read-k-malformed-response-does-not-throw ()
   (my-read-k-test--isolated
@@ -189,7 +478,19 @@
   (should (eq (lookup-key english-reading-mode-map (kbd "j"))
               #'english-reading-mode-next-sentence))
   (should (eq (lookup-key english-reading-mode-map (kbd "k"))
-              #'english-reading-mode-previous-sentence)))
+              #'english-reading-mode-previous-sentence))
+  (should (eq (lookup-key my-read-k-mode-map (kbd "<down>"))
+              #'my-read-k-down))
+  (should (eq (lookup-key my-read-k-mode-map (kbd "<up>"))
+              #'my-read-k-up))
+  (should (eq (lookup-key my-read-k-mode-map (kbd "C-n"))
+              #'my-read-k-down))
+  (should (eq (lookup-key my-read-k-mode-map (kbd "C-p"))
+              #'my-read-k-up))
+  (should (eq (lookup-key my-read-k-mode-map (kbd "C-v"))
+              #'my-read-k-next-page))
+  (should (eq (lookup-key my-read-k-mode-map (kbd "M-v"))
+              #'my-read-k-prev-page)))
 
 (provide 'my-read-k-tests)
 ;;; my-read-k-tests.el ends here

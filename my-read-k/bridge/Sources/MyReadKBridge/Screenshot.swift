@@ -57,4 +57,34 @@ struct ScreenshotImage: Sendable {
     var fingerprint: String {
         SHA256.hash(data: pngData).map { String(format: "%02x", $0) }.joined()
     }
+
+    func contentFingerprint(crop: NormalizedCrop) throws -> String {
+        let content = try cropped(to: crop)
+        return try Self.pixelFingerprint(image: content)
+    }
+
+    static func pixelFingerprint(image: CGImage) throws -> String {
+        let bytesPerRow = image.width * 4
+        var pixels = Data(count: bytesPerRow * image.height)
+        let rendered = pixels.withUnsafeMutableBytes { bytes -> Bool in
+            guard let base = bytes.baseAddress,
+                  let context = CGContext(
+                    data: base,
+                    width: image.width,
+                    height: image.height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0,
+                                           width: image.width, height: image.height))
+            return true
+        }
+        guard rendered else {
+            throw BridgeFailure(code: "SCREENSHOT_FAILED", message: "Cannot render cropped screenshot pixels")
+        }
+        return SHA256.hash(data: pixels)
+            .map { String(format: "%02x", $0) }.joined()
+    }
 }

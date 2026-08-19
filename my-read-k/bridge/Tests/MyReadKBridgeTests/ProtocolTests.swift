@@ -18,4 +18,14 @@ final class ProtocolTests: XCTestCase {
                                                from: JSONEncoder().encode(response))
         XCTAssertEqual(decoded, response)
     }
+
+    func testHelloAdvertisesBothCachedNavigationDirections() async throws {
+        let response = await BridgeRuntime().handle(
+            BridgeRequest(id: 1, command: "hello", generation: 0, params: [:]))
+        guard case .array(let capabilities) = response.result?["capabilities"] else {
+            return XCTFail("hello response had no capabilities")
+        }
+        XCTAssertTrue(capabilities.contains(.string("advanceNext")))
+        XCTAssertTrue(capabilities.contains(.string("advancePrev")))
+    }
 }
