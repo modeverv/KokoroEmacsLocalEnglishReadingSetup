@@ -2,12 +2,12 @@
 
 Emacsで書籍を読みながら、ローカルKokoroによる読み上げ、ローカル翻訳、Lookup辞書、読書メモを一つの専用フレームにまとめるプロジェクトです。
 
-`my-read` は、通常のEPUB・テキストと、Kindle.appで表示中の英語本文を一つのフレームに統合します。Kindle本文はmacOS Accessibilityから現在表示中のページだけを取得します。スクリーンショット取得、OCR、Kindleファイルの復号は行いません。
+`my-read` は、通常のEPUB・テキスト、EWWで読むarXiv、Kindle.appで表示中の英語本文を一つのフレームに統合します。Kindle本文はmacOS Accessibilityから現在表示中のページだけを取得します。スクリーンショット取得、OCR、Kindleファイルの復号は行いません。
 
 専用フレームは次の4領域で構成されます。
 
 - 左: カーソル位置の単語を自動検索するLookup
-- 中央: タブで切り替えるKindle本文とEPUB・テキスト
+- 中央: タブで切り替えるKindle本文、EPUB・テキスト、EWW
 - 右上: カーソル位置、または読み上げ中の1文のローカル翻訳
 - 右下: 読書メモ
 
@@ -34,6 +34,7 @@ Emacsで書籍を読みながら、ローカルKokoroによる読み上げ、ロ
 - ローカル翻訳を使う場合はOllamaと `translategemma:4b`
 - Emacsパッケージ `google-translate` と `lookup`
 - EPUBを読む場合は `nov.el`
+- EWWでarXiv数式を画像表示する場合はTeX Liveの `latex` と `dvisvgm`
 
 Kindle.appの本文取得にはmacOSのアクセシビリティ権限が必要です。Lookup本体、辞書エージェント、EPWING辞書などは別途設定してください。
 
@@ -62,7 +63,10 @@ curl --fail http://127.0.0.1:8000/health
 (require 'my-read)
 
 (setq my/read-book-path "/path/to/books"
-      my/read-note-file "~/Documents/english-reading.org")
+      my/read-note-file "~/Documents/english-reading.org"
+      my/read-eww-url "https://arxiv.org/"
+      my/read-eww-math-enabled t
+      my/read-eww-enable-automatic-lookup nil)
 
 (setq kokoro-reader-server-directory
       (expand-file-name "~/Sync/emacs.d/reader")
@@ -109,7 +113,7 @@ make my-read-k-build
 M-x my-read
 ```
 
-中央は同じ1ペインの `Kindle` / `EPUB` タブで切り替えます。接続し直す場合はKindleタブで `r` を押します。
+中央は同じ1ペインの `Kindle` / `EPUB` / `EWW` タブで切り替えます。EWWタブでは `g` で初期URL（既定はarXiv）、`G` で任意のURLを開けます。arXiv HTMLのTeX注釈はバックグラウンドでSVGへ変換され、変換中もEmacsの操作を妨げません。SVGは式・表示形式・文字色ごとにキャッシュされ、表示倍率は既定フォントの大きさへ自動追従します。`j` / `k` の文単位読み上げと `l` / `;` のLookup項目移動もEPUB・Kindleと同様に使えます。EWWのページ読み込み中に表示される `Loading` などを同期型辞書へ送るとEmacs全体を止めることがあるため、EWWタブでは自動Lookupだけを既定で停止します。自動翻訳と通常のEWW表示は有効です。必要なら `my/read-eww-enable-automatic-lookup` を `t` にしてください。接続し直す場合はKindleタブで `r` を押します。
 
 | キー | 動作 |
 | --- | --- |
@@ -123,7 +127,7 @@ M-x my-read
 | `C-c g` | 現在ページを再取得 |
 | `C-c C-k` | 合成または再生を停止 |
 | `l` / `;` | Lookupの次／前の項目 |
-| `C-c t` | Kindle／EPUBタブを切り替える |
+| `C-c t` | Kindle／EPUB／EWWタブを順に切り替える |
 | `r` | Kindle.appへ再接続 |
 
 ## Google翻訳とローカル翻訳

@@ -235,7 +235,7 @@ leave point at the current sentence and report that there is nowhere to go."
 
 ;;;###autoload
 (define-minor-mode english-reading-mode
-  "Read English EPUB text one sentence at a time with local Kokoro.
+  "Read English EPUB or EWW text one sentence at a time with local Kokoro.
 
 `j' reads the sentence at point and immediately advances point to the next
 sentence.  `k' moves back and reads the previous sentence.  `p' reads the
@@ -247,9 +247,9 @@ is exposed through `english-reading-mode-speech-start-hook' and
   (if english-reading-mode
       (progn
         (english-reading-mode--enable-single-space-sentences)
-        (unless (or (derived-mode-p 'nov-mode)
+        (unless (or (derived-mode-p 'nov-mode 'eww-mode)
                     (bound-and-true-p my-read-k-mode))
-          (message "english-reading-mode is designed for nov.el/EPUB buffers")))
+          (message "english-reading-mode is designed for EPUB/EWW buffers")))
     (english-reading-mode--restore-sentence-setting)
     (english-reading-mode-stop)))
 

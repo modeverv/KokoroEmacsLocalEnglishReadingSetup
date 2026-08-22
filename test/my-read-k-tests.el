@@ -14,6 +14,7 @@
 (defvar google-translate-default-source-language "en")
 
 (require 'my-read-k)
+(require 'my-read-eww-math)
 
 (defmacro my-read-k-test--isolated (&rest body)
   `(let ((my-read-k--process nil)
@@ -778,6 +779,96 @@
       (kill-buffer kindle-buffer)
       (kill-buffer epub-buffer))))
 
+(ert-deftest my-read-eww-math-extracts-arxiv-tex-annotation ()
+  (let ((dom
+         '(math ((display . "block"))
+                (semantics nil
+                           (mrow nil (mi nil "x"))
+                           (annotation ((encoding . "application/x-tex"))
+                                       " \\frac{x}{2} ")))))
+    (should (equal (my/read-eww-math--tex dom) "\\frac{x}{2}"))
+    (should (my/read-eww-math--display-p dom))))
+
+(ert-deftest my-read-eww-math-rejects-dangerous-tex ()
+  (should (my/read-eww-math--safe-tex-p "\\frac{x}{2}"))
+  (should-not (my/read-eww-math--safe-tex-p "\\input{/etc/passwd}"))
+  (should-not (my/read-eww-math--safe-tex-p "\\csname input\\endcsname"))
+  (let ((my/read-eww-math-max-tex-length 3))
+    (should-not (my/read-eww-math--safe-tex-p "1234"))))
+
+(ert-deftest my-read-eww-math-queues-trusted-formula-with-text-fallback ()
+  (with-temp-buffer
+    (eww-mode)
+    (setq-local eww-data '(:url "https://arxiv.org/html/test"))
+    (setq-local my/read-eww-math--generation 7)
+    (let ((inhibit-read-only t))
+      (my/read-eww-math-render
+       '(math nil
+              (semantics nil
+                         (mi nil "x")
+                         (annotation ((encoding . "application/x-tex"))
+                                     "x^2")))))
+    (should (equal (buffer-string) "x^2"))
+    (should (= (length my/read-eww-math--queue) 1))
+    (should (= (plist-get (car my/read-eww-math--queue) :generation) 7))
+    (should (equal (my/read-eww-math--job-region
+                    (car my/read-eww-math--queue))
+                   '(1 . 4)))))
+
+(ert-deftest my-read-eww-math-keeps-untrusted-page-as-text ()
+  (with-temp-buffer
+    (eww-mode)
+    (setq-local eww-data '(:url "https://example.com/paper"))
+    (let ((inhibit-read-only t))
+      (my/read-eww-math-render
+       '(math nil
+              (semantics nil
+                         (mi nil "x")
+                         (annotation ((encoding . "application/x-tex"))
+                                     "x^2")))))
+    (should (equal (buffer-string) "x^2"))
+    (should-not my/read-eww-math--queue)))
+
+(ert-deftest my-read-eww-math-keeps-queue-through-shr-layout-pass ()
+  (with-temp-buffer
+    (eww-mode)
+    (setq-local eww-data '(:url "https://arxiv.org/html/test"))
+    (my/read-eww-math-setup)
+    (eww-display-document
+     '(base ((href . "https://arxiv.org/html/test"))
+            (html nil
+                  (body nil
+                        (p nil "A paragraph before the formula.")
+                        (table nil
+                               (tbody nil
+                                      (tr nil
+                                          (td nil
+                                              (math nil
+                                                    (semantics nil
+                                                     (mi nil "x")
+                                                     (annotation
+                                                      ((encoding . "application/x-tex"))
+                                                      "x^2"))))))))))
+     nil (current-buffer))
+    (let ((valid-job (seq-find #'my/read-eww-math--job-valid-p
+                               my/read-eww-math--queue)))
+      (should valid-job)
+      (should (equal (plist-get valid-job :tex) "x^2")))))
+
+(ert-deftest my-read-eww-math-embeds-dark-theme-foreground-in-svg ()
+  (let ((svg-file (make-temp-file "my-read-eww-math-test-" nil ".svg")))
+    (unwind-protect
+        (progn
+          (with-temp-file svg-file
+            (insert "<svg xmlns='http://www.w3.org/2000/svg'>"
+                    "<path fill='currentColor'/></svg>"))
+          (my/read-eww-math--set-svg-foreground svg-file "00FF00")
+          (with-temp-buffer
+            (insert-file-contents svg-file)
+            (should (search-forward "<svg color='#00FF00'" nil t))
+            (should (search-forward "fill='currentColor'" nil t))))
+      (delete-file svg-file))))
+
 (ert-deftest my-read-unified-layout-has-one-tabbed-center-pane ()
   (save-window-excursion
     (let* ((frame (selected-frame))
@@ -800,32 +891,58 @@
             (set-frame-parameter frame 'my-reading-frame t)
             (my/read--setup-frame frame kindle-buffer)
             (let ((kindle-window (my/read-kindle-window frame))
-                  (epub-window (my/read-epub-window frame)))
+                  (epub-window (my/read-epub-window frame))
+                  (eww-window (my/read-eww-window frame))
+                  (eww-buffer (frame-parameter frame 'my-reading-eww-buffer)))
               (should (window-live-p kindle-window))
               (should (window-live-p epub-window))
+              (should (window-live-p eww-window))
               (should (eq kindle-window epub-window))
+              (should (eq epub-window eww-window))
               (should (= (length (my/read-center-windows frame)) 1))
               (should (eq (window-buffer kindle-window) kindle-buffer))
               (with-current-buffer kindle-buffer
                 (should my-read-center-tab-mode)
                 (should (equal (my/read-center-tab-buffers)
-                               (list kindle-buffer epub-buffer))))
+                               (list kindle-buffer epub-buffer eww-buffer))))
+              (with-current-buffer eww-buffer
+                (should (equal (plist-get eww-data :url) my/read-eww-url))
+                (should (eq (cdr (assq 'math
+                                       shr-external-rendering-functions))
+                            #'my/read-eww-math-render))
+                (should english-reading-mode)
+                (should (eq (key-binding (kbd "j"))
+                            #'english-reading-mode-next-sentence))
+                (should (eq (key-binding (kbd "k"))
+                            #'english-reading-mode-previous-sentence))
+                (should (eq (key-binding (kbd "l"))
+                            #'my/read-lookup-next-entry))
+                (should (eq (key-binding (kbd ";"))
+                            #'my/read-lookup-previous-entry)))
               (my/read-toggle-center-tab)
               (should (eq (window-buffer epub-window) epub-buffer))
+              (my/read-toggle-center-tab)
+              (should (eq (window-buffer eww-window) eww-buffer))
+              (should-not (my/read--center-automatic-lookup-p eww-window))
+              (let ((my/read-eww-enable-automatic-lookup t))
+                (should (my/read--center-automatic-lookup-p eww-window)))
               (my/read-toggle-center-tab)
               (should (eq (window-buffer kindle-window) kindle-buffer))))
         (dolist (parameter '(my-reading-frame my-reading-center-window
                              my-reading-center-windows my-reading-kindle-window
-                             my-reading-epub-window my-reading-kindle-buffer
-                             my-reading-epub-buffer my-reading-lookup-window
-                             my-reading-translate-window my-reading-note-window))
+                             my-reading-epub-window my-reading-eww-window
+                             my-reading-kindle-buffer my-reading-epub-buffer
+                             my-reading-lookup-window my-reading-translate-window
+                             my-reading-note-window))
           (set-frame-parameter frame parameter nil))
         (dolist (buffer (list kindle-buffer epub-buffer note-buffer
+                              (frame-parameter frame 'my-reading-eww-buffer)
                               (frame-parameter frame 'my-reading-translate-buffer)
                               (frame-parameter frame 'my-reading-lookup-ready-buffer)))
           (when (buffer-live-p buffer) (kill-buffer buffer)))
         (set-frame-parameter frame 'my-reading-translate-buffer nil)
-        (set-frame-parameter frame 'my-reading-lookup-ready-buffer nil)))))
+        (set-frame-parameter frame 'my-reading-lookup-ready-buffer nil)
+        (set-frame-parameter frame 'my-reading-eww-buffer nil)))))
 
 (ert-deftest my-read-k-r-restarts-the-connection ()
   (let ((my-read-k--reconnect-function

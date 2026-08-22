@@ -2,7 +2,7 @@
 
 ;; English reading workspace:
 ;;   left   : Lookup
-;;   center : Kindle.app and EPUB / normal book tabs
+;;   center : Kindle.app, EPUB / normal book, and EWW tabs
 ;;   right top    : local translation with Google fallback
 ;;   right bottom : reading notes
 ;;
@@ -42,6 +42,21 @@
 (defcustom my/read-frame-name "my-read"
   "Base name of a frame created by `my-read'."
   :type 'string
+  :group 'my-read)
+
+(defcustom my/read-eww-url "https://arxiv.org/"
+  "Initial URL offered by the EWW center tab."
+  :type 'string
+  :group 'my-read)
+
+(defcustom my/read-eww-enable-automatic-lookup nil
+  "When non-nil, run automatic Lookup in the EWW center tab.
+
+This is disabled by default because EWW briefly exposes status words such as
+\"Loading\" while navigating.  Sending those transient words to a synchronous
+Lookup dictionary process can block Emacs even though EWW itself is responsive.
+Automatic translation remains enabled in EWW."
+  :type 'boolean
   :group 'my-read)
 
 (defcustom my/read-translate-idle-delay 0.1
@@ -175,7 +190,7 @@ translation remains pinned to CONTEXT's :text until the matching finish event.")
 
 (defun my/read-center-window (&optional frame)
   "Return the active center reading window in FRAME.
-The Kindle and EPUB sources share this one window and switch as tabs."
+The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
   (let* ((frame (or frame (selected-frame)))
          (windows (my/read-center-windows frame))
          (selected (and (eq frame (selected-frame)) (selected-window))))
@@ -198,6 +213,10 @@ The Kindle and EPUB sources share this one window and switch as tabs."
   "Return FRAME's center window hosting the EPUB/normal-book tab."
   (my/read-window 'my-reading-epub-window frame))
 
+(defun my/read-eww-window (&optional frame)
+  "Return FRAME's center window hosting the EWW tab."
+  (my/read-window 'my-reading-eww-window frame))
+
 (defun my/read-translate-window (&optional frame)
   "Return FRAME's Google Translate window."
   (my/read-window 'my-reading-translate-window frame))
@@ -207,14 +226,16 @@ The Kindle and EPUB sources share this one window and switch as tabs."
   (my/read-window 'my-reading-note-window frame))
 
 (defun my/read-center-tab-buffers ()
-  "Return the Kindle and EPUB buffers belonging to the current center tab."
+  "Return the Kindle, EPUB, and EWW buffers in the current center pane."
   (let ((frame my/read-center-tab-frame))
     (when (frame-live-p frame)
       (delq nil
             (mapcar (lambda (parameter)
                       (let ((buffer (frame-parameter frame parameter)))
                         (and (buffer-live-p buffer) buffer)))
-                    '(my-reading-kindle-buffer my-reading-epub-buffer))))))
+                    '(my-reading-kindle-buffer
+                      my-reading-epub-buffer
+                      my-reading-eww-buffer))))))
 
 (defun my/read-center-tab-name (buffer &optional _buffers)
   "Return a compact tab label for center reading BUFFER."
@@ -226,16 +247,26 @@ The Kindle and EPUB sources share this one window and switch as tabs."
      ((and (frame-live-p frame)
            (eq buffer (frame-parameter frame 'my-reading-epub-buffer)))
       " EPUB ")
+     ((and (frame-live-p frame)
+           (eq buffer (frame-parameter frame 'my-reading-eww-buffer)))
+      " EWW ")
      (t (format " %s " (buffer-name buffer))))))
+
+(defun my/read--center-automatic-lookup-p (window)
+  "Return non-nil when automatic Lookup should run for WINDOW."
+  (and (window-live-p window)
+       (with-current-buffer (window-buffer window)
+         (or (not (derived-mode-p 'eww-mode))
+             my/read-eww-enable-automatic-lookup))))
 
 (defvar my-read-center-tab-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c t") #'my/read-toggle-center-tab)
     map)
-  "Keymap active in the Kindle and EPUB center tabs.")
+  "Keymap active in the Kindle, EPUB, and EWW center tabs.")
 
 (define-minor-mode my-read-center-tab-mode
-  "Display the two my-read center sources as a dedicated tab line."
+  "Display the my-read center sources as a dedicated tab line."
   :init-value nil
   :lighter nil
   :keymap my-read-center-tab-mode-map
@@ -243,7 +274,7 @@ The Kindle and EPUB sources share this one window and switch as tabs."
     (tab-line-mode (if my-read-center-tab-mode 1 -1))))
 
 (defun my/read--configure-center-tab-buffer (buffer frame)
-  "Configure BUFFER as one of FRAME's two center reading tabs."
+  "Configure BUFFER as one of FRAME's center reading tabs."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq-local my/read-center-tab-frame frame)
@@ -254,7 +285,7 @@ The Kindle and EPUB sources share this one window and switch as tabs."
       (my-read-center-tab-mode 1))))
 
 (defun my/read-toggle-center-tab ()
-  "Toggle FRAME's sole center window between Kindle and EPUB tabs."
+  "Cycle FRAME's center window through its Kindle, EPUB, and EWW tabs."
   (interactive)
   (let* ((frame (or my/read-center-tab-frame (selected-frame)))
          (window (my/read-center-window frame))
@@ -262,22 +293,36 @@ The Kindle and EPUB sources share this one window and switch as tabs."
                     (with-current-buffer (window-buffer window)
                       (my/read-center-tab-buffers))))
          (current (and (window-live-p window) (window-buffer window)))
-         (target (cl-find-if (lambda (buffer) (not (eq buffer current))) tabs)))
-    (unless target
-      (user-error "切り替えられるKindle／EPUBタブがありません"))
+         (target (and (> (length tabs) 1)
+                      (or (cadr (memq current tabs)) (car tabs)))))
+    (unless (and target (not (eq target current)))
+      (user-error "切り替えられる読書タブがありません"))
     (set-window-buffer window target)
     (select-window window)
-    (my/read-lookup-follow-post-command)
+    (if (my/read--center-automatic-lookup-p window)
+        (my/read-lookup-follow-post-command)
+      ;; Do not let a Lookup queued by the previous EPUB/Kindle tab run after
+      ;; the window has switched to EWW.
+      (when (timerp my/read-lookup-timer)
+        (cancel-timer my/read-lookup-timer))
+      (setq my/read-lookup-timer nil
+            my/read-lookup-last-target nil))
     (my/read-translate-follow-post-command)))
 
 (defun my/read--track-center-tab-buffer (frame)
-  "Remember a newly displayed non-Kindle center buffer in FRAME as EPUB."
+  "Remember a newly displayed center buffer in FRAME by source type."
   (when (and (frame-live-p frame) (my/read-frame-p frame))
     (when-let ((window (my/read-center-window frame)))
-      (let ((buffer (window-buffer window))
-            (kindle (frame-parameter frame 'my-reading-kindle-buffer)))
-        (unless (eq buffer kindle)
-          (set-frame-parameter frame 'my-reading-epub-buffer buffer)
+      (let* ((buffer (window-buffer window))
+             (kindle (frame-parameter frame 'my-reading-kindle-buffer))
+             (parameter
+              (unless (eq buffer kindle)
+                (with-current-buffer buffer
+                  (if (derived-mode-p 'eww-mode)
+                      'my-reading-eww-buffer
+                    'my-reading-epub-buffer)))))
+        (when parameter
+          (set-frame-parameter frame parameter buffer)
           (my/read--configure-center-tab-buffer buffer frame))))))
 
 (add-hook 'window-buffer-change-functions #'my/read--track-center-tab-buffer)
@@ -454,6 +499,7 @@ for automatic searches performed by my-read.  It never creates another pane."
              (frame-live-p frame)
              (my/read-frame-p frame)
              (window-live-p center)
+             (my/read--center-automatic-lookup-p center)
              (equal target my/read-lookup-last-target))
     (let ((word (caddr target)))
       (when (and word
@@ -501,6 +547,7 @@ for automatic searches performed by my-read.  It never creates another pane."
       (when (and (my/read-frame-p frame)
                  (window-live-p center)
                  (eq (selected-window) center)
+                 (my/read--center-automatic-lookup-p center)
                  (not my/read-lookup-running-p))
         (let* ((word (my/read-word-at-window center))
                (target (and word
@@ -1086,9 +1133,36 @@ Otherwise, translate the sentence containing point."
         (special-mode)))
     buffer))
 
+(defun my/read--prepare-eww-buffer (frame)
+  "Create and return FRAME's EWW center-tab buffer."
+  (require 'eww)
+  (let ((buffer (frame-parameter frame 'my-reading-eww-buffer)))
+    (unless (buffer-live-p buffer)
+      (setq buffer (generate-new-buffer "*my-read EWW*"))
+      (set-frame-parameter frame 'my-reading-eww-buffer buffer))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'eww-mode)
+        (eww-mode))
+      (require 'my-read-eww-math)
+      (my/read-eww-math-setup)
+      ;; Reuse the EPUB/Kindle reading controls in rendered web papers.
+      ;; `eww-setup-buffer' does not re-run `eww-mode' on navigation, so this
+      ;; minor mode and its j/k/l/; bindings remain active after page loads.
+      (english-reading-mode 1)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize "EWW / arXiv\n\n" 'face 'font-lock-keyword-face))
+        (insert (format "g: %s を開く\nG: URLを入力"
+                        my/read-eww-url)))
+      ;; Make the normal EWW reload command (`g') open the initial URL from
+      ;; this landing buffer.  EWW stores its URL in `eww-data', not in a
+      ;; separate `eww-current-url' variable.
+      (plist-put eww-data :url my/read-eww-url))
+    buffer))
+
 (defun my/read--setup-frame (frame &optional kindle-buffer)
   "Build the my-read layout inside FRAME.
-When KINDLE-BUFFER is live, expose it and the EPUB source as center tabs."
+When KINDLE-BUFFER is live, expose it, EPUB, and EWW as center tabs."
   (with-selected-frame frame
     (delete-other-windows)
 
@@ -1098,6 +1172,7 @@ When KINDLE-BUFFER is live, expose it and the EPUB source as center tabs."
             (split-window-right
              (floor (/ (window-total-width lookup-window) 3))))
            epub-buffer
+           eww-buffer
            right-window
            translate-window
            note-window)
@@ -1120,6 +1195,7 @@ When KINDLE-BUFFER is live, expose it and the EPUB source as center tabs."
       (set-frame-parameter frame 'my-reading-kindle-window
                            (and (buffer-live-p kindle-buffer) center-window))
       (set-frame-parameter frame 'my-reading-epub-window center-window)
+      (set-frame-parameter frame 'my-reading-eww-window center-window)
       (set-frame-parameter frame 'my-reading-center-windows (list center-window))
       (set-frame-parameter frame 'my-reading-kindle-buffer kindle-buffer)
       (set-frame-parameter frame 'my-reading-translate-window translate-window)
@@ -1154,6 +1230,11 @@ When KINDLE-BUFFER is live, expose it and the EPUB source as center tabs."
       (set-frame-parameter frame 'my-reading-epub-buffer epub-buffer)
       (my/read--configure-center-tab-buffer epub-buffer frame)
 
+      ;; Keep an EWW buffer ready for arXiv without fetching the network until
+      ;; the user opens the tab and presses `G'.
+      (setq eww-buffer (my/read--prepare-eww-buffer frame))
+      (my/read--configure-center-tab-buffer eww-buffer frame)
+
       ;; Kindle is the initially selected center tab when it is available.
       (when (buffer-live-p kindle-buffer)
         (my/read--configure-center-tab-buffer kindle-buffer frame)
@@ -1182,7 +1263,7 @@ When KINDLE-BUFFER is live, expose it and the EPUB source as center tabs."
 
 ;;;###autoload
 (defun my-read ()
-  "Open the unified Kindle.app and EPUB reading workspace."
+  "Open the unified Kindle.app, EPUB, and EWW reading workspace."
   (interactive)
   ;; Load lazily to avoid a load-time cycle: my-read-k2 requires my-read via
   ;; the shared my-read-k UI implementation.
