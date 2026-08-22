@@ -39,15 +39,10 @@
          (my-read-k--back-source-fingerprint nil))
      ,@body))
 
-(ert-deftest my-read-k-detects-japanese-result-and-falls-back-for-old-bridge ()
-  (should (equal (my-read-k--language-from-result
-                  '((language . "ja") (text . "Japanese may be mixed in.")))
-                 "ja"))
-  (should (equal (my-read-k--language-from-result
-                  '((text . "これは日本語の文章です。")))
-                 "ja"))
-  (should (equal (my-read-k--language-from-result
-                  '((text . "This is an English sentence.")))
+(ert-deftest my-read-k-uses-reported-language-and-defaults-to-english ()
+  (should (equal (my-read-k--language-from-result '((language . "en-US")))
+                 "en"))
+  (should (equal (my-read-k--language-from-result '((text . "English.")))
                  "en")))
 
 (ert-deftest my-read-k-japanese-sentence-boundaries-work-one-at-a-time ()
@@ -59,61 +54,6 @@
                     (car (bounds-of-thing-at-point 'sentence))
                     (cdr (bounds-of-thing-at-point 'sentence)))
                    "これは最初の文です。"))))
-
-(ert-deftest my-read-k-japanese-page-switches-buffer-local-kokoro-settings ()
-  (my-read-k-test--isolated
-   (let ((my-read-k--buffer (generate-new-buffer " *my-read-k-language-test*"))
-         (my-read-k--frame (selected-frame))
-         (kokoro-reader-voice "bf_emma")
-         (kokoro-reader-lang-code "b")
-         (my-read-k-japanese-kokoro-voice "jf_nezumi"))
-     (unwind-protect
-         (progn
-           (my-read-k--configure-buffer-language
-            '((language . "ja") (text . "日本語です。")))
-           (with-current-buffer my-read-k--buffer
-             (should (local-variable-p 'kokoro-reader-voice))
-             (should (equal kokoro-reader-voice "jf_nezumi"))
-             (should (equal kokoro-reader-lang-code "j")))
-           (should (equal (frame-parameter my-read-k--frame
-                                           'my-reading-source-language)
-                          "ja"))
-           (my-read-k--configure-buffer-language
-            '((language . "en") (text . "English.")))
-           (with-current-buffer my-read-k--buffer
-             (should-not (local-variable-p 'kokoro-reader-voice))
-             (should-not (local-variable-p 'kokoro-reader-lang-code))))
-       (set-frame-parameter my-read-k--frame 'my-reading-source-language nil)
-       (kill-buffer my-read-k--buffer)))))
-
-(ert-deftest my-read-k-kokoro-profile-switches-spanish-voice ()
-  (my-read-k-test--isolated
-   (let ((my-read-k--buffer (generate-new-buffer " *my-read-k-spanish-test*"))
-         (my-read-k--frame (selected-frame)))
-     (unwind-protect
-         (progn
-           (my-read-k--configure-buffer-language
-            '((language . "es") (text . "Esta es una frase.")))
-           (with-current-buffer my-read-k--buffer
-             (should (eq kokoro-reader-backend 'kokoro))
-             (should (equal kokoro-reader-lang-code "e"))
-             (should (equal kokoro-reader-voice "ef_dora"))))
-       (set-frame-parameter my-read-k--frame 'my-reading-source-language nil)
-       (kill-buffer my-read-k--buffer)))))
-
-(ert-deftest my-read-k-unsupported-kokoro-language-uses-macos-voice ()
-  (my-read-k-test--isolated
-   (let ((my-read-k--buffer (generate-new-buffer " *my-read-k-german-test*"))
-         (my-read-k--frame (selected-frame)))
-     (unwind-protect
-         (progn
-           (my-read-k--configure-buffer-language
-            '((language . "de") (text . "Dies ist ein Satz.")))
-           (with-current-buffer my-read-k--buffer
-             (should (eq kokoro-reader-backend 'macos))
-             (should (equal kokoro-reader-macos-voice "Anna"))))
-       (set-frame-parameter my-read-k--frame 'my-reading-source-language nil)
-       (kill-buffer my-read-k--buffer)))))
 
 (ert-deftest my-read-japanese-source-translates-to-english ()
   (let ((frame (selected-frame))
@@ -322,35 +262,7 @@
       (should (eq (plist-get attributes attribute) 'unspecified)))
     (should (equal (plist-get attributes :background) "#123456"))))
 
-(ert-deftest my-read-records-translations-per-book-without-duplicates ()
-  (my-read-k-test--isolated
-   (let* ((frame (selected-frame))
-          (root (make-temp-file "my-read-translation-log-" t))
-          (my/read-translation-log-root root)
-          (my/read-translation-log-enabled t)
-          (my/read-translation-recorded-ids (make-hash-table :test #'equal)))
-     (set-frame-parameter frame 'my-reading-book-name "Book / One")
-     (unwind-protect
-         (let ((file (my/read-record-translation
-                      frame "An original sentence." "翻訳文です。" 'sentence)))
-           (my/read-record-translation
-            frame "An original sentence." "翻訳文です。" 'sentence)
-           (should (equal file
-                          (expand-file-name
-                           "Book - One/google-translate.md" root)))
-           (should (file-readable-p file))
-           (with-temp-buffer
-             (insert-file-contents file)
-             (should (search-forward "# Google Translate — Book / One" nil t))
-             (should (search-forward "> An original sentence." nil t))
-             (should (search-forward "> 翻訳文です。" nil t))
-             (goto-char (point-min))
-             (should (= (how-many "google-translate-id:" (point-min) (point-max))
-                        1))))
-       (set-frame-parameter frame 'my-reading-book-name nil)
-       (delete-directory root t)))))
-
-(ert-deftest my-read-k-uses-title-or-asin-for-translation-directory ()
+(ert-deftest my-read-k-uses-title-or-asin-for-target-identifier ()
   (should (equal (my-read-k--target-book-name
                   "A Real Book Title"
                   "https://read.amazon.co.jp/?asin=B012345678")
@@ -424,7 +336,7 @@
      (should-not my-read-k--prefetch-queue)
      (should-not my-read-k--prefetch-busy-p))))
 
-(ert-deftest my-read-k-next-consumes-cache-and-advances-without-ocr ()
+(ert-deftest my-read-k-next-consumes-cache-and-advances-app ()
   (my-read-k-test--isolated
    (with-temp-buffer
      (setq my-read-k--buffer (current-buffer)
@@ -723,7 +635,7 @@
                                 'next nil)
          (should (= follow-count 1)))))))
 
-(ert-deftest my-read-k-background-ocr-does-not-steal-epub-tab ()
+(ert-deftest my-read-k-background-page-update-does-not-steal-epub-tab ()
   (my-read-k-test--isolated
    (save-window-excursion
      (let* ((frame (selected-frame))
@@ -874,36 +786,9 @@
         (set-frame-parameter frame 'my-reading-lookup-ready-buffer nil)))))
 
 (ert-deftest my-read-k-r-restarts-the-connection ()
-  (let (calls)
-    (cl-letf (((symbol-function 'my-read-k-detach)
-               (lambda () (push 'detach calls)))
-              ((symbol-function 'my-read-k--show-connection-status)
-               (lambda (&rest _) (push 'status calls)))
-              ((symbol-function 'my-read-k-attach)
-               (lambda () (push 'attach calls))))
-      (my-read-k-reconnect)
-      (should (equal (nreverse calls) '(detach status attach))))))
-
-(ert-deftest my-read-k-attach-error-shows-r-reconnect-hint ()
-  (my-read-k-test--isolated
-   (let ((my-read-k--buffer (generate-new-buffer " *my-read-k-connect-error*")))
-     (unwind-protect
-         (progn
-           (with-current-buffer my-read-k--buffer
-             (insert "Connecting…")
-             (read-only-mode 1))
-           (cl-letf (((symbol-function 'my-read-k--send)
-                      (lambda (_command _params callback &optional _generation)
-                        (funcall callback
-                                 '((ok . nil)
-                                   (error . ((code . "CDP_UNAVAILABLE")
-                                             (message . "Chrome unavailable"))))))))
-             (my-read-k-attach))
-           (with-current-buffer my-read-k--buffer
-             (should (string-match-p "press r to reconnect"
-                                     (format "%s" header-line-format)))
-             (should (string-match-p "r を押す" (buffer-string)))))
-       (kill-buffer my-read-k--buffer)))))
+  (let ((my-read-k--reconnect-function
+         (lambda () (interactive) 'reconnected)))
+    (should (eq (call-interactively #'my-read-k-reconnect) 'reconnected))))
 
 (ert-deftest my-read-lookup-entry-keys-dispatch-in-left-pane-and-restore-center ()
   (my-read-k-test--isolated

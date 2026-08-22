@@ -52,18 +52,8 @@ final class BridgeRuntime {
     private func pageResult(_ page: KindlePage) -> [String: JSONValue] {
         [
             "fingerprint": .string(page.fingerprint),
-            "imageWidth": .number(0),
-            "imageHeight": .number(0),
-            "ocrMs": .number(0),
-            "ocrEngine": .string("Kindle Accessibility"),
             "language": .string("en"),
-            "layout": .string("horizontal"),
-            "text": .string(page.text),
-            "lines": .array([
-                .object(["text": .string(page.text),
-                         "confidence": .number(1),
-                         "bbox": .array([])])
-            ])
+            "text": .string(page.text)
         ]
     }
 

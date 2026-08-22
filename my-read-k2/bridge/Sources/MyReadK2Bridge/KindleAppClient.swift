@@ -131,14 +131,28 @@ final class KindleAppClient {
             message: "Kindle.app did not change pages after the arrow-key event.")
     }
 
-    private func findPageElement(in element: AXUIElement, depth: Int) -> AXUIElement? {
+    private func findPageElement(in element: AXUIElement, depth: Int,
+                                 insideReaderView: Bool = false) -> AXUIElement? {
         guard depth <= 10 else { return nil }
-        if let identifier = stringAttribute(kAXIdentifierAttribute, of: element),
-           identifier.hasPrefix("pageDetails:") {
+        let identifier = stringAttribute(kAXIdentifierAttribute, of: element) ?? ""
+        if identifier.hasPrefix("pageDetails:") {
+            return element
+        }
+
+        // Older Kindle releases exposed the page itself with a pageDetails:
+        // identifier.  Current releases expose an unlabelled AXGenericElement
+        // containing the text below a group identified as ReaderView.
+        let isInsideReaderView = insideReaderView || identifier == "ReaderView"
+        if isInsideReaderView,
+           let value = stringAttribute(kAXValueAttribute, of: element),
+           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return element
         }
         for child in elementsAttribute(kAXChildrenAttribute, of: element) {
-            if let found = findPageElement(in: child, depth: depth + 1) { return found }
+            if let found = findPageElement(in: child, depth: depth + 1,
+                                           insideReaderView: isInsideReaderView) {
+                return found
+            }
         }
         return nil
     }

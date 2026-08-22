@@ -1,8 +1,8 @@
 ;;; my-read-k2.el --- Kindle.app source for my-read -*- lexical-binding: t; -*-
 
 ;; This backend reuses the reader UI, page caches, speech, and translation
-;; integration from `my-read-k.el'.  Its bridge reads Kindle.app's native
-;; accessibility page text, so English books do not need screenshot OCR.
+;; integration from `my-read-k.el'.  Its bridge reads only Kindle.app's native
+;; accessibility page text.
 
 (require 'my-read-k)
 
@@ -23,9 +23,6 @@
   :type 'string
   :group 'my-read-k2)
 
-(defvar my-read-k2--active-p nil)
-(defvar my-read-k2--saved-language :unset)
-
 (defun my-read-k2--bridge-command ()
   "Return the command used to launch the Kindle.app bridge."
   (let* ((package (expand-file-name "my-read-k2/bridge" my-read-k2--root))
@@ -36,44 +33,25 @@
       (list "swift" "run" "--package-path" package
             "--configuration" "release" "my-read-k2-bridge"))))
 
-(defun my-read-k2--activate-backend ()
-  "Select the Kindle.app bridge for the shared Kindle reader session."
-  (unless my-read-k2--active-p
-    (when (process-live-p my-read-k--process)
-      (my-read-k-detach))
-    (setq my-read-k2--saved-language my-read-k-language
-          my-read-k2--active-p t))
-  (setq my-read-k-language "en-US"))
-
-(defun my-read-k2--bridge-command-advice (original &rest arguments)
-  "Use the native bridge while active; otherwise call ORIGINAL with ARGUMENTS."
-  (if my-read-k2--active-p
-      (my-read-k2--bridge-command)
-    (apply original arguments)))
-
-(defun my-read-k2--reconnect-advice (original &rest arguments)
-  "Reconnect the active backend, or call ORIGINAL with ARGUMENTS."
-  (if my-read-k2--active-p
-      (my-read-k2-reconnect)
-    (apply original arguments)))
-
-(defun my-read-k2--after-detach (&rest _arguments)
-  "Forget native-backend selection after the shared bridge stops."
-  (when my-read-k2--active-p
-    (unless (eq my-read-k2--saved-language :unset)
-      (setq my-read-k-language my-read-k2--saved-language))
-    (setq my-read-k2--saved-language :unset
-          my-read-k2--active-p nil)))
-
-(advice-add 'my-read-k--bridge-command :around #'my-read-k2--bridge-command-advice)
-(advice-add 'my-read-k-reconnect :around #'my-read-k2--reconnect-advice)
-(advice-add 'my-read-k-detach :after #'my-read-k2--after-detach)
+(defun my-read-k2--connection-error-message (response)
+  "Return an actionable Japanese connection error for bridge RESPONSE."
+  (let* ((error (my-read-k--alist-get 'error response))
+         (code (my-read-k--alist-get 'code error))
+         (detail (my-read-k--alist-get 'message error)))
+    (pcase code
+      ("NO_KINDLE_APP"
+       "Kindle.appが起動していません。本を開いてから r で再接続してください。")
+      ("ACCESSIBILITY_PERMISSION_REQUIRED"
+       "EmacsにmacOSのアクセシビリティ権限を許可してから r で再接続してください。")
+      ("NO_PAGE_TEXT"
+       "Kindle.appの本文を取得できません。本を開いて本文ページを表示してから r で再接続してください。")
+      (_ (format "Kindle.appに接続できません: %s"
+                 (or detail code "不明なエラー"))))))
 
 ;;;###autoload
 (defun my-read-k2-attach ()
   "Attach the shared reader UI to the English book open in Kindle.app."
   (interactive)
-  (my-read-k2--activate-backend)
   (my-read-k--clear-navigation-caches)
   (setq my-read-k--prefetch-busy-p nil
         my-read-k--sync-busy-p nil
@@ -84,7 +62,7 @@
    (lambda (response)
      (if (my-read-k--response-error response)
          (my-read-k--show-connection-status
-          "Kindle.appに接続できません。macOSのアクセシビリティ権限を確認してください。" t)
+          (my-read-k2--connection-error-message response) t)
        (my-read-k--remember-target (my-read-k--alist-get 'result response))
        (setq my-read-k--state 'attached)
        (my-read-k-refresh)))))
@@ -96,6 +74,9 @@
   (my-read-k-detach)
   (my-read-k--show-connection-status "Kindle.appへ再接続しています。")
   (my-read-k2-attach))
+
+(setq my-read-k--bridge-command-function #'my-read-k2--bridge-command
+      my-read-k--reconnect-function #'my-read-k2-reconnect)
 
 (defun my-read-k2--prepare-buffer ()
   "Prepare the shared Kindle reader buffer for Kindle.app."
@@ -111,7 +92,6 @@
 
 (defun my-read-k2--open-unified-workspace ()
   "Open my-read using the English book currently displayed in Kindle.app."
-  (my-read-k2--activate-backend)
   (if (frame-live-p my-read-k--frame)
       (progn
         (select-frame-set-input-focus my-read-k--frame)

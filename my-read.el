@@ -2,7 +2,7 @@
 
 ;; English reading workspace:
 ;;   left   : Lookup
-;;   center : Kindle OCR and EPUB / normal book tabs
+;;   center : Kindle.app and EPUB / normal book tabs
 ;;   right top    : Google Translate
 ;;   right bottom : reading notes
 ;;
@@ -63,17 +63,6 @@ more transparent; 1 is fully opaque."
   :type 'string
   :group 'my-read)
 
-(defcustom my/read-translation-log-root
-  "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/001_read"
-  "Root directory where successful Google translations are recorded."
-  :type 'directory
-  :group 'my-read)
-
-(defcustom my/read-translation-log-enabled t
-  "When non-nil, append successful Google translations to a Markdown log."
-  :type 'boolean
-  :group 'my-read)
-
 (defcustom my/read-lookup-dictionary-ids
   '("nmacos"
     "ndeb+~/Sync/004_dic/ee/:simpleen"
@@ -113,9 +102,6 @@ styling remains unchanged while the target overlay moves through the book."
 (defvar my/read-translate-timer nil)
 (defvar my/read-translate-process nil)
 (defvar my/read-translate-last-target nil)
-(defvar my/read-translation-recorded-ids (make-hash-table :test #'equal)
-  "Translation IDs already checked or written during this Emacs session.")
-
 (defvar my/read-kokoro-context nil
   "English-reading speech context currently locking translation.
 
@@ -175,7 +161,7 @@ The Kindle and EPUB sources share this one window and switch as tabs."
       (my/read-center-window frame)))
 
 (defun my/read-kindle-window (&optional frame)
-  "Return FRAME's center window hosting the Kindle OCR tab."
+  "Return FRAME's center window hosting the Kindle.app tab."
   (my/read-window 'my-reading-kindle-window frame))
 
 (defun my/read-epub-window (&optional frame)
@@ -638,91 +624,6 @@ source."
 ;;; Google Translate
 ;;; ---------------------------------------------------------------------------
 
-(defun my/read--translation-source-name (frame &optional source-buffer)
-  "Return a stable book or source name for FRAME and SOURCE-BUFFER."
-  (let ((source-buffer
-         (or source-buffer
-             (when-let ((center (my/read-center-window frame)))
-               (window-buffer center)))))
-    (or (and (buffer-live-p source-buffer)
-             (eq source-buffer
-                 (frame-parameter frame 'my-reading-kindle-buffer))
-             (frame-parameter frame 'my-reading-kindle-book-name))
-        (frame-parameter frame 'my-reading-book-name)
-        (when (buffer-live-p source-buffer)
-          (with-current-buffer source-buffer
-          (cond
-           (buffer-file-name
-            (file-name-base buffer-file-name))
-           ((derived-mode-p 'dired-mode)
-            (file-name-nondirectory
-             (directory-file-name default-directory)))
-           (t
-            (string-trim (buffer-name) "\\*+" "\\*+")))))
-        "Unknown Book")))
-
-(defun my/read--translation-safe-directory-name (name)
-  "Return NAME made safe for use as one directory component."
-  (let* ((clean
-          (replace-regexp-in-string
-           "[/\\\\:[:cntrl:]]+" "-" (string-trim (or name ""))))
-         (clean (replace-regexp-in-string "[[:space:]]+" " " clean))
-         (clean (replace-regexp-in-string "\\`[. ]+\\|[. ]+\\'" "" clean)))
-    (if (string-empty-p clean)
-        "Unknown Book"
-      (truncate-string-to-width clean 120 nil nil t))))
-
-(defun my/read--translation-markdown-quote (text)
-  "Format TEXT as a Markdown block quote."
-  (concat "> "
-          (replace-regexp-in-string "\n" "\n> " (string-trim text))))
-
-(defun my/read-record-translation (frame source translation mode
-                                         &optional source-buffer)
-  "Record a successful translation for FRAME.
-
-SOURCE and TRANSLATION are stored in a per-book Markdown file.  MODE identifies
-whether the request followed ordinary sentence navigation or Kokoro speech.
-Repeated source/translation pairs are recorded only once, including across
-Emacs restarts.  Return the log file name, or nil when logging is disabled."
-  (when my/read-translation-log-enabled
-    (condition-case err
-        (let* ((book (my/read--translation-source-name frame source-buffer))
-               (safe-book (my/read--translation-safe-directory-name book))
-               (directory
-                (expand-file-name safe-book my/read-translation-log-root))
-               (file (expand-file-name "google-translate.md" directory))
-               (id (secure-hash 'sha1
-                                (concat source "\0" translation)))
-               (marker (format "<!-- google-translate-id: %s -->" id))
-               (known (gethash (cons file id)
-                               my/read-translation-recorded-ids)))
-          (unless known
-            (let ((already-recorded
-                   (and (file-readable-p file)
-                        (with-temp-buffer
-                          (insert-file-contents file)
-                          (search-forward marker nil t)))))
-              (unless already-recorded
-                (make-directory directory t)
-                (with-temp-buffer
-                  (unless (file-exists-p file)
-                    (insert (format "# Google Translate — %s\n\n" book)))
-                  (insert (format "## %s\n\n%s\n\n**Mode:** %s\n\n### Original\n\n%s\n\n### Translation\n\n%s\n\n"
-                                  (format-time-string "%Y-%m-%d %H:%M:%S")
-                                  marker
-                                  (if (eq mode 'kokoro) "Kokoro" "Sentence")
-                                  (my/read--translation-markdown-quote source)
-                                  (my/read--translation-markdown-quote
-                                   translation)))
-                  (write-region (point-min) (point-max) file t 'silent)))
-              (puthash (cons file id) t my/read-translation-recorded-ids)))
-          file)
-      (error
-       (message "Could not record Google translation: %s"
-                (error-message-string err))
-       nil))))
-
 (defun my/read-google-translate-url (text &optional frame source-buffer)
   "Build a Google Translate URL for TEXT in FRAME from SOURCE-BUFFER.
 Detected Kindle sources use their own source language.  Japanese is translated
@@ -914,9 +815,7 @@ FRAME, CENTER and TARGET identify the request; MODE describes its source."
                                      (google-translate-json-translation json)))
                                (when translation
                                  (my/read-translate-display
-                                  frame text translation mode)
-                                 (my/read-record-translation
-                                  frame text translation mode source-buffer)))
+                                  frame text translation mode)))
                            (error
                             (message "Google Translate error: %s"
                                      (error-message-string err))))))
@@ -1169,6 +1068,19 @@ When KINDLE-BUFFER is live, expose it and the EPUB source as center tabs."
   ;; the shared my-read-k UI implementation.
   (require 'my-read-k2)
   (my-read-k2--open-unified-workspace))
+
+;;;###autoload
+(defun my-read-end ()
+  "Close the active my-read workspace and stop its background services."
+  (interactive)
+  (let ((frames (cl-remove-if-not #'my/read-frame-p (frame-list))))
+    (unless frames
+      (user-error "終了するmy-readワークスペースがありません"))
+    ;; The delete-frame hooks stop the Kindle bridge, follower modes, timers,
+    ;; translation process, and temporary workspace buffers.
+    (dolist (frame frames)
+      (delete-frame frame t))
+    (message "my-readを終了しました")))
 
 (defun my/read--frame-deleted (frame)
   "Clean up my-read state when FRAME is deleted."

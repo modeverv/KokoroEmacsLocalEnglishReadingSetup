@@ -16,26 +16,12 @@
                      "/Users/seijiro/Sync/emacs.d/reader/my-read-k2/bridge"
                      "--configuration" "release" "my-read-k2-bridge")))))
 
-(ert-deftest my-read-k2-activate-selects-english-native-backend ()
-  (let ((my-read-k2--active-p nil)
-        (my-read-k2--saved-language :unset)
-        (my-read-k--process nil)
-        (my-read-k2-bridge-program "/tmp/my-read-k2-bridge")
-        my-read-k-language)
+(ert-deftest my-read-k2-configures-the-accessibility-bridge ()
+  (let ((my-read-k2-bridge-program "/tmp/my-read-k2-bridge"))
     (cl-letf (((symbol-function 'file-executable-p) (lambda (_path) t)))
-      (my-read-k2--activate-backend)
-      (should my-read-k2--active-p)
       (should (equal (my-read-k--bridge-command)
                      '("/tmp/my-read-k2-bridge")))
-      (should (equal my-read-k-language "en-US")))))
-
-(ert-deftest my-read-k2-detach-restores-web-reader-language ()
-  (let ((my-read-k2--active-p t)
-        (my-read-k2--saved-language "auto")
-        (my-read-k-language "en-US"))
-    (my-read-k2--after-detach)
-    (should-not my-read-k2--active-p)
-    (should (equal my-read-k-language "auto"))))
+      (should (eq my-read-k--reconnect-function #'my-read-k2-reconnect)))))
 
 (ert-deftest my-read-opens-the-kindle-app-backend ()
   (let (called)
@@ -43,6 +29,27 @@
                (lambda () (setq called t))))
       (my-read)
       (should called))))
+
+(ert-deftest my-read-k2-reports-the-actual-connection-error ()
+  (should
+   (equal
+    (my-read-k2--connection-error-message
+     '((error (code . "NO_PAGE_TEXT")
+              (message . "No open Kindle page was found."))))
+    "Kindle.appの本文を取得できません。本を開いて本文ページを表示してから r で再接続してください。")))
+
+(ert-deftest my-read-end-deletes-the-reading-frame ()
+  (let ((reading-frame 'reading-frame)
+        deleted)
+    (cl-letf (((symbol-function 'frame-list)
+               (lambda () (list reading-frame 'ordinary-frame)))
+              ((symbol-function 'my/read-frame-p)
+               (lambda (&optional frame) (eq frame reading-frame)))
+              ((symbol-function 'delete-frame)
+               (lambda (frame &optional force)
+                 (setq deleted (list frame force)))))
+      (my-read-end)
+      (should (equal deleted (list reading-frame t))))))
 
 (ert-deftest my-read-k2-is-not-a-public-command ()
   (should-not (fboundp 'my-read-k2)))

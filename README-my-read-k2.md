@@ -1,9 +1,8 @@
 # my-read-k2: Kindle.app backend
 
-`my-read-k2.el` adds a macOS Kindle.app backend to the existing `my-read-k`
-reader UI. It is intended for English books. Unlike the Web Reader backend,
-it reads Kindle's native Accessibility text instead of taking screenshots and
-running OCR.
+`my-read-k2.el` adds a macOS Kindle.app backend to the shared `my-read-k`
+reader UI. It is intended for English books and reads only Kindle's native
+Accessibility text.
 
 ## Setup
 
