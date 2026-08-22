@@ -88,6 +88,36 @@
           (should (equal (cdr (assoc "tl" captured)) "ja")))
       (set-frame-parameter frame 'my-reading-source-language nil))))
 
+(ert-deftest my-read-translation-defaults-to-google-with-local-available ()
+  (should (eq my/read-translation-backend 'google))
+  (should (equal my/read-local-translation-model "translategemma:4b"))
+  (should my/read-google-translation-fallback))
+
+(ert-deftest my-read-local-translation-request-uses-language-and-model ()
+  (let ((frame (selected-frame))
+        (my/read-local-translation-model "translategemma:test")
+        (google-translate-default-source-language "en")
+        (google-translate-default-target-language "ja")
+        (json-object-type 'alist)
+        (json-array-type 'list)
+        (json-false :json-false))
+    (let* ((request
+            (json-read-from-string
+             (my/read--local-translation-request "A quiet morning." frame)))
+           (messages (alist-get 'messages request))
+           (prompt (alist-get 'content (car messages))))
+      (should (equal (alist-get 'model request) "translategemma:test"))
+      (should (eq (alist-get 'stream request) :json-false))
+      (should (string-match-p "English (en) to Japanese (ja)" prompt))
+      (should (string-suffix-p "A quiet morning." prompt)))))
+
+(ert-deftest my-read-local-translation-response-extracts-content ()
+  (should
+   (equal (my/read--translation-response
+           'local
+           "{\"message\":{\"role\":\"assistant\",\"content\":\" 静かな朝。 \"}}")
+          "静かな朝。")))
+
 (ert-deftest my-read-k-process-filter-assembles-partial-and-multiple-lines ()
   (my-read-k-test--isolated
    (let ((seen nil))

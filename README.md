@@ -1,6 +1,6 @@
 # Emacs 多言語Reader
 
-Emacsで書籍を読みながら、ローカルKokoroによる読み上げ、Google翻訳、Lookup辞書、読書メモを一つの専用フレームにまとめるプロジェクトです。
+Emacsで書籍を読みながら、ローカルKokoroによる読み上げ、ローカル翻訳、Lookup辞書、読書メモを一つの専用フレームにまとめるプロジェクトです。
 
 `my-read` は、通常のEPUB・テキストと、Kindle.appで表示中の英語本文を一つのフレームに統合します。Kindle本文はmacOS Accessibilityから現在表示中のページだけを取得します。スクリーンショット取得、OCR、Kindleファイルの復号は行いません。
 
@@ -8,7 +8,7 @@ Emacsで書籍を読みながら、ローカルKokoroによる読み上げ、Goo
 
 - 左: カーソル位置の単語を自動検索するLookup
 - 中央: タブで切り替えるKindle本文とEPUB・テキスト
-- 右上: カーソル位置、または読み上げ中の1文のGoogle翻訳
+- 右上: カーソル位置、または読み上げ中の1文のローカル翻訳
 - 右下: 読書メモ
 
 ## 主な機能
@@ -19,7 +19,8 @@ Emacsで書籍を読みながら、ローカルKokoroによる読み上げ、Goo
 - `l` / `;` でLookupの次・前の項目へ移動
 - Kindleでは前後2ページをメモリ上だけにキャッシュ
 - Kindle本文をファイルへ保存しない
-- Google翻訳の結果を記録・保存しない
+- Google翻訳を既定とし、必要に応じてローカル翻訳へ切り替え可能
+- 翻訳結果を記録・保存しない
 
 ## 必要環境
 
@@ -30,6 +31,7 @@ Emacsで書籍を読みながら、ローカルKokoroによる読み上げ、Goo
 - [`uv`](https://docs.astral.sh/uv/)
 - Swift 6以降
 - macOSの `/usr/bin/curl` と `/usr/bin/afplay`
+- ローカル翻訳を使う場合はOllamaと `translategemma:4b`
 - Emacsパッケージ `google-translate` と `lookup`
 - EPUBを読む場合は `nov.el`
 
@@ -71,6 +73,9 @@ curl --fail http://127.0.0.1:8000/health
 
 (setq google-translate-default-source-language "en"
       google-translate-default-target-language "ja"
+      my/read-translation-backend 'google
+      my/read-local-translation-model "translategemma:4b"
+      my/read-google-translation-fallback t
       my/read-translate-overlay-opacity 0.35)
 
 (setq my/read-lookup-dictionary-ids
@@ -121,11 +126,32 @@ M-x my-read
 | `C-c t` | Kindle／EPUBタブを切り替える |
 | `r` | Kindle.appへ再接続 |
 
-## Google翻訳
+## Google翻訳とローカル翻訳
 
-中央本文でカーソルを動かすと、カーソルを含む1文だけをGoogle翻訳へ送信します。読み上げ中は対象を読み上げ中の1文へ固定し、終了するとカーソル位置へ戻ります。
+既定ではGoogle翻訳を使います。ローカルのOllamaでTranslateGemma 4Bを
+使いたい場合は、最初に次を実行してください。
 
-翻訳は画面に表示するだけで、原文・訳文ともファイルには記録しません。Kokoro読み上げはローカル処理ですが、Google翻訳の対象となる1文はGoogleのサービスへ送信されます。
+```sh
+brew install --cask ollama
+ollama pull translategemma:4b
+```
+
+そのうえで、次の設定に変更します。
+
+```elisp
+(setq my/read-translation-backend 'local)
+```
+
+ローカル翻訳では、カーソルを含む1文だけを
+`http://127.0.0.1:11434/api/chat` へ送ります。読み上げ中は対象を
+読み上げ中の1文へ固定し、終了するとカーソル位置へ戻ります。
+
+Ollamaが未起動、タイムアウト、または不正な応答を返した場合だけGoogle翻訳へ
+自動的にフォールバックします。Googleへ送信したくない場合は
+`my/read-google-translation-fallback` を `nil` にしてください。既定のGoogle翻訳へ
+戻す場合は `my/read-translation-backend` を `google` に設定します。
+
+翻訳は画面に表示するだけで、原文・訳文ともファイルには記録しません。
 
 ## 状態確認
 
@@ -154,7 +180,7 @@ make my-read-k-check
 | `kokoro_server.py` | ローカルKokoro HTTPサーバー |
 | `kokoro-reader.el` | 非同期音声生成・再生・ハイライト |
 | `english-reading-mode.el` | 1文単位の移動と読み上げ状態通知 |
-| `my-read.el` | 専用フレーム、Lookup、Google翻訳表示 |
+| `my-read.el` | 専用フレーム、Lookup、ローカル翻訳とGoogleフォールバック |
 | `my-read-k.el` | Kindle本文バッファ、ページ移動、メモリキャッシュ |
 | `my-read-k2.el` | Kindle.app Accessibilityバックエンド |
 | `my-read-k2/bridge/` | macOS Accessibilityを読むSwiftブリッジ |

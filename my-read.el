@@ -3,7 +3,7 @@
 ;; English reading workspace:
 ;;   left   : Lookup
 ;;   center : Kindle.app and EPUB / normal book tabs
-;;   right top    : Google Translate
+;;   right top    : local translation with Google fallback
 ;;   right bottom : reading notes
 ;;
 ;; Translation policy:
@@ -45,8 +45,38 @@
   :group 'my-read)
 
 (defcustom my/read-translate-idle-delay 0.1
-  "Seconds to wait before starting Google Translate after the target changes."
+  "Seconds to wait before translating after the target changes."
   :type 'number
+  :group 'my-read)
+
+(defcustom my/read-translation-backend 'google
+  "Translation backend used by my-read.
+`local' uses the Ollama-compatible endpoint and falls back to Google Translate
+when `my/read-google-translation-fallback' is non-nil.  `google' uses Google
+Translate directly."
+  :type '(choice (const :tag "Local with Google fallback" local)
+                 (const :tag "Google Translate" google))
+  :group 'my-read)
+
+(defcustom my/read-local-translation-url
+  "http://127.0.0.1:11434/api/chat"
+  "Ollama-compatible endpoint used for local translation."
+  :type 'string
+  :group 'my-read)
+
+(defcustom my/read-local-translation-model "translategemma:4b"
+  "Ollama model used for local translation."
+  :type 'string
+  :group 'my-read)
+
+(defcustom my/read-local-translation-timeout 60
+  "Maximum seconds to wait for local translation before falling back."
+  :type 'integer
+  :group 'my-read)
+
+(defcustom my/read-google-translation-fallback t
+  "When non-nil, use Google Translate if local translation fails."
+  :type 'boolean
   :group 'my-read)
 
 (defcustom my/read-translate-overlay-opacity 0.35
@@ -59,7 +89,7 @@ more transparent; 1 is fully opaque."
   :group 'my-read)
 
 (defcustom my/read-japanese-translation-target-language "en"
-  "Google Translate target language used for Japanese reading sources."
+  "Translation target language used for Japanese reading sources."
   :type 'string
   :group 'my-read)
 
@@ -87,7 +117,7 @@ rebuilds the private module automatically on the next search."
 
 (defface my/read-translate-overlay-face
   '((t (:extend t)))
-  "Background-only face for the current Google Translate target.
+  "Background-only face for the current translation target.
 
 Font and foreground attributes are deliberately left unspecified so EPUB
 styling remains unchanged while the target overlay moves through the book."
@@ -621,14 +651,11 @@ source."
 
 
 ;;; ---------------------------------------------------------------------------
-;;; Google Translate
+;;; Local translation and Google fallback
 ;;; ---------------------------------------------------------------------------
 
-(defun my/read-google-translate-url (text &optional frame source-buffer)
-  "Build a Google Translate URL for TEXT in FRAME from SOURCE-BUFFER.
-Detected Kindle sources use their own source language.  Japanese is translated
-to `my/read-japanese-translation-target-language'; all other languages use the
-normal google-translate.el target."
+(defun my/read--translation-languages (&optional frame source-buffer)
+  "Return (SOURCE TARGET) language codes for FRAME and SOURCE-BUFFER."
   (let* ((source-buffer
           (or source-buffer
               (and (frame-live-p frame)
@@ -642,22 +669,68 @@ normal google-translate.el target."
                           (frame-parameter frame 'my-reading-kindle-buffer)))
                      (or (null kindle-buffer)
                          (eq source-buffer kindle-buffer)))
-                   (frame-parameter frame 'my-reading-source-language))))
-         (japanese-p (equal source-language "ja"))
-         (url
-          (google-translate--format-request-url
-           `(("client" . "gtx")
-             ("ie"     . "UTF-8")
-             ("oe"     . "UTF-8")
-             ("sl"     . ,(or source-language
-                               google-translate-default-source-language
-                               "auto"))
-             ("tl"     . ,(if japanese-p
-                               my/read-japanese-translation-target-language
-                             (or google-translate-default-target-language
-                                 "ja")))
-             ("dt"     . "t")
-             ("q"      . ,text)))))
+                   (frame-parameter frame 'my-reading-source-language))
+              google-translate-default-source-language
+              "en"))
+         (target-language
+          (if (equal source-language "ja")
+              my/read-japanese-translation-target-language
+            (or google-translate-default-target-language "ja"))))
+    (list source-language target-language)))
+
+(defun my/read--translation-language-name (code)
+  "Return an English language name for CODE suitable for a model prompt."
+  (or (cdr (assoc code '(("en" . "English")
+                         ("ja" . "Japanese")
+                         ("es" . "Spanish")
+                         ("fr" . "French")
+                         ("de" . "German")
+                         ("it" . "Italian")
+                         ("pt" . "Portuguese")
+                         ("zh" . "Chinese")
+                         ("ko" . "Korean"))))
+      code))
+
+(defun my/read--local-translation-prompt (text &optional frame source-buffer)
+  "Build TranslateGemma's prompt for TEXT in FRAME from SOURCE-BUFFER."
+  (pcase-let* ((`(,source ,target)
+                 (my/read--translation-languages frame source-buffer))
+               (source-name (my/read--translation-language-name source))
+               (target-name (my/read--translation-language-name target)))
+    (format
+     (concat "You are a professional %s (%s) to %s (%s) translator. "
+             "Accurately convey the meaning and nuances of the original text "
+             "while using natural %s grammar and vocabulary. "
+             "Produce only the %s translation, without explanations or commentary. "
+             "Please translate the following text:\n\n%s")
+     source-name source target-name target target-name target-name text)))
+
+(defun my/read--local-translation-request (text &optional frame source-buffer)
+  "Return an Ollama JSON request translating TEXT locally."
+  (json-encode
+   `((model . ,my/read-local-translation-model)
+     (stream . :json-false)
+     (messages . [((role . "user")
+                   (content . ,(my/read--local-translation-prompt
+                                text frame source-buffer)))])
+     (options . ((temperature . 0))))))
+
+(defun my/read-google-translate-url (text &optional frame source-buffer)
+  "Build a Google Translate URL for TEXT in FRAME from SOURCE-BUFFER.
+Detected Kindle sources use their own source language.  Japanese is translated
+to `my/read-japanese-translation-target-language'; all other languages use the
+  normal google-translate.el target."
+  (pcase-let* ((`(,source-language ,target-language)
+                 (my/read--translation-languages frame source-buffer))
+               (url
+                (google-translate--format-request-url
+                 `(("client" . "gtx")
+                   ("ie"     . "UTF-8")
+                   ("oe"     . "UTF-8")
+                   ("sl"     . ,source-language)
+                   ("tl"     . ,target-language)
+                   ("dt"     . "t")
+                   ("q"      . ,text)))))
     ;; Support google-translate.el versions whose base URL is still http.
     (replace-regexp-in-string "\\`http:" "https:" url)))
 
@@ -743,9 +816,9 @@ normal google-translate.el target."
                    (my/read-center-window-for-buffer frame buffer))
       (set-frame-parameter frame 'my-reading-translate-overlay overlay))))
 
-(defun my/read-translate-display (frame source translation mode)
+(defun my/read-translate-display (frame source translation mode &optional backend)
   "Display SOURCE and TRANSLATION in FRAME.
-MODE is `kokoro' or `sentence'."
+MODE is `kokoro' or `sentence'.  BACKEND is `local' or `google'."
   (when (and (frame-live-p frame)
              (my/read-frame-p frame))
     (when-let ((window (my/read-translate-window frame)))
@@ -755,9 +828,11 @@ MODE is `kokoro' or `sentence'."
             (erase-buffer)
             (insert
              (propertize
-              (if (eq mode 'kokoro)
-                  "Google Translate  [Kokoro]\n\n"
-                "Google Translate  [Sentence]\n\n")
+              (format "%s  [%s]\n\n"
+                      (if (eq backend 'google)
+                          "Google Translate"
+                        "Local Translate")
+                      (if (eq mode 'kokoro) "Kokoro" "Sentence"))
               'face 'font-lock-keyword-face))
             (insert translation)
             (insert "\n\n")
@@ -768,13 +843,97 @@ MODE is `kokoro' or `sentence'."
         (set-window-point window (point-min))))))
 
 (defun my/read-translate-stop-process ()
-  "Stop the currently running Google Translate process."
+  "Stop the currently running translation process."
   (when (process-live-p my/read-translate-process)
     (delete-process my/read-translate-process))
   (setq my/read-translate-process nil))
 
+(defun my/read--translation-response (backend response)
+  "Extract translated text from BACKEND's RESPONSE string."
+  (let ((translation
+         (pcase backend
+           ('local
+            (let* ((json-object-type 'alist)
+                   (json (json-read-from-string response))
+                   (reply (alist-get 'message json)))
+              (alist-get 'content reply)))
+           ('google
+            (let ((json-array-type 'vector)
+                  (json-object-type 'alist))
+              (google-translate-json-translation
+               (json-read-from-string
+                (google-translate--insert-nulls response))))))))
+    (and (stringp translation)
+         (not (string-empty-p (string-trim translation)))
+         (string-trim translation))))
+
+(defun my/read--start-translation-request
+    (backend frame center target mode text source-buffer)
+  "Start BACKEND request for TEXT belonging to TARGET in FRAME and CENTER."
+  (let* ((local-p (eq backend 'local))
+         (buffer
+          (generate-new-buffer
+           (if local-p
+               " *Reading Local Translate Process*"
+             " *Reading Google Translate Process*")))
+         (command
+          (if local-p
+              (list "curl" "-sS" "--fail-with-body"
+                    "--connect-timeout" "1"
+                    "--max-time" (number-to-string
+                                   my/read-local-translation-timeout)
+                    "-H" "Content-Type: application/json"
+                    "--data-binary"
+                    (my/read--local-translation-request
+                     text frame source-buffer)
+                    my/read-local-translation-url)
+            (list "curl" "-s" "-L" "-A" "Emacs"
+                  (my/read-google-translate-url
+                   text frame source-buffer))))
+         (process
+          (make-process
+           :name (if local-p
+                     "reading-local-translate"
+                   "reading-google-translate")
+           :buffer buffer
+           :command command
+           :coding 'utf-8-unix
+           :noquery t
+           :sentinel
+           (lambda (proc _event)
+             (when (memq (process-status proc) '(exit signal))
+               (unwind-protect
+                   (when (and (frame-live-p frame)
+                              (window-live-p center)
+                              (equal target my/read-translate-last-target))
+                     (let ((translation
+                            (and (= (process-exit-status proc) 0)
+                                 (condition-case nil
+                                     (with-current-buffer (process-buffer proc)
+                                       (my/read--translation-response
+                                        backend (buffer-string)))
+                                   (error nil)))))
+                       (cond
+                        (translation
+                         (my/read-translate-display
+                          frame text translation mode backend))
+                        ((and local-p my/read-google-translation-fallback)
+                         (message
+                          "Local translation unavailable; using Google Translate")
+                         (my/read--start-translation-request
+                          'google frame center target mode text source-buffer))
+                        (t
+                         (message "%s translation failed"
+                                  (if local-p "Local" "Google"))))))
+                 (when-let ((proc-buffer (process-buffer proc)))
+                   (when (buffer-live-p proc-buffer)
+                     (kill-buffer proc-buffer)))
+                 (when (eq proc my/read-translate-process)
+                   (setq my/read-translate-process nil))))))))
+    (setq my/read-translate-process process)))
+
 (defun my/read-translate-start (frame center target mode text)
-  "Start asynchronous Google translation of TEXT.
+  "Start asynchronous translation of TEXT.
 FRAME, CENTER and TARGET identify the request; MODE describes its source."
   (setq my/read-translate-timer nil)
 
@@ -784,47 +943,8 @@ FRAME, CENTER and TARGET identify the request; MODE describes its source."
              (window-live-p center)
              (equal target my/read-translate-last-target))
     (my/read-translate-stop-process)
-
-    (let* ((source-buffer (nth 1 target))
-           (buffer
-            (generate-new-buffer " *Reading Google Translate Process*"))
-           (url (my/read-google-translate-url text frame source-buffer))
-           (process
-            (make-process
-             :name "reading-google-translate"
-             :buffer buffer
-             :command (list "curl" "-s" "-L" "-A" "Emacs" url)
-             :coding 'utf-8-unix
-             :noquery t
-             :sentinel
-             (lambda (proc _event)
-               (when (memq (process-status proc) '(exit signal))
-                 (unwind-protect
-                     (when (and (= (process-exit-status proc) 0)
-                                (frame-live-p frame)
-                                (equal target my/read-translate-last-target))
-                       (with-current-buffer (process-buffer proc)
-                         (condition-case err
-                             (let* ((json-array-type 'vector)
-                                    (json-object-type 'alist)
-                                    (json
-                                     (json-read-from-string
-                                      (google-translate--insert-nulls
-                                       (buffer-string))))
-                                    (translation
-                                     (google-translate-json-translation json)))
-                               (when translation
-                                 (my/read-translate-display
-                                  frame text translation mode)))
-                           (error
-                            (message "Google Translate error: %s"
-                                     (error-message-string err))))))
-                   (when-let ((proc-buffer (process-buffer proc)))
-                     (when (buffer-live-p proc-buffer)
-                       (kill-buffer proc-buffer)))
-                   (when (eq proc my/read-translate-process)
-                     (setq my/read-translate-process nil))))))))
-      (setq my/read-translate-process process))))
+    (my/read--start-translation-request
+     my/read-translation-backend frame center target mode text (nth 1 target))))
 
 (defun my/read-translate-update-for-frame (frame center)
   "Update translation target for FRAME using CENTER.
@@ -880,9 +1000,9 @@ Otherwise, translate the sentence containing point."
         (my/read-translate-update-for-frame frame center)))))
 
 (define-minor-mode my-read-translate-follow-mode
-  "Automatically update Google Translate from a my-read center window."
+  "Automatically update translation from a my-read center window."
   :global t
-  :lighter " GTr↔"
+  :lighter " Tr↔"
   (if my-read-translate-follow-mode
       (progn
         (setq my/read-translate-last-target nil)
@@ -1013,13 +1133,13 @@ When KINDLE-BUFFER is live, expose it and the EPUB source as center tabs."
       ;; Left: Lookup placeholder.
       (set-window-buffer lookup-window (my/read--prepare-ready-buffer frame))
 
-      ;; Right top: Google Translate.
+      ;; Right top: local translation with Google fallback.
       (let ((buffer (my/read-translate-buffer frame)))
         (with-current-buffer buffer
           (let ((inhibit-read-only t))
             (erase-buffer)
             (insert
-             (propertize "Google Translate\n\n"
+             (propertize "Translation\n\n"
                          'face 'font-lock-keyword-face))
             (insert
              "カーソル位置の1文を翻訳します。\nKokoro読み上げ中は読み上げている1文を翻訳します。")))
