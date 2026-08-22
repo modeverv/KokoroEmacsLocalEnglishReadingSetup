@@ -3,8 +3,10 @@
 `my-read-k` adds the visible page of Kindle Web Reader as an OCR text source to
 the existing `my-read` workspace. Chrome remains the authenticated renderer;
 the bridge captures only the current viewport through CDP and recognizes the
-configured crop with Apple Vision. It does not read Kindle book DOM content,
-cookies, or hidden resources.
+configured crop with Apple Vision. When Vision returns too little text for a
+vertical Japanese page, the bridge can automatically retry the same crop with
+Tesseract's `jpn_vert` model. It does not read Kindle book DOM content, cookies,
+or hidden resources.
 
 ## Requirements
 
@@ -12,7 +14,8 @@ cookies, or hidden resources.
 - Swift 6
 - Emacs with this directory on `load-path`
 - Chrome started with a loopback remote-debugging port and a dedicated profile
-- an English book open in Kindle Web Reader, preferably one-page/one-column
+- a supported-language book open in Kindle Web Reader, preferably one-page
+- Tesseract plus `jpn_vert` for vertical Japanese books
 
 Build the persistent bridge and run all automated tests:
 
@@ -20,6 +23,17 @@ Build the persistent bridge and run all automated tests:
 make my-read-k-build
 make my-read-k-check
 ```
+
+Install the optional vertical-Japanese fallback once:
+
+```sh
+brew install tesseract
+scripts/install-my-read-k-vertical-ocr.sh
+```
+
+The script verifies the official model checksum and installs it under
+`~/Library/Caches/my-read-k/tessdata`. Override the binary or data directory
+with `MY_READ_K_TESSERACT` or `MY_READ_K_TESSDATA` if necessary.
 
 To launch a separate Chrome profile on the default port `9000`:
 
@@ -43,16 +57,14 @@ control of its browser profile.
 (require 'my-read-k)
 ```
 
-Open the English Kindle page in Chrome, then run:
+This is the legacy Chrome/CDP backend. The unified `M-x my-read` command now
+uses Kindle.app through `my-read-k2.el`; see `README-my-read-k2.md` for the
+current setup.
 
-```text
-M-x my-read-k
-```
-
-The command creates the existing `my-read` three-column frame, attaches the
-bridge asynchronously, and places OCR text in `*my-read-k:english*`. The center
-is a normal read-only text buffer, so the existing word Lookup, paragraph
-Google Translate, search/copy, and Kokoro integration continue to work.
+The workspace creates one frame with a single center pane. Its `Kindle` and
+`EPUB` tabs switch between OCR and the normal-book source without splitting
+the pane vertically. The legacy backend attaches the bridge asynchronously and
+places OCR text in `*my-read-k:english*`.
 
 Primary keys in the OCR buffer:
 
@@ -67,9 +79,11 @@ Primary keys in the OCR buffer:
 | `C-c ]` | Direct next-page/OCR command |
 | `C-c [` | Direct previous-page/OCR command |
 | `C-c g` | OCR the current page again |
+| `r` | Restart the bridge and reconnect to Chrome/Kindle |
+| `C-c t` | Toggle the center pane between Kindle and EPUB tabs |
 
 Commands are also available as `my-read-k-next-page`, `my-read-k-prev-page`,
-`my-read-k-refresh`, `my-read-k-attach`, `my-read-k-detach`,
+`my-read-k-refresh`, `my-read-k-reconnect`, `my-read-k-attach`, `my-read-k-detach`,
 `my-read-k-status`, and `my-read-k-show-last-error`.
 
 ## Configuration
@@ -88,6 +102,21 @@ The important options are:
   backward navigation; the default is `2`
 - `my-read-k-settle-poll-ms`, `my-read-k-settle-stable-samples`, and
   `my-read-k-settle-timeout-ms`
+
+`my-read-k-language` defaults to `auto`: Vision uses the recognition languages
+available on the running macOS and reports a normalized language plus layout.
+Emacs uses that result to select sentence handling, Google Translate direction,
+and speech backend. English, Japanese, Mandarin, Spanish, French, Hindi,
+Italian, and Portuguese use Kokoro; other detected languages fall back to a
+matching macOS `say` voice. Customize `my-read-k-kokoro-language-profiles` and
+`my-read-k-macos-voice-alist` to change the mapping. Set `my-read-k-language`
+to a locale such as `en-US`, `ja-JP`, or `fr-FR` to force OCR language.
+
+Vision remains the fast default. For Japanese/automatic recognition, the
+bridge tries `jpn_vert` only when Vision reports a vertical layout or returns
+fewer than 12 useful characters. The fallback is accepted only when it yields
+substantially more Japanese text. The buffer header identifies the active OCR
+engine as `Vision` or `Tesseract-vert`.
 
 The default crop is `(0.08 0.06 0.84 0.88)`. Adjust it if Kindle controls,
 headers, or page margins are being recognized.
@@ -117,8 +146,9 @@ remain identical for consecutive samples before OCR.
 Errors distinguish an unavailable CDP endpoint, missing target, disconnect,
 invalid crop, navigation timeout, screenshot failure, OCR failure/no text, and
 malformed protocol data. Run `M-x my-read-k-show-last-error` for the detailed
-log. Closing the frame or running `M-x my-read-k-detach` stops the bridge
-without blocking Emacs.
+log. If Chrome was not running at startup or the connection was lost, start
+Chrome, focus the upper Kindle pane, and press `r`. Closing the frame or running
+`M-x my-read-k-detach` stops the bridge without blocking Emacs.
 
 Screenshots and OCR page data remain in memory. There is no whole-book crawl,
 batch export, or persistent OCR archive.

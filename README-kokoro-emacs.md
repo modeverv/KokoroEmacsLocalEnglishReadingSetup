@@ -7,6 +7,13 @@ uv add 'mlx-audio[server]' 'misaki[en]' 'spacy>=3.8,<4'
 uv run python -m spacy download en_core_web_sm
 ```
 
+English reading uses the default dependency set. Japanese Kokoro support is
+optional because `pyopenjtalk` needs a working C++ toolchain:
+
+```sh
+uv sync --extra japanese
+```
+
 The earlier successful Kokoro CLI environment may already contain some of these.
 
 ## 2. Start the dedicated server (optional)

@@ -33,9 +33,42 @@
   :type '(list number number number number)
   :group 'my-read-k)
 
-(defcustom my-read-k-language "en-US"
-  "Apple Vision recognition language."
+(defcustom my-read-k-language "auto"
+  "Apple Vision recognition language.
+Use \"auto\" to recognize the languages supported by the running macOS and
+detect the page language.  A fixed Vision language such as \"en-US\",
+\"ja-JP\", or \"fr-FR\" may be used when automatic recognition is not desired."
   :type 'string
+  :group 'my-read-k)
+
+(defcustom my-read-k-japanese-kokoro-voice "jf_nezumi"
+  "Kokoro voice used when a Kindle page is detected as Japanese."
+  :type 'string
+  :group 'my-read-k)
+
+(defcustom my-read-k-kokoro-language-profiles
+  '(("ja" "j" "jf_nezumi")
+    ("zh" "z" "zf_xiaoxiao")
+    ("es" "e" "ef_dora")
+    ("fr" "f" "ff_siwis")
+    ("hi" "h" "hf_alpha")
+    ("it" "i" "if_sara")
+    ("pt" "p" "pf_dora"))
+  "Kokoro profiles for automatically detected non-English languages.
+Each entry is (LANGUAGE KOKORO-LANG-CODE VOICE).  English deliberately uses
+the user's normal `kokoro-reader-lang-code' and `kokoro-reader-voice'."
+  :type '(repeat (list string string string))
+  :group 'my-read-k)
+
+(defcustom my-read-k-macos-voice-alist
+  '(("de" . "Anna") ("ko" . "Yuna") ("ru" . "Milena")
+    ("uk" . "Lesya") ("th" . "Kanya") ("vi" . "Linh")
+    ("ar" . "Majed") ("tr" . "Yelda") ("id" . "Damayanti")
+    ("cs" . "Zuzana") ("da" . "Sara") ("nl" . "Xander")
+    ("no" . "Nora") ("ms" . "Amira") ("pl" . "Zosia")
+    ("ro" . "Ioana") ("sv" . "Alva"))
+  "macOS voices used when detected language has no Kokoro profile."
+  :type '(alist :key-type string :value-type string)
   :group 'my-read-k)
 
 (defcustom my-read-k-settle-poll-ms 100
@@ -94,6 +127,9 @@ The bridge currently supports two."
 (defvar my-read-k--last-lines nil)
 (defvar my-read-k--last-fingerprint nil)
 (defvar my-read-k--current-result nil)
+(defvar my-read-k--target-title nil)
+(defvar my-read-k--target-url nil)
+(defvar my-read-k--detected-language nil)
 (defvar my-read-k--prefetch-queue nil)
 (defvar my-read-k--prefetch-source-fingerprint nil)
 (defvar my-read-k--prefetch-attempted-fingerprint nil)
@@ -104,6 +140,90 @@ The bridge currently supports two."
   "Return KEY from JSON ALIST, accepting symbol or string keys."
   (or (alist-get key alist)
       (alist-get (symbol-name key) alist nil nil #'string=)))
+
+(defun my-read-k--language-from-result (result)
+  "Return a normalized language code for OCR RESULT.
+New bridges report the detected language explicitly.  The text fallback keeps
+cached results and older bridge responses usable during a live upgrade."
+  (let* ((reported (my-read-k--alist-get 'language result))
+         (text (or (my-read-k--alist-get 'text result) ""))
+         (language (and (stringp reported) (downcase reported))))
+    (cond
+     ((and language (string-prefix-p "zh" language)) "zh")
+     ((and language (string-prefix-p "ja" language)) "ja")
+     ((and language (string-prefix-p "en" language)) "en")
+     ((and language (string-match "\\`[a-z]+" language))
+      (match-string 0 language))
+     ((string-match-p "[ぁ-んァ-ヶ]" text) "ja")
+     ((string-match-p "[一-龯]" text) "zh")
+     ((string-match-p "[가-힣]" text) "ko")
+     (t "en"))))
+
+(defun my-read-k--configure-buffer-language (result)
+  "Apply OCR RESULT's detected language to the Kindle buffer and frame."
+  (let* ((language (my-read-k--language-from-result result))
+         (profile (assoc language my-read-k-kokoro-language-profiles)))
+    (setq my-read-k--detected-language language)
+    (when (frame-live-p my-read-k--frame)
+      (set-frame-parameter my-read-k--frame
+                           'my-reading-source-language language))
+    (with-current-buffer my-read-k--buffer
+      (setq-local my/read-source-language language)
+      (cond
+       ;; English pages inherit the user's ordinary Kokoro settings.
+       ((string= language "en")
+        (kill-local-variable 'kokoro-reader-backend)
+        (kill-local-variable 'kokoro-reader-lang-code)
+        (kill-local-variable 'kokoro-reader-voice)
+        (kill-local-variable 'kokoro-reader-macos-voice))
+       (profile
+        (setq-local kokoro-reader-backend 'kokoro)
+        (setq-local kokoro-reader-lang-code (nth 1 profile))
+        (setq-local kokoro-reader-voice
+                    (if (string= language "ja")
+                        my-read-k-japanese-kokoro-voice
+                      (nth 2 profile)))
+        (kill-local-variable 'kokoro-reader-macos-voice))
+       (t
+        (setq-local kokoro-reader-backend 'macos)
+        (setq-local kokoro-reader-macos-voice
+                    (cdr (assoc language my-read-k-macos-voice-alist)))
+        (kill-local-variable 'kokoro-reader-lang-code)
+        (kill-local-variable 'kokoro-reader-voice))))
+    language))
+
+(defun my-read-k--target-book-name (title url)
+  "Return a stable Kindle book identifier from target TITLE and URL."
+  (let ((asin
+         (and (stringp url)
+              (string-match "[?&]asin=\\([^&#]+\\)" url)
+              (match-string 1 url)))
+        (generic-title-p
+         (and (stringp title)
+              (string-match-p
+               "\\`Kindle\\(?: Cloud Reader\\)?\\'"
+               (string-trim title)))))
+    (cond
+     ((and (stringp title)
+           (not (string-empty-p (string-trim title)))
+           (not generic-title-p))
+      (string-trim title))
+     (asin (format "Kindle-%s" asin))
+     ((and (stringp title) (not (string-empty-p (string-trim title))))
+      (string-trim title))
+     (t "Kindle"))))
+
+(defun my-read-k--remember-target (target)
+  "Remember Kindle TARGET metadata and expose its book name to my-read."
+  (let ((title (my-read-k--alist-get 'title target))
+        (url (my-read-k--alist-get 'url target)))
+    (setq my-read-k--target-title title
+          my-read-k--target-url url)
+    (when (frame-live-p my-read-k--frame)
+      (set-frame-parameter
+       my-read-k--frame
+       'my-reading-kindle-book-name
+       (my-read-k--target-book-name title url)))))
 
 (defun my-read-k--bridge-command ()
   "Return the command list used to launch the persistent bridge."
@@ -128,6 +248,21 @@ The bridge currently supports two."
   (my-read-k--log "%s: %s" code message)
   (message "my-read-k: %s" message))
 
+(defun my-read-k--show-connection-status (text &optional error-p)
+  "Show Kindle connection TEXT and an `r' reconnect hint.
+When ERROR-P is non-nil, mark the Kindle header as disconnected."
+  (when (buffer-live-p my-read-k--buffer)
+    (with-current-buffer my-read-k--buffer
+      (setq header-line-format
+            (format " Kindle: %s | press r to reconnect"
+                    (if error-p "disconnected" "connecting")))
+      ;; Preserve a previously recognized page across a transient disconnect.
+      (unless my-read-k--current-result
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert text "\n\nChromeを起動してから r を押すと再接続します。\n")
+          (set-buffer-modified-p nil))))))
+
 (defun my-read-k--process-sentinel (process event)
   "Handle bridge PROCESS termination described by EVENT."
   (when (memq (process-status process) '(exit signal failed closed))
@@ -142,13 +277,13 @@ The bridge currently supports two."
             my-read-k--prefetch-source-fingerprint nil
             my-read-k--prefetch-attempted-fingerprint nil
             my-read-k--back-queue nil
-            my-read-k--back-source-fingerprint nil
-            my-read-k--current-result nil)
+            my-read-k--back-source-fingerprint nil)
       (my-read-k--update-prefetch-header)
       (clrhash my-read-k--callbacks)
       (unless (or my-read-k--stopping-p
                   (string-match-p "finished" event))
-        (my-read-k--record-error "BRIDGE_EXIT" (string-trim event))))))
+        (my-read-k--record-error "BRIDGE_EXIT" (string-trim event))
+        (my-read-k--show-connection-status "Kindle bridge disconnected." t)))))
 
 (defun my-read-k--dispatch-response (response)
   "Dispatch decoded bridge RESPONSE to its registered callback."
@@ -326,12 +461,14 @@ The bridge currently supports two."
 
 (defun my-read-k--refresh-followers ()
   "Refresh existing Lookup and translation followers once."
-  (when (and (frame-live-p my-read-k--frame)
-             (window-live-p (my/read-center-window my-read-k--frame)))
-    (with-selected-frame my-read-k--frame
-      (with-selected-window (my/read-center-window my-read-k--frame)
-        (my/read-lookup-follow-post-command)
-        (my/read-translate-follow-post-command)))))
+  (let ((window (and (frame-live-p my-read-k--frame)
+                     (my/read-kindle-window my-read-k--frame))))
+    (when (and (window-live-p window)
+               (eq (window-buffer window) my-read-k--buffer))
+      (with-selected-frame my-read-k--frame
+        (with-selected-window window
+          (my/read-lookup-follow-post-command)
+          (my/read-translate-follow-post-command))))))
 
 (defun my-read-k--position-for-direction (direction)
   "Position point after replacing a page in DIRECTION."
@@ -352,34 +489,55 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
     (setq my-read-k--last-lines (my-read-k--alist-get 'lines result)
           my-read-k--last-fingerprint (my-read-k--alist-get 'fingerprint result)
           my-read-k--current-result result)
-    (with-current-buffer my-read-k--buffer
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert text)
-        (unless (bolp) (insert "\n"))
-        (my-read-k--position-for-direction direction)
-        (setq buffer-read-only t)
-        (set-buffer-modified-p nil)
-        (setq header-line-format
-              (format " Kindle: attached | OCR %sms"
-                      (or (my-read-k--alist-get 'ocrMs result) "?")))))
+    (let* ((language (my-read-k--configure-buffer-language result))
+           (layout (or (my-read-k--alist-get 'layout result) "horizontal"))
+           (ocr-engine (or (my-read-k--alist-get 'ocrEngine result) "vision"))
+           (backend
+            (with-current-buffer my-read-k--buffer
+              kokoro-reader-backend)))
+      (with-current-buffer my-read-k--buffer
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert text)
+          (unless (bolp) (insert "\n"))
+          (my-read-k--position-for-direction direction)
+          (setq buffer-read-only t)
+          (set-buffer-modified-p nil)
+          (setq header-line-format
+                (format " Kindle: attached | %s/%s/%s | OCR %s %sms"
+                        (upcase language)
+                        layout
+                        (if (eq backend 'kokoro) "Kokoro" "macOS")
+                        (if (string= ocr-engine "tesseract-jpn-vert")
+                            "Tesseract-vert"
+                          "Vision")
+                        (or (my-read-k--alist-get 'ocrMs result) "?"))))))
     (when-let ((center (and (frame-live-p my-read-k--frame)
-                            (my/read-center-window my-read-k--frame))))
-      (set-window-buffer center my-read-k--buffer)
+                            (my/read-kindle-window my-read-k--frame)
+                            (eq (window-buffer
+                                 (my/read-kindle-window my-read-k--frame))
+                                my-read-k--buffer)
+                            (my/read-kindle-window my-read-k--frame))))
       (set-window-point center (with-current-buffer my-read-k--buffer (point))))
     (when speak
       (condition-case err
-          (if (and (frame-live-p my-read-k--frame)
-                   (window-live-p (my/read-center-window my-read-k--frame)))
-              (with-selected-frame my-read-k--frame
-                (with-selected-window (my/read-center-window my-read-k--frame)
-                  (if (eq direction 'prev)
-                      (english-reading-mode--speak-at-point)
-                    (english-reading-mode-next-sentence))))
+          (cond
+           ((and (frame-live-p my-read-k--frame)
+                 (window-live-p (my/read-kindle-window my-read-k--frame))
+                 (eq (window-buffer (my/read-kindle-window my-read-k--frame))
+                     my-read-k--buffer))
+            (with-selected-frame my-read-k--frame
+              (with-selected-window (my/read-kindle-window my-read-k--frame)
+                (if (eq direction 'prev)
+                    (english-reading-mode--speak-at-point)
+                  (english-reading-mode-next-sentence)))))
+           ;; Unit-level and non-workspace callers still support speech, but a
+           ;; live workspace must never speak a hidden Kindle tab.
+           ((not (frame-live-p my-read-k--frame))
             (with-current-buffer my-read-k--buffer
               (if (eq direction 'prev)
                   (english-reading-mode--speak-at-point)
-                (english-reading-mode-next-sentence))))
+                (english-reading-mode-next-sentence)))))
         (error (my-read-k--record-error "TTS_ERROR" (error-message-string err)))))
     (my-read-k--refresh-followers)))
 
@@ -556,6 +714,7 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
   (my-read-k--clear-navigation-caches)
   (setq my-read-k--prefetch-busy-p nil
         my-read-k--sync-busy-p nil
+        my-read-k--detected-language nil
         my-read-k--state 'attaching)
   (my-read-k--send
    "attach"
@@ -563,7 +722,11 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
      (cdpPort . ,my-read-k-cdp-port)
      (urlPattern . ,my-read-k-url-pattern))
    (lambda (response)
-     (unless (my-read-k--response-error response)
+     (if (my-read-k--response-error response)
+         (my-read-k--show-connection-status
+          "Kindle Web Readerに接続できません。" t)
+       (let ((result (my-read-k--alist-get 'result response)))
+         (my-read-k--remember-target result))
        (setq my-read-k--state 'attached)
        (my-read-k-refresh)))))
 
@@ -576,7 +739,10 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
         my-read-k--prefetch-busy-p nil
         my-read-k--sync-busy-p nil
         my-read-k--pending-intent nil
-        my-read-k--state 'detached)
+        my-read-k--state 'detached
+        my-read-k--detected-language nil)
+  (when (frame-live-p my-read-k--frame)
+    (set-frame-parameter my-read-k--frame 'my-reading-source-language nil))
   (my-read-k--clear-navigation-caches)
   (clrhash my-read-k--callbacks)
   (when (process-live-p my-read-k--process)
@@ -592,6 +758,14 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
   "OCR the currently displayed Kindle page."
   (interactive)
   (my-read-k--request-page 'refresh))
+
+;;;###autoload
+(defun my-read-k-reconnect ()
+  "Restart the bridge and reconnect to Chrome's Kindle Web Reader target."
+  (interactive)
+  (my-read-k-detach)
+  (my-read-k--show-connection-status "Kindle Web Readerへ再接続しています。")
+  (my-read-k-attach))
 
 ;;;###autoload
 (defun my-read-k-next-page ()
@@ -675,7 +849,8 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
   "M-v" #'my-read-k-prev-page
   "C-c ]" #'my-read-k-next-page
   "C-c [" #'my-read-k-prev-page
-  "C-c g" #'my-read-k-refresh)
+  "C-c g" #'my-read-k-refresh
+  "r" #'my-read-k-reconnect)
 
 ;; `defvar-keymap' preserves an existing map on reload; install the new binding
 ;; explicitly so a live my-read-k session gains it without restarting Emacs.
@@ -685,6 +860,7 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
 (keymap-set my-read-k-mode-map "C-p" #'my-read-k-up)
 (keymap-set my-read-k-mode-map "C-v" #'my-read-k-next-page)
 (keymap-set my-read-k-mode-map "M-v" #'my-read-k-prev-page)
+(keymap-set my-read-k-mode-map "r" #'my-read-k-reconnect)
 
 (define-minor-mode my-read-k-mode
   "Treat the current normal text buffer as a Kindle OCR source."
@@ -710,6 +886,7 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
            nil
          (let* ((result (my-read-k--alist-get 'result response))
                 (target (my-read-k--alist-get 'target result)))
+           (my-read-k--remember-target target)
            (message "my-read-k: %s — %s — next %d / prev %d cached"
                     my-read-k--state
                     (or (my-read-k--alist-get 'title target) "detached")
@@ -735,45 +912,54 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
 
 (add-hook 'delete-frame-functions #'my-read-k--frame-deleted)
 
-;;;###autoload
-(defun my-read-k ()
-  "Create the my-read UI and load the visible Kindle page through OCR."
-  (interactive)
+(defun my-read-k--prepare-buffer ()
+  "Create and initialize the Kindle pane used by the unified workspace."
+  (let ((buffer (get-buffer-create my-read-k-buffer-name)))
+    (with-current-buffer buffer
+      (text-mode)
+      (visual-line-mode 1)
+      (my-read-k-mode 1)
+      (english-reading-mode 1)
+      (setq-local my/read-source-language nil)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "Connecting to Kindle Web Reader…\n\n"
+                "Chromeを起動してから r を押すと再接続します。\n")
+        (set-buffer-modified-p nil))
+      (read-only-mode 1))
+    buffer))
+
+(defun my-read-k--open-unified-workspace ()
+  "Create or focus the unified Kindle and EPUB my-read workspace."
   (if (frame-live-p my-read-k--frame)
       (progn
         (select-frame-set-input-focus my-read-k--frame)
-        (if (eq my-read-k--state 'attached)
-            (my-read-k-refresh)
-          (my-read-k-attach)))
+        my-read-k--frame)
     (my/read--lookup-enter)
-    (let ((buffer (get-buffer-create my-read-k-buffer-name))
+    (let ((buffer (my-read-k--prepare-buffer))
           frame)
-      (with-current-buffer buffer
-        (text-mode)
-        (visual-line-mode 1)
-        (my-read-k-mode 1)
-        (english-reading-mode 1)
-        (let ((inhibit-read-only t))
-          (erase-buffer)
-          (insert "Connecting to Kindle Web Reader…\n")
-          (set-buffer-modified-p nil))
-        ;; Keep the caller-provided center source immutable even if another
-        ;; reading minor mode changed `buffer-read-only' during setup.
-        (read-only-mode 1))
       (condition-case err
           (progn
-            (setq frame (make-frame '((name . "my-read-k"))))
+            (setq frame (make-frame `((name . ,my/read-frame-name))))
             (set-frame-parameter frame 'my-reading-frame t)
             (set-frame-parameter frame 'my-reading-kindle-frame t)
             (set-frame-parameter frame 'my-reading-kindle-buffer buffer)
             (setq my-read-k--frame frame my-read-k--buffer buffer)
             (my/read--setup-frame frame buffer)
             (select-frame-set-input-focus frame)
+            (my-read-k--show-connection-status
+             "Kindle Web Readerへ接続しています。")
             (my-read-k-attach)
             frame)
         (error
          (when (frame-live-p frame) (delete-frame frame t))
          (signal (car err) (cdr err)))))))
+
+;;;###autoload
+;;(defun my-read-k ()
+;;  "Compatibility entry point for the unified `my-read' workspace."
+;;  (interactive)
+;;  (my-read))
 
 (provide 'my-read-k)
 ;;; my-read-k.el ends here

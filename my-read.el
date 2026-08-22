@@ -2,7 +2,7 @@
 
 ;; English reading workspace:
 ;;   left   : Lookup
-;;   center : book
+;;   center : Kindle OCR and EPUB / normal book tabs
 ;;   right top    : Google Translate
 ;;   right bottom : reading notes
 ;;
@@ -10,9 +10,10 @@
 ;;   - j/k and Kokoro lifecycle are owned by english-reading-mode.el
 ;;   - while Kokoro is reading: lock translation to the exact spoken text
 ;;   - point may already move to the next sentence; the lock remains
-;;   - when playback finishes/stops/fails: resume paragraph-at-point translation
+;;   - when playback finishes/stops/fails: resume sentence-at-point translation
 
 (require 'cl-lib)
+(require 'color)
 (require 'json)
 (require 'thingatpt)
 (require 'subr-x)
@@ -48,20 +49,44 @@
   :type 'number
   :group 'my-read)
 
-(defcustom my/read-lookup-agent-classes '(nmacos ndspell)
-  "Non-NDEB Lookup agent classes enabled while searching from my-read."
-  :type '(repeat symbol)
+(defcustom my/read-translate-overlay-opacity 0.35
+  "Visual opacity of the translation overlay against the theme background.
+
+Emacs faces do not reliably support alpha transparency, so my-read blends its
+blue overlay color with each frame's default background.  Values near 0 are
+more transparent; 1 is fully opaque."
+  :type '(float :tag "Opacity" :value 0.35)
   :group 'my-read)
 
-(defcustom my/read-lookup-ndeb-directories
-  '("~/Sync/004_dic/chujisnd/")
-  "NDEB dictionary directories enabled while searching from my-read.
+(defcustom my/read-japanese-translation-target-language "en"
+  "Google Translate target language used for Japanese reading sources."
+  :type 'string
+  :group 'my-read)
 
-Lookup's normal runtime is left untouched.  When the installed Lookup
-version exposes dictionary objects, my-read narrows `lookup-search-dictionaries'
-for searches originating in a my-read frame.  Older/forked versions fall back
-to the normal default module instead of failing."
-  :type '(repeat directory)
+(defcustom my/read-translation-log-root
+  "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/001_read"
+  "Root directory where successful Google translations are recorded."
+  :type 'directory
+  :group 'my-read)
+
+(defcustom my/read-translation-log-enabled t
+  "When non-nil, append successful Google translations to a Markdown log."
+  :type 'boolean
+  :group 'my-read)
+
+(defcustom my/read-lookup-dictionary-ids
+  '("nmacos"
+    "ndeb+~/Sync/004_dic/ee/:simpleen"
+    "ndeb+~/Sync/004_dic/chujisnd/"
+    "ndspell")
+  "Lookup dictionary IDs used only by my-read and my-read-k.
+
+Each string may be a complete dictionary ID or an ID prefix.  For example,
+`nmacos' selects all macOS Dictionary agents, while a complete NDEB ID selects
+one dictionary.  An empty list disables Lookup searches in reading frames;
+it never falls back to Lookup's full default module.  Changing this option
+rebuilds the private module automatically on the next search."
+  :type '(repeat string)
   :group 'my-read)
 
 (defcustom my/read-lookup-idle-delay 0.12
@@ -71,22 +96,37 @@ to the normal default module instead of failing."
 
 (defconst my/read-translate-buffer-name "*Reading Translation*")
 
-(defvar lookup-search-dictionaries nil
-  "Lookup dictionary restriction when supported by the installed Lookup version.")
+(defface my/read-translate-overlay-face
+  '((t (:extend t)))
+  "Background-only face for the current Google Translate target.
+
+Font and foreground attributes are deliberately left unspecified so EPUB
+styling remains unchanged while the target overlay moves through the book."
+  :group 'my-read)
 
 (defvar my/read-lookup-timer nil)
 (defvar my/read-lookup-last-target nil)
 (defvar my/read-lookup-running-p nil)
+(defvar my/read--lookup-module nil)
+(defvar my/read--lookup-module-signature nil)
 
 (defvar my/read-translate-timer nil)
 (defvar my/read-translate-process nil)
 (defvar my/read-translate-last-target nil)
+(defvar my/read-translation-recorded-ids (make-hash-table :test #'equal)
+  "Translation IDs already checked or written during this Emacs session.")
 
 (defvar my/read-kokoro-context nil
   "English-reading speech context currently locking translation.
 
 While this is non-nil, point may already be on the next sentence, but
 translation remains pinned to CONTEXT's :text until the matching finish event.")
+
+(defvar-local my/read-source-language nil
+  "Detected source language for the current reading buffer, or nil.")
+
+(defvar-local my/read-center-tab-frame nil
+  "my-read frame owning this center-tab buffer.")
 
 
 
@@ -107,9 +147,40 @@ translation remains pinned to CONTEXT's :text until the matching finish event.")
   "Return FRAME's Lookup window."
   (my/read-window 'my-reading-lookup-window frame))
 
+(defun my/read-center-windows (&optional frame)
+  "Return all live center reading windows belonging to FRAME."
+  (let* ((frame (or frame (selected-frame)))
+         (windows (frame-parameter frame 'my-reading-center-windows)))
+    (or (delq nil (mapcar (lambda (window)
+                            (and (window-live-p window) window))
+                          windows))
+        (when-let ((window (my/read-window 'my-reading-center-window frame)))
+          (list window)))))
+
 (defun my/read-center-window (&optional frame)
-  "Return FRAME's center reading window."
-  (my/read-window 'my-reading-center-window frame))
+  "Return the active center reading window in FRAME.
+The Kindle and EPUB sources share this one window and switch as tabs."
+  (let* ((frame (or frame (selected-frame)))
+         (windows (my/read-center-windows frame))
+         (selected (and (eq frame (selected-frame)) (selected-window))))
+    (if (memq selected windows)
+        selected
+      (car windows))))
+
+(defun my/read-center-window-for-buffer (frame buffer)
+  "Return FRAME's center window displaying BUFFER, or its active center."
+  (or (cl-find-if (lambda (window)
+                    (eq (window-buffer window) buffer))
+                  (my/read-center-windows frame))
+      (my/read-center-window frame)))
+
+(defun my/read-kindle-window (&optional frame)
+  "Return FRAME's center window hosting the Kindle OCR tab."
+  (my/read-window 'my-reading-kindle-window frame))
+
+(defun my/read-epub-window (&optional frame)
+  "Return FRAME's center window hosting the EPUB/normal-book tab."
+  (my/read-window 'my-reading-epub-window frame))
 
 (defun my/read-translate-window (&optional frame)
   "Return FRAME's Google Translate window."
@@ -118,6 +189,82 @@ translation remains pinned to CONTEXT's :text until the matching finish event.")
 (defun my/read-note-window (&optional frame)
   "Return FRAME's reading-note window."
   (my/read-window 'my-reading-note-window frame))
+
+(defun my/read-center-tab-buffers ()
+  "Return the Kindle and EPUB buffers belonging to the current center tab."
+  (let ((frame my/read-center-tab-frame))
+    (when (frame-live-p frame)
+      (delq nil
+            (mapcar (lambda (parameter)
+                      (let ((buffer (frame-parameter frame parameter)))
+                        (and (buffer-live-p buffer) buffer)))
+                    '(my-reading-kindle-buffer my-reading-epub-buffer))))))
+
+(defun my/read-center-tab-name (buffer &optional _buffers)
+  "Return a compact tab label for center reading BUFFER."
+  (let ((frame (buffer-local-value 'my/read-center-tab-frame buffer)))
+    (cond
+     ((and (frame-live-p frame)
+           (eq buffer (frame-parameter frame 'my-reading-kindle-buffer)))
+      " Kindle ")
+     ((and (frame-live-p frame)
+           (eq buffer (frame-parameter frame 'my-reading-epub-buffer)))
+      " EPUB ")
+     (t (format " %s " (buffer-name buffer))))))
+
+(defvar my-read-center-tab-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c t") #'my/read-toggle-center-tab)
+    map)
+  "Keymap active in the Kindle and EPUB center tabs.")
+
+(define-minor-mode my-read-center-tab-mode
+  "Display the two my-read center sources as a dedicated tab line."
+  :init-value nil
+  :lighter nil
+  :keymap my-read-center-tab-mode-map
+  (when (fboundp 'tab-line-mode)
+    (tab-line-mode (if my-read-center-tab-mode 1 -1))))
+
+(defun my/read--configure-center-tab-buffer (buffer frame)
+  "Configure BUFFER as one of FRAME's two center reading tabs."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq-local my/read-center-tab-frame frame)
+      (setq-local tab-line-tabs-function #'my/read-center-tab-buffers)
+      (setq-local tab-line-tab-name-function #'my/read-center-tab-name)
+      (setq-local tab-line-close-button-show nil)
+      (setq-local tab-line-new-button-show nil)
+      (my-read-center-tab-mode 1))))
+
+(defun my/read-toggle-center-tab ()
+  "Toggle FRAME's sole center window between Kindle and EPUB tabs."
+  (interactive)
+  (let* ((frame (or my/read-center-tab-frame (selected-frame)))
+         (window (my/read-center-window frame))
+         (tabs (and (window-live-p window)
+                    (with-current-buffer (window-buffer window)
+                      (my/read-center-tab-buffers))))
+         (current (and (window-live-p window) (window-buffer window)))
+         (target (cl-find-if (lambda (buffer) (not (eq buffer current))) tabs)))
+    (unless target
+      (user-error "切り替えられるKindle／EPUBタブがありません"))
+    (set-window-buffer window target)
+    (select-window window)
+    (my/read-lookup-follow-post-command)
+    (my/read-translate-follow-post-command)))
+
+(defun my/read--track-center-tab-buffer (frame)
+  "Remember a newly displayed non-Kindle center buffer in FRAME as EPUB."
+  (when (and (frame-live-p frame) (my/read-frame-p frame))
+    (when-let ((window (my/read-center-window frame)))
+      (let ((buffer (window-buffer window))
+            (kindle (frame-parameter frame 'my-reading-kindle-buffer)))
+        (unless (eq buffer kindle)
+          (set-frame-parameter frame 'my-reading-epub-buffer buffer)
+          (my/read--configure-center-tab-buffer buffer frame))))))
+
+(add-hook 'window-buffer-change-functions #'my/read--track-center-tab-buffer)
 
 (defun my/read--other-reading-frame-p (frame)
   "Return non-nil if a live my-read frame other than FRAME exists."
@@ -147,71 +294,90 @@ Do not assume that a particular Lookup fork exposes
     (lookup-initialize))
   t)
 
-(defun my/read--lookup-normalize-directory (directory)
-  "Return DIRECTORY as an absolute directory name for comparison."
-  (when (stringp directory)
-    (file-name-as-directory (expand-file-name directory))))
+(defun my/read-reset-lookup-dictionary-module ()
+  "Discard the cached private Lookup module used by reading frames."
+  (interactive)
+  (setq my/read--lookup-module nil
+        my/read--lookup-module-signature nil
+        my/read-lookup-last-target nil))
 
-(defun my/read--lookup-reading-agent-p (agent)
-  "Return non-nil when AGENT belongs to the my-read dictionary scope."
-  (let ((class (lookup-agent-class agent))
-        (location (lookup-agent-location agent)))
-    (or (memq class my/read-lookup-agent-classes)
-        (and (eq class 'ndeb)
-             (stringp location)
-             (member (my/read--lookup-normalize-directory location)
-                     (mapcar #'my/read--lookup-normalize-directory
-                             my/read-lookup-ndeb-directories))))))
+(defun my/read-lookup-list-dictionaries ()
+  "Show available Lookup dictionary IDs and the current my-read selection."
+  (interactive)
+  (my/read--lookup-ensure-runtime)
+  (lookup-module-setup (lookup-default-module))
+  (let ((buffer (get-buffer-create "*my-read Lookup Dictionaries*"))
+        (dictionaries
+         (mapcar #'cdr (lookup-dictionary-alist t))))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "my-read / my-read-k Lookup dictionaries\n\n")
+        (insert "Customize: M-x customize-option RET my/read-lookup-dictionary-ids\n\n")
+        (dolist (dictionary dictionaries)
+          (let* ((id (lookup-dictionary-id dictionary))
+                 (selected
+                  (cl-some (lambda (prefix)
+                             (string-prefix-p prefix id))
+                           my/read-lookup-dictionary-ids)))
+            (insert (format "%s %s\n    %s\n"
+                            (if selected "[*]" "[ ]")
+                            id
+                            (lookup-dictionary-title dictionary)))))
+        (special-mode)
+        (goto-char (point-min))))
+    (pop-to-buffer buffer)))
+
+(defun my/read--lookup-reading-module ()
+  "Return the private Lookup module configured for my-read and my-read-k."
+  (my/read--lookup-ensure-runtime)
+  (unless my/read-lookup-dictionary-ids
+    (user-error "my/read-lookup-dictionary-ids is empty"))
+  (unless (and (fboundp 'lookup-new-module)
+               (fboundp 'lookup-module-setup))
+    (error "This Lookup version cannot create a private dictionary module"))
+  (unless (equal my/read--lookup-module-signature
+                 my/read-lookup-dictionary-ids)
+    (let ((module
+           (lookup-new-module
+            (cons "%my-read" my/read-lookup-dictionary-ids))))
+      ;; Resolve IDs now so an invalid configuration fails here instead of
+      ;; silently searching the full default module.
+      (lookup-module-setup module)
+      (setq my/read--lookup-module module
+            my/read--lookup-module-signature
+            (copy-sequence my/read-lookup-dictionary-ids))))
+  my/read--lookup-module)
 
 (defun my/read--lookup-reading-dictionaries ()
-  "Return my-read dictionaries when this Lookup version exposes them.
+  "Return dictionaries in the private my-read Lookup module."
+  (lookup-module-dictionaries (my/read--lookup-reading-module)))
 
-Some Lookup forks do not define `lookup-dictionary-list'.  In that case
-return nil deliberately: `lookup-pattern' will then search the normal
-default module instead of failing.  This keeps automatic Lookup working
-without rebuilding or mutating the user's Lookup runtime."
-  (my/read--lookup-ensure-runtime)
-  (when (and (boundp 'lookup-dictionary-list)
-             (listp (symbol-value 'lookup-dictionary-list))
-             (fboundp 'lookup-dictionary-agent)
-             (fboundp 'lookup-agent-class)
-             (fboundp 'lookup-agent-location))
-    (condition-case nil
-        (cl-remove-if-not
-         (lambda (dictionary)
-           (my/read--lookup-reading-agent-p
-            (lookup-dictionary-agent dictionary)))
-         (symbol-value 'lookup-dictionary-list))
-      (error nil))))
+(defun my/read--lookup-pattern-around
+    (function pattern &optional module)
+  "Use my-read's private module around Lookup FUNCTION for PATTERN.
 
-(defun my/read--lookup-call-with-reading-scope (function &rest arguments)
-  "Call FUNCTION with my-read's dictionary restriction when appropriate."
-  (if (my/read-frame-p)
-      (let ((dictionaries (my/read--lookup-reading-dictionaries)))
-        ;; A nil restriction intentionally falls back to Lookup's normal module.
-        ;; This keeps Lookup usable even if a local/forked agent reports its
-        ;; identity differently from the upstream Lookup structures.
-        (let ((lookup-search-dictionaries dictionaries))
-          (apply function arguments)))
-    (apply function arguments)))
+An explicitly supplied MODULE is respected.  A normal search outside a reading
+frame is passed through unchanged."
+  (funcall function
+           pattern
+           (if (and (my/read-frame-p) (null module))
+               (my/read--lookup-reading-module)
+             module)))
 
 (defun my/read--install-lookup-advice ()
   "Restrict manual Lookup searches only when they originate in my-read.
 
 Also remove advice left by older my-read revisions so reloading this file in
 an existing Emacs session cannot call the destructive profile-switch code."
-  ;; fixed1..fixed3 used this older around-advice on `lookup-pattern'.  The
-  ;; function may still be defined in a long-lived Emacs even though it is no
-  ;; longer present in this file.
-  (when (and (fboundp 'lookup-pattern)
-             (fboundp 'my/read--lookup-pattern-around))
-    (advice-remove 'lookup-pattern #'my/read--lookup-pattern-around))
   ;; Use the user's normal `lookup-pattern' path.  In the user's config this
   ;; already has frame-safety and "open first entry" advice attached, so keeping
   ;; my-read on the same command path preserves that working behavior.
   (when (fboundp 'lookup-pattern)
-    (advice-remove 'lookup-pattern #'my/read--lookup-call-with-reading-scope)
-    (advice-add 'lookup-pattern :around #'my/read--lookup-call-with-reading-scope)))
+    (when (fboundp 'my/read--lookup-call-with-reading-scope)
+      (advice-remove 'lookup-pattern #'my/read--lookup-call-with-reading-scope))
+    (advice-remove 'lookup-pattern #'my/read--lookup-pattern-around)
+    (advice-add 'lookup-pattern :around #'my/read--lookup-pattern-around)))
 
 (with-eval-after-load 'lookup
   (my/read--install-lookup-advice))
@@ -301,17 +467,11 @@ for automatic searches performed by my-read.  It never creates another pane."
                   ;; and "open the first entry" behavior to `lookup-pattern'.
                   ;; Calling it non-interactively with WORD does not open the
                   ;; minibuffer, but does preserve those existing advices.
-                  (let ((lookup-open-function #'my/read-lookup-open-left-pane)
-                        ;; Restrict this automatic search without rebuilding
-                        ;; Lookup's global agents/modules.
-                        (lookup-search-dictionaries
-                         (my/read--lookup-reading-dictionaries)))
+                  (let ((lookup-open-function #'my/read-lookup-open-left-pane))
                     (condition-case err
-                        ;; If the reduced dictionary list cannot be identified
-                        ;; in a local Lookup fork, nil means "use the normal
-                        ;; module".  Working Lookup is preferred to silently
-                        ;; disabling the follower.
-                        (lookup-pattern word)
+                        (lookup-pattern
+                         word
+                         (my/read--lookup-reading-module))
                       (error
                        (message "my-read Lookup error for %S: %s"
                                 word (error-message-string err))))))))
@@ -385,28 +545,74 @@ for automatic searches performed by my-read.  It never creates another pane."
      (timerp my/read-lookup-timer)
      my/read-lookup-running-p)))
 
+(defun my/read-lookup-dispatch-key (key)
+  "Run the command bound to KEY in the current my-read Lookup pane.
+
+The command is executed with the left Lookup window temporarily selected, then
+focus is restored to the center reading window."
+  (let* ((frame (selected-frame))
+         (center (my/read-center-window frame))
+         (lookup (my/read-lookup-window frame)))
+    (unless (and (my/read-frame-p frame)
+                 (window-live-p center)
+                 (eq (selected-window) center))
+      (user-error "Use this command from the my-read center window"))
+    (unless (window-live-p lookup)
+      (user-error "The my-read Lookup window is not available"))
+    (let ((command
+           (with-selected-window lookup
+             (key-binding (kbd key) t))))
+      (unless (and (commandp command)
+                   (not (memq command '(self-insert-command undefined))))
+        (user-error "Lookup has no command bound to %s in the current view"
+                    key))
+      (with-selected-window lookup
+        (call-interactively command)))))
+
+(defun my/read-lookup-next-entry ()
+  "Move to the next Lookup entry while focus stays in the reading pane."
+  (interactive)
+  (my/read-lookup-dispatch-key "n"))
+
+(defun my/read-lookup-previous-entry ()
+  "Move to the previous Lookup entry while focus stays in the reading pane."
+  (interactive)
+  (my/read-lookup-dispatch-key "p"))
+
+;; `english-reading-mode' is active in both my-read center buffers.  Install
+;; these explicitly so re-evaluating my-read.el updates a live session too.
+(keymap-set english-reading-mode-map "l" #'my/read-lookup-next-entry)
+(keymap-set english-reading-mode-map ";" #'my/read-lookup-previous-entry)
+
 
 ;;; ---------------------------------------------------------------------------
 ;;; Translation target
 ;;; ---------------------------------------------------------------------------
 
-(defun my/read-current-paragraph-at-window (window)
-  "Return the paragraph containing point in WINDOW.
+(defun my/read-current-sentence-at-window (window)
+  "Return (TEXT BUFFER BEG END) for the sentence at point in WINDOW.
 
-Dired windows and empty paragraphs return nil."
+Dired windows and empty sentences return nil.  BEG and END exclude surrounding
+whitespace so the returned bounds match the text shown as the translation
+source."
   (when (window-live-p window)
     (with-current-buffer (window-buffer window)
       (unless (derived-mode-p 'dired-mode)
         (save-excursion
           (goto-char (window-point window))
-          (when-let ((bounds (bounds-of-thing-at-point 'paragraph)))
-            (let ((paragraph
-                   (string-trim
-                    (buffer-substring-no-properties
-                     (car bounds)
-                     (cdr bounds)))))
-              (unless (string-empty-p paragraph)
-                paragraph))))))))
+          (let ((sentence-end-double-space nil))
+            (when-let ((bounds (bounds-of-thing-at-point 'sentence)))
+              (goto-char (car bounds))
+              (skip-chars-forward " \t\n\r" (cdr bounds))
+              (let ((beg (point)))
+                (goto-char (cdr bounds))
+                (skip-chars-backward " \t\n\r" beg)
+                (let ((end (point)))
+                  (when (< beg end)
+                    (list (buffer-substring-no-properties beg end)
+                          (current-buffer)
+                          beg
+                          end)))))))))))
 
 (defun my/read--kokoro-context-for-frame-p (frame)
   "Return non-nil when English-reading speech locks translation for FRAME."
@@ -416,29 +622,141 @@ Dired windows and empty paragraphs return nil."
        (not (string-empty-p (plist-get my/read-kokoro-context :text)))))
 
 (defun my/read--translation-target (frame center)
-  "Return (MODE TEXT) to translate for FRAME and CENTER."
+  "Return (MODE TEXT BUFFER BEG END) to translate for FRAME and CENTER."
   (if (my/read--kokoro-context-for-frame-p frame)
-      (list 'kokoro (plist-get my/read-kokoro-context :text))
-    (list 'paragraph (my/read-current-paragraph-at-window center))))
+      (list 'kokoro
+            (plist-get my/read-kokoro-context :text)
+            (plist-get my/read-kokoro-context :buffer)
+            (plist-get my/read-kokoro-context :beg)
+            (plist-get my/read-kokoro-context :end))
+    (if-let ((sentence (my/read-current-sentence-at-window center)))
+        (cons 'sentence sentence)
+      (list 'sentence nil nil nil nil))))
 
 
 ;;; ---------------------------------------------------------------------------
 ;;; Google Translate
 ;;; ---------------------------------------------------------------------------
 
-(defun my/read-google-translate-url (text)
-  "Build a Google Translate URL for TEXT."
-  (let ((url
-         (google-translate--format-request-url
-          `(("client" . "gtx")
-            ("ie"     . "UTF-8")
-            ("oe"     . "UTF-8")
-            ("sl"     . ,(or google-translate-default-source-language
-                           "auto"))
-            ("tl"     . ,(or google-translate-default-target-language
-                           "ja"))
-            ("dt"     . "t")
-            ("q"      . ,text)))))
+(defun my/read--translation-source-name (frame &optional source-buffer)
+  "Return a stable book or source name for FRAME and SOURCE-BUFFER."
+  (let ((source-buffer
+         (or source-buffer
+             (when-let ((center (my/read-center-window frame)))
+               (window-buffer center)))))
+    (or (and (buffer-live-p source-buffer)
+             (eq source-buffer
+                 (frame-parameter frame 'my-reading-kindle-buffer))
+             (frame-parameter frame 'my-reading-kindle-book-name))
+        (frame-parameter frame 'my-reading-book-name)
+        (when (buffer-live-p source-buffer)
+          (with-current-buffer source-buffer
+          (cond
+           (buffer-file-name
+            (file-name-base buffer-file-name))
+           ((derived-mode-p 'dired-mode)
+            (file-name-nondirectory
+             (directory-file-name default-directory)))
+           (t
+            (string-trim (buffer-name) "\\*+" "\\*+")))))
+        "Unknown Book")))
+
+(defun my/read--translation-safe-directory-name (name)
+  "Return NAME made safe for use as one directory component."
+  (let* ((clean
+          (replace-regexp-in-string
+           "[/\\\\:[:cntrl:]]+" "-" (string-trim (or name ""))))
+         (clean (replace-regexp-in-string "[[:space:]]+" " " clean))
+         (clean (replace-regexp-in-string "\\`[. ]+\\|[. ]+\\'" "" clean)))
+    (if (string-empty-p clean)
+        "Unknown Book"
+      (truncate-string-to-width clean 120 nil nil t))))
+
+(defun my/read--translation-markdown-quote (text)
+  "Format TEXT as a Markdown block quote."
+  (concat "> "
+          (replace-regexp-in-string "\n" "\n> " (string-trim text))))
+
+(defun my/read-record-translation (frame source translation mode
+                                         &optional source-buffer)
+  "Record a successful translation for FRAME.
+
+SOURCE and TRANSLATION are stored in a per-book Markdown file.  MODE identifies
+whether the request followed ordinary sentence navigation or Kokoro speech.
+Repeated source/translation pairs are recorded only once, including across
+Emacs restarts.  Return the log file name, or nil when logging is disabled."
+  (when my/read-translation-log-enabled
+    (condition-case err
+        (let* ((book (my/read--translation-source-name frame source-buffer))
+               (safe-book (my/read--translation-safe-directory-name book))
+               (directory
+                (expand-file-name safe-book my/read-translation-log-root))
+               (file (expand-file-name "google-translate.md" directory))
+               (id (secure-hash 'sha1
+                                (concat source "\0" translation)))
+               (marker (format "<!-- google-translate-id: %s -->" id))
+               (known (gethash (cons file id)
+                               my/read-translation-recorded-ids)))
+          (unless known
+            (let ((already-recorded
+                   (and (file-readable-p file)
+                        (with-temp-buffer
+                          (insert-file-contents file)
+                          (search-forward marker nil t)))))
+              (unless already-recorded
+                (make-directory directory t)
+                (with-temp-buffer
+                  (unless (file-exists-p file)
+                    (insert (format "# Google Translate — %s\n\n" book)))
+                  (insert (format "## %s\n\n%s\n\n**Mode:** %s\n\n### Original\n\n%s\n\n### Translation\n\n%s\n\n"
+                                  (format-time-string "%Y-%m-%d %H:%M:%S")
+                                  marker
+                                  (if (eq mode 'kokoro) "Kokoro" "Sentence")
+                                  (my/read--translation-markdown-quote source)
+                                  (my/read--translation-markdown-quote
+                                   translation)))
+                  (write-region (point-min) (point-max) file t 'silent)))
+              (puthash (cons file id) t my/read-translation-recorded-ids)))
+          file)
+      (error
+       (message "Could not record Google translation: %s"
+                (error-message-string err))
+       nil))))
+
+(defun my/read-google-translate-url (text &optional frame source-buffer)
+  "Build a Google Translate URL for TEXT in FRAME from SOURCE-BUFFER.
+Detected Kindle sources use their own source language.  Japanese is translated
+to `my/read-japanese-translation-target-language'; all other languages use the
+normal google-translate.el target."
+  (let* ((source-buffer
+          (or source-buffer
+              (and (frame-live-p frame)
+                   (when-let ((center (my/read-center-window frame)))
+                     (window-buffer center)))))
+         (source-language
+          (or (and (buffer-live-p source-buffer)
+                   (buffer-local-value 'my/read-source-language source-buffer))
+              (and (frame-live-p frame)
+                   (let ((kindle-buffer
+                          (frame-parameter frame 'my-reading-kindle-buffer)))
+                     (or (null kindle-buffer)
+                         (eq source-buffer kindle-buffer)))
+                   (frame-parameter frame 'my-reading-source-language))))
+         (japanese-p (equal source-language "ja"))
+         (url
+          (google-translate--format-request-url
+           `(("client" . "gtx")
+             ("ie"     . "UTF-8")
+             ("oe"     . "UTF-8")
+             ("sl"     . ,(or source-language
+                               google-translate-default-source-language
+                               "auto"))
+             ("tl"     . ,(if japanese-p
+                               my/read-japanese-translation-target-language
+                             (or google-translate-default-target-language
+                                 "ja")))
+             ("dt"     . "t")
+             ("q"      . ,text)))))
     ;; Support google-translate.el versions whose base URL is still http.
     (replace-regexp-in-string "\\`http:" "https:" url)))
 
@@ -452,12 +770,81 @@ Dired windows and empty paragraphs return nil."
     (with-current-buffer buffer
       (unless (derived-mode-p 'special-mode)
         (special-mode))
-      (visual-line-mode 1))
+      (visual-line-mode 1)
+      ;; `tab-line-mode' is buffer-local.  Keep the compact translation pane
+      ;; free of buffer tabs without changing the center or Lookup panes.
+      (when (fboundp 'tab-line-mode)
+        (tab-line-mode -1)))
     buffer))
+
+(defun my/read-translate-delete-overlay (&optional frame)
+  "Delete FRAME's translation-target overlay."
+  (let* ((frame (or frame (selected-frame)))
+         (overlay (and (frame-live-p frame)
+                       (frame-parameter frame
+                                        'my-reading-translate-overlay))))
+    (when (overlayp overlay)
+      (delete-overlay overlay))
+    (when (frame-live-p frame)
+      (set-frame-parameter frame 'my-reading-translate-overlay nil))))
+
+(defun my/read--translate-overlay-background (frame)
+  "Return a theme-aware translucent-blue background color for FRAME."
+  (let* ((background (or (face-background 'default frame t) "#000000"))
+         (blue (color-name-to-rgb "LightSkyBlue" frame))
+         (base (color-name-to-rgb background frame))
+         (opacity (max 0.0 (min 1.0 my/read-translate-overlay-opacity))))
+    (if (and blue base)
+        (apply #'color-rgb-to-hex
+               (append
+                (cl-mapcar
+                 (lambda (blue-component background-component)
+                   (+ (* opacity blue-component)
+                      (* (- 1.0 opacity) background-component)))
+                 blue base)
+                '(2)))
+      background)))
+
+(defun my/read-refresh-translate-overlay-face (&optional frame)
+  "Refresh the translation overlay face for FRAME's current theme."
+  (let ((frame (or frame (selected-frame))))
+    (when (frame-live-p frame)
+      (set-face-attribute
+       'my/read-translate-overlay-face frame
+       :inherit nil
+       :background (my/read--translate-overlay-background frame)
+       :foreground 'unspecified
+       :family 'unspecified
+       :foundry 'unspecified
+       :width 'unspecified
+       :height 'unspecified
+       :weight 'unspecified
+       :slant 'unspecified
+       :extend t))))
+
+(defun my/read-translate-show-overlay (frame buffer beg end)
+  "Highlight BUFFER from BEG to END as FRAME's translation target."
+  (my/read-translate-delete-overlay frame)
+  (when (and (frame-live-p frame)
+             (buffer-live-p buffer)
+             (integer-or-marker-p beg)
+             (integer-or-marker-p end)
+             (< beg end)
+             (<= end (with-current-buffer buffer (point-max))))
+    (my/read-refresh-translate-overlay-face frame)
+    (let ((overlay (make-overlay beg end buffer nil t)))
+      (overlay-put overlay 'face 'my/read-translate-overlay-face)
+      ;; Let Kokoro's normal `highlight' overlay remain visually dominant when
+      ;; speech and translation cover the same sentence.
+      (overlay-put overlay 'priority -10)
+      (overlay-put overlay 'evaporate t)
+      (overlay-put overlay 'window
+                   (my/read-center-window-for-buffer frame buffer))
+      (set-frame-parameter frame 'my-reading-translate-overlay overlay))))
 
 (defun my/read-translate-display (frame source translation mode)
   "Display SOURCE and TRANSLATION in FRAME.
-MODE is `kokoro' or `paragraph'."
+MODE is `kokoro' or `sentence'."
   (when (and (frame-live-p frame)
              (my/read-frame-p frame))
     (when-let ((window (my/read-translate-window frame)))
@@ -469,7 +856,7 @@ MODE is `kokoro' or `paragraph'."
              (propertize
               (if (eq mode 'kokoro)
                   "Google Translate  [Kokoro]\n\n"
-                "Google Translate  [Paragraph]\n\n")
+                "Google Translate  [Sentence]\n\n")
               'face 'font-lock-keyword-face))
             (insert translation)
             (insert "\n\n")
@@ -497,9 +884,10 @@ FRAME, CENTER and TARGET identify the request; MODE describes its source."
              (equal target my/read-translate-last-target))
     (my/read-translate-stop-process)
 
-    (let* ((buffer
+    (let* ((source-buffer (nth 1 target))
+           (buffer
             (generate-new-buffer " *Reading Google Translate Process*"))
-           (url (my/read-google-translate-url text))
+           (url (my/read-google-translate-url text frame source-buffer))
            (process
             (make-process
              :name "reading-google-translate"
@@ -526,7 +914,9 @@ FRAME, CENTER and TARGET identify the request; MODE describes its source."
                                      (google-translate-json-translation json)))
                                (when translation
                                  (my/read-translate-display
-                                  frame text translation mode)))
+                                  frame text translation mode)
+                                 (my/read-record-translation
+                                  frame text translation mode source-buffer)))
                            (error
                             (message "Google Translate error: %s"
                                      (error-message-string err))))))
@@ -541,18 +931,17 @@ FRAME, CENTER and TARGET identify the request; MODE describes its source."
   "Update translation target for FRAME using CENTER.
 
 While Kokoro is active in FRAME, keep translation locked to the exact spoken
-text.  Otherwise translate the paragraph containing CENTER's point.  This
+sentence.  Otherwise translate the sentence containing CENTER's point.  This
 function is also safe to call asynchronously from the speech-finish hook."
   (when (and my-read-translate-follow-mode
              (frame-live-p frame)
              (my/read-frame-p frame)
              (window-live-p center))
-    (pcase-let* ((`(,mode ,text)
+    (pcase-let* ((`(,mode ,text ,buffer ,beg ,end)
                    (my/read--translation-target frame center))
-                 (buffer (window-buffer center))
                  (target
                   (and text
-                       (list frame buffer mode text))))
+                       (list frame buffer mode beg end text))))
       (unless (equal target my/read-translate-last-target)
         (setq my/read-translate-last-target target)
 
@@ -563,23 +952,26 @@ function is also safe to call asynchronously from the speech-finish hook."
           (setq my/read-translate-timer nil))
         (my/read-translate-stop-process)
 
-        (when text
-          (setq my/read-translate-timer
-                (run-with-idle-timer
-                 my/read-translate-idle-delay
-                 nil
-                 #'my/read-translate-start
-                 frame
-                 center
-                 target
-                 mode
-                 text)))))))
+        (if text
+            (progn
+              (my/read-translate-show-overlay frame buffer beg end)
+              (setq my/read-translate-timer
+                    (run-with-idle-timer
+                     my/read-translate-idle-delay
+                     nil
+                     #'my/read-translate-start
+                     frame
+                     center
+                     target
+                     mode
+                     text)))
+          (my/read-translate-delete-overlay frame))))))
 
 (defun my/read-translate-follow-post-command ()
   "Translate the appropriate text for the selected my-read center window.
 
 While Kokoro is active, translate exactly the text currently being read.
-Otherwise, translate the paragraph containing point."
+Otherwise, translate the sentence containing point."
   (when my-read-translate-follow-mode
     (let* ((frame (selected-frame))
            (center (my/read-center-window frame)))
@@ -602,6 +994,9 @@ Otherwise, translate the paragraph containing point."
     (when (timerp my/read-translate-timer)
       (cancel-timer my/read-translate-timer))
     (my/read-translate-stop-process)
+    (dolist (frame (frame-list))
+      (when (my/read-frame-p frame)
+        (my/read-translate-delete-overlay frame)))
     (setq my/read-translate-timer nil
           my/read-translate-last-target nil)))
 
@@ -616,7 +1011,8 @@ Otherwise, translate the paragraph containing point."
   (let* ((frame (plist-get context :frame))
          (window (plist-get context :window))
          (center (and (frame-live-p frame)
-                      (my/read-center-window frame))))
+                      (memq window (my/read-center-windows frame))
+                      window)))
     (when (and (frame-live-p frame)
                (my/read-frame-p frame)
                (window-live-p center)
@@ -633,9 +1029,11 @@ Otherwise, translate the paragraph containing point."
     (let ((frame (plist-get context :frame)))
       (setq my/read-kokoro-context nil)
       (when (frame-live-p frame)
-        (when-let ((center (my/read-center-window frame)))
+        (when-let ((center
+                    (and (window-live-p (plist-get context :window))
+                         (plist-get context :window))))
           ;; Only now follow point again.  With `j', point is normally already
-          ;; on the next sentence, so its paragraph becomes the new target.
+          ;; on the next sentence, so that sentence becomes the new target.
           (my/read-translate-update-for-frame frame center))))))
 
 (add-hook 'english-reading-mode-speech-start-hook
@@ -650,7 +1048,7 @@ Otherwise, translate the paragraph containing point."
   (if my/read-kokoro-context
       (message "my-read translation LOCKED [Kokoro]: %s"
                (plist-get my/read-kokoro-context :text))
-    (message "my-read translation UNLOCKED [Paragraph]")))
+    (message "my-read translation UNLOCKED [Sentence]")))
 
 ;;; ---------------------------------------------------------------------------
 ;;; my-read frame setup
@@ -669,9 +1067,9 @@ Otherwise, translate the paragraph containing point."
         (special-mode)))
     buffer))
 
-(defun my/read--setup-frame (frame &optional center-buffer)
+(defun my/read--setup-frame (frame &optional kindle-buffer)
   "Build the my-read layout inside FRAME.
-When CENTER-BUFFER is live, display it instead of opening `my/read-book-path'."
+When KINDLE-BUFFER is live, expose it and the EPUB source as center tabs."
   (with-selected-frame frame
     (delete-other-windows)
 
@@ -680,6 +1078,7 @@ When CENTER-BUFFER is live, display it instead of opening `my/read-book-path'."
            (center-window
             (split-window-right
              (floor (/ (window-total-width lookup-window) 3))))
+           epub-buffer
            right-window
            translate-window
            note-window)
@@ -699,6 +1098,11 @@ When CENTER-BUFFER is live, display it instead of opening `my/read-book-path'."
       ;; Store window identity on the frame.
       (set-frame-parameter frame 'my-reading-lookup-window lookup-window)
       (set-frame-parameter frame 'my-reading-center-window center-window)
+      (set-frame-parameter frame 'my-reading-kindle-window
+                           (and (buffer-live-p kindle-buffer) center-window))
+      (set-frame-parameter frame 'my-reading-epub-window center-window)
+      (set-frame-parameter frame 'my-reading-center-windows (list center-window))
+      (set-frame-parameter frame 'my-reading-kindle-buffer kindle-buffer)
       (set-frame-parameter frame 'my-reading-translate-window translate-window)
       (set-frame-parameter frame 'my-reading-note-window note-window)
 
@@ -719,21 +1123,32 @@ When CENTER-BUFFER is live, display it instead of opening `my/read-book-path'."
              (propertize "Google Translate\n\n"
                          'face 'font-lock-keyword-face))
             (insert
-             "通常はカーソル位置の段落を翻訳します。\nKokoro読み上げ中は読み上げている文章を翻訳します。")))
+             "カーソル位置の1文を翻訳します。\nKokoro読み上げ中は読み上げている1文を翻訳します。")))
         (set-window-buffer translate-window buffer)
         (set-window-dedicated-p translate-window t))
 
-      ;; Center: normal book source, or a caller-provided text source.
+      ;; Open the EPUB/normal book in the sole center window and remember its
+      ;; actual buffer (which may initially be Dired).
       (select-window center-window)
-      (if (buffer-live-p center-buffer)
-          (set-window-buffer center-window center-buffer)
-        (find-file (expand-file-name my/read-book-path)))
+      (find-file (expand-file-name my/read-book-path))
+      (setq epub-buffer (current-buffer))
+      (set-frame-parameter frame 'my-reading-epub-buffer epub-buffer)
+      (my/read--configure-center-tab-buffer epub-buffer frame)
+
+      ;; Kindle is the initially selected center tab when it is available.
+      (when (buffer-live-p kindle-buffer)
+        (my/read--configure-center-tab-buffer kindle-buffer frame)
+        (set-window-buffer center-window kindle-buffer))
 
       ;; Right bottom: reading notes.
       (select-window note-window)
       (find-file (expand-file-name my/read-note-file))
+      ;; Disable buffer tabs only in the reading-note buffer.  Do this after
+      ;; `find-file', because the selected buffer changes at that point.
+      (when (fboundp 'tab-line-mode)
+        (tab-line-mode -1))
 
-      ;; Back to the book.
+      ;; Start in Kindle when present; otherwise use the normal book.
       (select-window center-window)
 
       ;; Self-contained Lookup follower from this file.
@@ -748,26 +1163,12 @@ When CENTER-BUFFER is live, display it instead of opening `my/read-book-path'."
 
 ;;;###autoload
 (defun my-read ()
-  "Create a new dedicated frame and start the English reading workspace."
+  "Open the unified Kindle.app and EPUB reading workspace."
   (interactive)
-  ;; Initialize normal Lookup once; my-read only narrows search scope dynamically.
-  (my/read--lookup-enter)
-  (let (frame)
-    (condition-case err
-        (progn
-          (setq frame (make-frame `((name . ,my/read-frame-name))))
-          (set-frame-parameter frame 'my-reading-frame t)
-          (my/read--setup-frame frame)
-          (select-frame-set-input-focus frame)
-          frame)
-      (error
-       ;; Frame setup may fail after Lookup initialization.  No dictionary
-       ;; profile needs restoring because my-read never mutates Lookup runtime.
-       (if (frame-live-p frame)
-           (delete-frame frame t)
-         (unless (cl-some #'my/read-frame-p (frame-list))
-           (my/read--lookup-restore-normal)))
-       (signal (car err) (cdr err))))))
+  ;; Load lazily to avoid a load-time cycle: my-read-k2 requires my-read via
+  ;; the shared my-read-k UI implementation.
+  (require 'my-read-k2)
+  (my-read-k2--open-unified-workspace))
 
 (defun my/read--frame-deleted (frame)
   "Clean up my-read state when FRAME is deleted."
@@ -775,6 +1176,8 @@ When CENTER-BUFFER is live, display it instead of opening `my/read-book-path'."
     (when (and my/read-kokoro-context
                (eq frame (plist-get my/read-kokoro-context :frame)))
       (setq my/read-kokoro-context nil))
+
+    (my/read-translate-delete-overlay frame)
 
     (dolist (parameter '(my-reading-translate-buffer
                          my-reading-lookup-ready-buffer))

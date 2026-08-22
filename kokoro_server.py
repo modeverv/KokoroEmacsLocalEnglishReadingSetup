@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import io
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -60,6 +61,38 @@ def _ensure_model():
     return _model
 
 
+def _ensure_japanese_pipeline(model) -> None:
+    """Create Kokoro's Japanese pipeline with pyopenjtalk.
+
+    Misaki defaults to its Cutlet backend, which needs a separately downloaded
+    full UniDic dataset even after package installation.  pyopenjtalk ships its
+    own compact dictionary and is already supported by Misaki's Japanese G2P,
+    so select it while the cached pipeline is constructed.
+    """
+    if "j" in model._pipelines:
+        return
+
+    if importlib.util.find_spec("pyopenjtalk") is None:
+        raise RuntimeError(
+            "Japanese Kokoro support is not installed; run "
+            "`uv sync --extra japanese` after installing working C++ build tools"
+        )
+
+    from misaki import ja
+
+    original_jag2p = ja.JAG2P
+
+    def pyopenjtalk_jag2p(*_args, **kwargs):
+        kwargs["version"] = "pyopenjtalk"
+        return original_jag2p(**kwargs)
+
+    ja.JAG2P = pyopenjtalk_jag2p
+    try:
+        model._get_pipeline("j")
+    finally:
+        ja.JAG2P = original_jag2p
+
+
 def _synthesize_wav(
     text: str,
     voice: str,
@@ -68,6 +101,9 @@ def _synthesize_wav(
 ) -> bytes:
     """Generate one complete WAV response. Runs only in the MLX worker."""
     model = _ensure_model()
+
+    if lang_code.lower() in {"j", "ja"}:
+        _ensure_japanese_pipeline(model)
 
     chunks: list[np.ndarray] = []
     sample_rate: int | None = None
@@ -128,6 +164,15 @@ async def voices() -> dict[str, object]:
             "british_male": ["bm_daniel", "bm_george"],
             "american_female": ["af_heart", "af_bella", "af_nova", "af_sky"],
             "american_male": ["am_adam", "am_echo"],
+            "japanese_female": ["jf_nezumi"],
+            "japanese_male": ["jm_kumo"],
+            "mandarin_female": ["zf_xiaoxiao"],
+            "mandarin_male": ["zm_yunxi"],
+            "spanish": ["ef_dora", "em_alex"],
+            "french": ["ff_siwis"],
+            "hindi": ["hf_alpha", "hm_omega"],
+            "italian": ["if_sara", "im_nicola"],
+            "portuguese": ["pf_dora", "pm_alex"],
         },
     }
 

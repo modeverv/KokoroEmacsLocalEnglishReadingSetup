@@ -68,6 +68,24 @@
   "Path to the macOS audio player."
   :type 'file)
 
+(defcustom kokoro-reader-backend 'kokoro
+  "Speech backend used for the current buffer.
+`kokoro' uses the local HTTP server.  `macos' uses `/usr/bin/say' and is the
+automatic fallback for languages unsupported by Kokoro."
+  :type '(choice (const kokoro) (const macos)))
+
+(defcustom kokoro-reader-macos-program "/usr/bin/say"
+  "Path to the macOS speech synthesizer used by the fallback backend."
+  :type 'file)
+
+(defcustom kokoro-reader-macos-voice nil
+  "macOS voice used by the fallback backend, or nil for the system default."
+  :type '(choice (const :tag "System default" nil) string))
+
+(defcustom kokoro-reader-macos-rate 180
+  "Speaking rate passed to the macOS fallback backend."
+  :type 'integer)
+
 (defvar kokoro-reader--request-process nil)
 (defvar kokoro-reader--player-process nil)
 (defvar kokoro-reader--server-process nil)
@@ -258,7 +276,8 @@ Call ON-ERROR with a diagnostic string when startup cannot be completed."
     (setq kokoro-reader--player-process process)
     (message "Kokoro speaking…")))
 
-(defun kokoro-reader--speak-bounds (beg end)
+(defun kokoro-reader--speak-bounds-kokoro (beg end)
+  "Speak BEG through END using the local Kokoro server."
   (kokoro-reader-stop)
   (let* ((text (kokoro-reader--text beg end))
          (payload (kokoro-reader--payload text))
@@ -327,6 +346,49 @@ Call ON-ERROR with a diagnostic string when startup cannot be completed."
        (when (equal audio-file kokoro-reader--audio-file)
          (kokoro-reader--delete-audio-file))
        (message "Kokoro request not started: %s" error-text)))))
+
+(defun kokoro-reader--speak-bounds-macos (beg end)
+  "Speak BEG through END directly with the macOS `say' command."
+  (kokoro-reader-stop)
+  (let* ((text (kokoro-reader--text beg end))
+         (overlay (make-overlay beg end (current-buffer) nil t))
+         (command
+          (append (list kokoro-reader-macos-program
+                        "-r" (number-to-string kokoro-reader-macos-rate))
+                  (when (and (stringp kokoro-reader-macos-voice)
+                             (not (string-empty-p kokoro-reader-macos-voice)))
+                    (list "-v" kokoro-reader-macos-voice))))
+         process)
+    (overlay-put overlay 'face 'highlight)
+    (setq kokoro-reader--overlay overlay)
+    (setq process
+          (make-process
+           :name "kokoro-macos-say"
+           :buffer nil
+           :connection-type 'pipe
+           :coding 'utf-8-unix
+           :noquery t
+           :command command
+           :sentinel
+           (lambda (proc _event)
+             (when (and (eq proc kokoro-reader--player-process)
+                        (memq (process-status proc) '(exit signal)))
+               (setq kokoro-reader--player-process nil)
+               (when (overlayp overlay)
+                 (delete-overlay overlay))
+               (message "macOS speech finished")))))
+    (setq kokoro-reader--player-process process)
+    ;; `make-process' already applies the UTF-8 process coding system.
+    (process-send-string process text)
+    (process-send-eof process)
+    (message "macOS speech speaking with %s…"
+             (or kokoro-reader-macos-voice "the system voice"))))
+
+(defun kokoro-reader--speak-bounds (beg end)
+  "Speak BEG through END with the buffer's configured backend."
+  (if (eq kokoro-reader-backend 'macos)
+      (kokoro-reader--speak-bounds-macos beg end)
+    (kokoro-reader--speak-bounds-kokoro beg end)))
 
 ;;;###autoload
 (defun kokoro-reader-speak ()

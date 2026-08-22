@@ -53,7 +53,7 @@ final class BridgeRuntime {
         guard let client else { throw BridgeFailure(code: "TARGET_DISCONNECTED", message: "Attach to a Kindle target first") }
         let captureParams = params.object("capture") ?? params
         let crop = try captureCrop(params)
-        let language = captureParams.string("language", default: "en-US")!
+        let language = captureParams.string("language", default: "auto")!
         let accurate = captureParams.string("recognition", default: "accurate") != "fast"
         let screenshot: ScreenshotImage
         if let settledImage {
@@ -68,6 +68,9 @@ final class BridgeRuntime {
             "imageWidth": .number(Double(screenshot.image.width)),
             "imageHeight": .number(Double(screenshot.image.height)),
             "ocrMs": .number(Double(ocr.elapsedMilliseconds)),
+            "ocrEngine": .string(ocr.engine),
+            "language": .string(ocr.detectedLanguage),
+            "layout": .string(ocr.layout),
             "text": .string(ocr.text),
             "lines": .array(ocr.lines.map { line in
                 .object(["text": .string(line.text),

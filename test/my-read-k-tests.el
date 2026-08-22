@@ -8,6 +8,11 @@
 (unless (featurep 'google-translate-core)
   (provide 'google-translate-core))
 
+;; The real optional package declares these special variables.  Batch tests
+;; provide only its feature, so declare the setting used by local URL logic.
+(defvar google-translate-default-target-language "ja")
+(defvar google-translate-default-source-language "en")
+
 (require 'my-read-k)
 
 (defmacro my-read-k-test--isolated (&rest body)
@@ -22,6 +27,7 @@
          (my-read-k--sync-busy-p nil)
          (my-read-k--pending-intent nil)
          (my-read-k--state 'detached)
+         (my-read-k--detected-language nil)
          (my-read-k--frame nil)
          (my-read-k--buffer nil)
          (my-read-k--last-fingerprint nil)
@@ -32,6 +38,115 @@
          (my-read-k--back-queue nil)
          (my-read-k--back-source-fingerprint nil))
      ,@body))
+
+(ert-deftest my-read-k-detects-japanese-result-and-falls-back-for-old-bridge ()
+  (should (equal (my-read-k--language-from-result
+                  '((language . "ja") (text . "Japanese may be mixed in.")))
+                 "ja"))
+  (should (equal (my-read-k--language-from-result
+                  '((text . "これは日本語の文章です。")))
+                 "ja"))
+  (should (equal (my-read-k--language-from-result
+                  '((text . "This is an English sentence.")))
+                 "en")))
+
+(ert-deftest my-read-k-japanese-sentence-boundaries-work-one-at-a-time ()
+  (with-temp-buffer
+    (insert "これは最初の文です。これは二番目の文です！最後です？")
+    (goto-char (point-min))
+    (setq-local sentence-end-double-space nil)
+    (should (equal (buffer-substring-no-properties
+                    (car (bounds-of-thing-at-point 'sentence))
+                    (cdr (bounds-of-thing-at-point 'sentence)))
+                   "これは最初の文です。"))))
+
+(ert-deftest my-read-k-japanese-page-switches-buffer-local-kokoro-settings ()
+  (my-read-k-test--isolated
+   (let ((my-read-k--buffer (generate-new-buffer " *my-read-k-language-test*"))
+         (my-read-k--frame (selected-frame))
+         (kokoro-reader-voice "bf_emma")
+         (kokoro-reader-lang-code "b")
+         (my-read-k-japanese-kokoro-voice "jf_nezumi"))
+     (unwind-protect
+         (progn
+           (my-read-k--configure-buffer-language
+            '((language . "ja") (text . "日本語です。")))
+           (with-current-buffer my-read-k--buffer
+             (should (local-variable-p 'kokoro-reader-voice))
+             (should (equal kokoro-reader-voice "jf_nezumi"))
+             (should (equal kokoro-reader-lang-code "j")))
+           (should (equal (frame-parameter my-read-k--frame
+                                           'my-reading-source-language)
+                          "ja"))
+           (my-read-k--configure-buffer-language
+            '((language . "en") (text . "English.")))
+           (with-current-buffer my-read-k--buffer
+             (should-not (local-variable-p 'kokoro-reader-voice))
+             (should-not (local-variable-p 'kokoro-reader-lang-code))))
+       (set-frame-parameter my-read-k--frame 'my-reading-source-language nil)
+       (kill-buffer my-read-k--buffer)))))
+
+(ert-deftest my-read-k-kokoro-profile-switches-spanish-voice ()
+  (my-read-k-test--isolated
+   (let ((my-read-k--buffer (generate-new-buffer " *my-read-k-spanish-test*"))
+         (my-read-k--frame (selected-frame)))
+     (unwind-protect
+         (progn
+           (my-read-k--configure-buffer-language
+            '((language . "es") (text . "Esta es una frase.")))
+           (with-current-buffer my-read-k--buffer
+             (should (eq kokoro-reader-backend 'kokoro))
+             (should (equal kokoro-reader-lang-code "e"))
+             (should (equal kokoro-reader-voice "ef_dora"))))
+       (set-frame-parameter my-read-k--frame 'my-reading-source-language nil)
+       (kill-buffer my-read-k--buffer)))))
+
+(ert-deftest my-read-k-unsupported-kokoro-language-uses-macos-voice ()
+  (my-read-k-test--isolated
+   (let ((my-read-k--buffer (generate-new-buffer " *my-read-k-german-test*"))
+         (my-read-k--frame (selected-frame)))
+     (unwind-protect
+         (progn
+           (my-read-k--configure-buffer-language
+            '((language . "de") (text . "Dies ist ein Satz.")))
+           (with-current-buffer my-read-k--buffer
+             (should (eq kokoro-reader-backend 'macos))
+             (should (equal kokoro-reader-macos-voice "Anna"))))
+       (set-frame-parameter my-read-k--frame 'my-reading-source-language nil)
+       (kill-buffer my-read-k--buffer)))))
+
+(ert-deftest my-read-japanese-source-translates-to-english ()
+  (let ((frame (selected-frame))
+        (google-translate-default-source-language "en")
+        (google-translate-default-target-language "ja")
+        captured)
+    (set-frame-parameter frame 'my-reading-source-language "ja")
+    (unwind-protect
+        (cl-letf (((symbol-function 'google-translate--format-request-url)
+                   (lambda (params)
+                     (setq captured params)
+                     "http://translate.test")))
+          (should (equal (my/read-google-translate-url "日本語です。" frame)
+                         "https://translate.test"))
+          (should (equal (cdr (assoc "sl" captured)) "ja"))
+          (should (equal (cdr (assoc "tl" captured)) "en")))
+      (set-frame-parameter frame 'my-reading-source-language nil))))
+
+(ert-deftest my-read-other-language-source-translates-to-japanese ()
+  (let ((frame (selected-frame))
+        (google-translate-default-source-language "en")
+        (google-translate-default-target-language "ja")
+        captured)
+    (set-frame-parameter frame 'my-reading-source-language "es")
+    (unwind-protect
+        (cl-letf (((symbol-function 'google-translate--format-request-url)
+                   (lambda (params)
+                     (setq captured params)
+                     "http://translate.test")))
+          (my/read-google-translate-url "Esta es una frase." frame)
+          (should (equal (cdr (assoc "sl" captured)) "es"))
+          (should (equal (cdr (assoc "tl" captured)) "ja")))
+      (set-frame-parameter frame 'my-reading-source-language nil))))
 
 (ert-deftest my-read-k-process-filter-assembles-partial-and-multiple-lines ()
   (my-read-k-test--isolated
@@ -123,6 +238,127 @@
        (english-reading-mode -1)
        (should sentence-end-double-space)
        (should (local-variable-p 'sentence-end-double-space))))))
+
+(ert-deftest my-read-translation-target-uses-one-sentence-and-exact-bounds ()
+  (my-read-k-test--isolated
+   (save-window-excursion
+     (with-temp-buffer
+       (insert "First sentence. Second sentence. Third sentence.")
+       (set-window-buffer (selected-window) (current-buffer))
+       (goto-char (point-min))
+       (search-forward "Second")
+       (set-window-point (selected-window) (point))
+       (let ((my/read-kokoro-context nil))
+         (pcase-let ((`(,mode ,text ,buffer ,beg ,end)
+                      (my/read--translation-target
+                       (selected-frame) (selected-window))))
+           (should (eq mode 'sentence))
+           (should (eq buffer (current-buffer)))
+           (should (equal text "Second sentence."))
+           (should (equal (buffer-substring-no-properties beg end)
+                          "Second sentence."))))))))
+
+(ert-deftest my-read-translation-target-reuses-spoken-sentence-bounds ()
+  (my-read-k-test--isolated
+   (save-window-excursion
+     (with-temp-buffer
+       (insert "Spoken sentence. Next sentence.")
+       (set-window-buffer (selected-window) (current-buffer))
+       (let* ((frame (selected-frame))
+              (my/read-kokoro-context
+               (list :frame frame :window (selected-window)
+                     :buffer (current-buffer) :beg 1 :end 17
+                     :text "Spoken sentence.")))
+         (should
+          (equal (my/read--translation-target frame (selected-window))
+                 (list 'kokoro "Spoken sentence." (current-buffer) 1 17))))))))
+
+(ert-deftest my-read-translation-overlay-targets-center-window ()
+  (my-read-k-test--isolated
+   (save-window-excursion
+     (with-temp-buffer
+       (insert "First sentence. Second sentence.")
+       (set-window-buffer (selected-window) (current-buffer))
+       (let ((frame (selected-frame)))
+         (set-frame-parameter frame 'my-reading-center-window
+                              (selected-window))
+         (unwind-protect
+             (progn
+               (my/read-translate-show-overlay frame (current-buffer) 1 16)
+               (let ((overlay
+                      (frame-parameter frame
+                                       'my-reading-translate-overlay)))
+                 (should (overlayp overlay))
+                 (should (= (overlay-start overlay) 1))
+                 (should (= (overlay-end overlay) 16))
+                 (should (eq (overlay-get overlay 'face)
+                             'my/read-translate-overlay-face))
+                 (should (eq (overlay-get overlay 'window)
+                             (selected-window)))))
+           (my/read-translate-delete-overlay frame)
+           (set-frame-parameter frame 'my-reading-center-window nil)))))))
+
+(ert-deftest my-read-translation-overlay-blends-blue-with-theme-background ()
+  (let ((my/read-translate-overlay-opacity 0.35))
+    (cl-letf (((symbol-function 'face-background)
+               (lambda (&rest _) "#000000")))
+      (let ((blended
+             (my/read--translate-overlay-background (selected-frame))))
+        (should (string-match-p "\\`#[[:xdigit:]]\\{6\\}\\'" blended))
+        (should-not (equal blended "#000000"))
+        (should-not (equal (downcase blended) "#87cefa"))))))
+
+(ert-deftest my-read-translation-overlay-preserves-source-font ()
+  (let (attributes)
+    (cl-letf (((symbol-function 'set-face-attribute)
+               (lambda (_face _frame &rest args)
+                 (setq attributes args)))
+              ((symbol-function 'my/read--translate-overlay-background)
+               (lambda (_frame) "#123456")))
+      (my/read-refresh-translate-overlay-face (selected-frame)))
+    (should (eq (plist-get attributes :inherit) nil))
+    (dolist (attribute '(:foreground :family :foundry :width :height
+                         :weight :slant))
+      (should (eq (plist-get attributes attribute) 'unspecified)))
+    (should (equal (plist-get attributes :background) "#123456"))))
+
+(ert-deftest my-read-records-translations-per-book-without-duplicates ()
+  (my-read-k-test--isolated
+   (let* ((frame (selected-frame))
+          (root (make-temp-file "my-read-translation-log-" t))
+          (my/read-translation-log-root root)
+          (my/read-translation-log-enabled t)
+          (my/read-translation-recorded-ids (make-hash-table :test #'equal)))
+     (set-frame-parameter frame 'my-reading-book-name "Book / One")
+     (unwind-protect
+         (let ((file (my/read-record-translation
+                      frame "An original sentence." "翻訳文です。" 'sentence)))
+           (my/read-record-translation
+            frame "An original sentence." "翻訳文です。" 'sentence)
+           (should (equal file
+                          (expand-file-name
+                           "Book - One/google-translate.md" root)))
+           (should (file-readable-p file))
+           (with-temp-buffer
+             (insert-file-contents file)
+             (should (search-forward "# Google Translate — Book / One" nil t))
+             (should (search-forward "> An original sentence." nil t))
+             (should (search-forward "> 翻訳文です。" nil t))
+             (goto-char (point-min))
+             (should (= (how-many "google-translate-id:" (point-min) (point-max))
+                        1))))
+       (set-frame-parameter frame 'my-reading-book-name nil)
+       (delete-directory root t)))))
+
+(ert-deftest my-read-k-uses-title-or-asin-for-translation-directory ()
+  (should (equal (my-read-k--target-book-name
+                  "A Real Book Title"
+                  "https://read.amazon.co.jp/?asin=B012345678")
+                 "A Real Book Title"))
+  (should (equal (my-read-k--target-book-name
+                  "Kindle Cloud Reader"
+                  "https://read.amazon.co.jp/?asin=B012345678&foo=1")
+                 "Kindle-B012345678")))
 
 (ert-deftest my-read-k-next-request-increments-generation-once ()
   (my-read-k-test--isolated
@@ -487,6 +723,34 @@
                                 'next nil)
          (should (= follow-count 1)))))))
 
+(ert-deftest my-read-k-background-ocr-does-not-steal-epub-tab ()
+  (my-read-k-test--isolated
+   (save-window-excursion
+     (let* ((frame (selected-frame))
+            (window (selected-window))
+            (kindle-buffer (generate-new-buffer " *my-read-k-hidden-tab*"))
+            (epub-buffer (generate-new-buffer " *my-read-epub-visible-tab*"))
+            (speech-count 0))
+       (unwind-protect
+           (progn
+             (setq my-read-k--frame frame my-read-k--buffer kindle-buffer)
+             (set-frame-parameter frame 'my-reading-kindle-window window)
+             (set-window-buffer window epub-buffer)
+             (cl-letf (((symbol-function 'my-read-k--refresh-followers) #'ignore)
+                       ((symbol-function 'english-reading-mode-next-sentence)
+                        (lambda () (cl-incf speech-count)))
+                       ((symbol-function 'english-reading-mode--speak-at-point)
+                        (lambda () (cl-incf speech-count))))
+               (my-read-k--apply-page
+                '((text . "Updated Kindle sentence.") (ocrMs . 1)) 'next t))
+             (should (eq (window-buffer window) epub-buffer))
+             (should (= speech-count 0))
+             (with-current-buffer kindle-buffer
+               (should (equal (buffer-string) "Updated Kindle sentence.\n"))))
+         (set-frame-parameter frame 'my-reading-kindle-window nil)
+         (kill-buffer kindle-buffer)
+         (kill-buffer epub-buffer))))))
+
 (ert-deftest my-read-k-process-death-clears-busy-state ()
   (my-read-k-test--isolated
    (let ((process (make-process :name "my-read-k-test-exit"
@@ -504,11 +768,15 @@
 (ert-deftest my-read-k-keeps-original-my-read-entry-and-j-binding ()
   (should (commandp 'my-read))
   (should (equal (help-function-arglist #'my/read--setup-frame t)
-                 '(frame &optional center-buffer)))
+                 '(frame &optional kindle-buffer)))
   (should (eq (lookup-key english-reading-mode-map (kbd "j"))
               #'english-reading-mode-next-sentence))
   (should (eq (lookup-key english-reading-mode-map (kbd "k"))
               #'english-reading-mode-previous-sentence))
+  (should (eq (lookup-key english-reading-mode-map (kbd "l"))
+              #'my/read-lookup-next-entry))
+  (should (eq (lookup-key english-reading-mode-map (kbd ";"))
+              #'my/read-lookup-previous-entry))
   (should (eq (lookup-key my-read-k-mode-map (kbd "<down>"))
               #'my-read-k-down))
   (should (eq (lookup-key my-read-k-mode-map (kbd "<up>"))
@@ -520,7 +788,200 @@
   (should (eq (lookup-key my-read-k-mode-map (kbd "C-v"))
               #'my-read-k-next-page))
   (should (eq (lookup-key my-read-k-mode-map (kbd "M-v"))
-              #'my-read-k-prev-page)))
+              #'my-read-k-prev-page))
+  (should (eq (lookup-key my-read-k-mode-map (kbd "r"))
+              #'my-read-k-reconnect))
+  (with-temp-buffer
+    (my-read-k-mode 1)
+    (english-reading-mode 1)
+    (should (eq (key-binding (kbd "r")) #'my-read-k-reconnect))
+    (english-reading-mode -1)
+    (my-read-k-mode -1)))
+
+(ert-deftest my-read-translation-language-stays-local-to-each-center-buffer ()
+  (let ((frame (selected-frame))
+        (kindle-buffer (generate-new-buffer " *my-read-language-kindle*"))
+        (epub-buffer (generate-new-buffer " *my-read-language-epub*"))
+        (google-translate-default-source-language "en")
+        (google-translate-default-target-language "ja")
+        captured)
+    (unwind-protect
+        (progn
+          (with-current-buffer kindle-buffer
+            (setq-local my/read-source-language "ja"))
+          (set-frame-parameter frame 'my-reading-kindle-buffer kindle-buffer)
+          (set-frame-parameter frame 'my-reading-source-language "ja")
+          (cl-letf (((symbol-function 'google-translate--format-request-url)
+                     (lambda (params)
+                       (setq captured params)
+                       "https://translate.test")))
+            (my/read-google-translate-url "日本語です。" frame kindle-buffer)
+            (should (equal (cdr (assoc "sl" captured)) "ja"))
+            (my/read-google-translate-url "English sentence." frame epub-buffer)
+            (should (equal (cdr (assoc "sl" captured)) "en"))))
+      (set-frame-parameter frame 'my-reading-kindle-buffer nil)
+      (set-frame-parameter frame 'my-reading-source-language nil)
+      (kill-buffer kindle-buffer)
+      (kill-buffer epub-buffer))))
+
+(ert-deftest my-read-unified-layout-has-one-tabbed-center-pane ()
+  (save-window-excursion
+    (let* ((frame (selected-frame))
+           (kindle-buffer (generate-new-buffer " *my-read-layout-kindle*"))
+           (epub-buffer (generate-new-buffer " *my-read-layout-epub*"))
+           (note-buffer (generate-new-buffer " *my-read-layout-note*"))
+           (my/read-book-path "/virtual/book.epub")
+           (my/read-note-file "/virtual/notes.org"))
+      (unwind-protect
+          (cl-letf (((symbol-function 'find-file)
+                     (lambda (path)
+                       (switch-to-buffer
+                        (if (equal path (expand-file-name my/read-book-path))
+                            epub-buffer
+                          note-buffer))))
+                    ((symbol-function 'my-read-lookup-follow-mode) #'ignore)
+                    ((symbol-function 'my-read-translate-follow-mode) #'ignore)
+                    ((symbol-function 'my/read-lookup-follow-post-command) #'ignore)
+                    ((symbol-function 'my/read-translate-follow-post-command) #'ignore))
+            (set-frame-parameter frame 'my-reading-frame t)
+            (my/read--setup-frame frame kindle-buffer)
+            (let ((kindle-window (my/read-kindle-window frame))
+                  (epub-window (my/read-epub-window frame)))
+              (should (window-live-p kindle-window))
+              (should (window-live-p epub-window))
+              (should (eq kindle-window epub-window))
+              (should (= (length (my/read-center-windows frame)) 1))
+              (should (eq (window-buffer kindle-window) kindle-buffer))
+              (with-current-buffer kindle-buffer
+                (should my-read-center-tab-mode)
+                (should (equal (my/read-center-tab-buffers)
+                               (list kindle-buffer epub-buffer))))
+              (my/read-toggle-center-tab)
+              (should (eq (window-buffer epub-window) epub-buffer))
+              (my/read-toggle-center-tab)
+              (should (eq (window-buffer kindle-window) kindle-buffer))))
+        (dolist (parameter '(my-reading-frame my-reading-center-window
+                             my-reading-center-windows my-reading-kindle-window
+                             my-reading-epub-window my-reading-kindle-buffer
+                             my-reading-epub-buffer my-reading-lookup-window
+                             my-reading-translate-window my-reading-note-window))
+          (set-frame-parameter frame parameter nil))
+        (dolist (buffer (list kindle-buffer epub-buffer note-buffer
+                              (frame-parameter frame 'my-reading-translate-buffer)
+                              (frame-parameter frame 'my-reading-lookup-ready-buffer)))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))
+        (set-frame-parameter frame 'my-reading-translate-buffer nil)
+        (set-frame-parameter frame 'my-reading-lookup-ready-buffer nil)))))
+
+(ert-deftest my-read-k-r-restarts-the-connection ()
+  (let (calls)
+    (cl-letf (((symbol-function 'my-read-k-detach)
+               (lambda () (push 'detach calls)))
+              ((symbol-function 'my-read-k--show-connection-status)
+               (lambda (&rest _) (push 'status calls)))
+              ((symbol-function 'my-read-k-attach)
+               (lambda () (push 'attach calls))))
+      (my-read-k-reconnect)
+      (should (equal (nreverse calls) '(detach status attach))))))
+
+(ert-deftest my-read-k-attach-error-shows-r-reconnect-hint ()
+  (my-read-k-test--isolated
+   (let ((my-read-k--buffer (generate-new-buffer " *my-read-k-connect-error*")))
+     (unwind-protect
+         (progn
+           (with-current-buffer my-read-k--buffer
+             (insert "Connecting…")
+             (read-only-mode 1))
+           (cl-letf (((symbol-function 'my-read-k--send)
+                      (lambda (_command _params callback &optional _generation)
+                        (funcall callback
+                                 '((ok . nil)
+                                   (error . ((code . "CDP_UNAVAILABLE")
+                                             (message . "Chrome unavailable"))))))))
+             (my-read-k-attach))
+           (with-current-buffer my-read-k--buffer
+             (should (string-match-p "press r to reconnect"
+                                     (format "%s" header-line-format)))
+             (should (string-match-p "r を押す" (buffer-string)))))
+       (kill-buffer my-read-k--buffer)))))
+
+(ert-deftest my-read-lookup-entry-keys-dispatch-in-left-pane-and-restore-center ()
+  (my-read-k-test--isolated
+   (save-window-excursion
+     (let* ((frame (selected-frame))
+            (center (selected-window))
+            (lookup (split-window-right))
+            (lookup-buffer (generate-new-buffer " *my-read-lookup-test*"))
+            (seen nil))
+       (unwind-protect
+           (progn
+             (set-frame-parameter frame 'my-reading-frame t)
+             (set-frame-parameter frame 'my-reading-center-window center)
+             (set-frame-parameter frame 'my-reading-lookup-window lookup)
+             (set-window-buffer lookup lookup-buffer)
+             (with-current-buffer lookup-buffer
+               (let ((map (make-sparse-keymap)))
+                 (define-key map (kbd "n")
+                             (lambda ()
+                               (interactive)
+                               (push (list 'next (selected-window)) seen)))
+                 (define-key map (kbd "p")
+                             (lambda ()
+                               (interactive)
+                               (push (list 'previous (selected-window)) seen)))
+                 (use-local-map map)))
+             (select-window center)
+             (my/read-lookup-next-entry)
+             (should (eq (selected-window) center))
+             (my/read-lookup-previous-entry)
+             (should (eq (selected-window) center))
+             (should (equal seen
+                            (list (list 'previous lookup)
+                                  (list 'next lookup)))))
+         (set-frame-parameter frame 'my-reading-frame nil)
+         (set-frame-parameter frame 'my-reading-center-window nil)
+         (set-frame-parameter frame 'my-reading-lookup-window nil)
+         (when (buffer-live-p lookup-buffer)
+           (kill-buffer lookup-buffer)))))))
+
+(ert-deftest my-read-lookup-builds-and-caches-private-dictionary-module ()
+  (let ((my/read-lookup-dictionary-ids '("dict-a" "dict-b:one"))
+        (my/read--lookup-module nil)
+        (my/read--lookup-module-signature nil)
+        specs
+        setups)
+    (cl-letf (((symbol-function 'my/read--lookup-ensure-runtime)
+               (lambda () t))
+              ((symbol-function 'lookup-new-module)
+               (lambda (spec)
+                 (push spec specs)
+                 (list 'private-module spec)))
+              ((symbol-function 'lookup-module-setup)
+               (lambda (module) (push module setups))))
+      (let ((first (my/read--lookup-reading-module))
+            (second (my/read--lookup-reading-module)))
+        (should (eq first second))
+        (should (equal specs '(("%my-read" "dict-a" "dict-b:one"))))
+        (should (= (length setups) 1)))
+      (setq my/read-lookup-dictionary-ids '("dict-c"))
+      (my/read--lookup-reading-module)
+      (should (equal (car specs) '("%my-read" "dict-c")))
+      (should (= (length setups) 2)))))
+
+(ert-deftest my-read-lookup-pattern-advice-uses-private-module-only-in-frame ()
+  (let (calls)
+    (cl-letf (((symbol-function 'my/read-frame-p) (lambda (&optional _) t))
+              ((symbol-function 'my/read--lookup-reading-module)
+               (lambda () 'private-module)))
+      (my/read--lookup-pattern-around
+       (lambda (pattern module) (push (list pattern module) calls))
+       "word" nil)
+      (my/read--lookup-pattern-around
+       (lambda (pattern module) (push (list pattern module) calls))
+       "word" 'explicit-module))
+    (should (equal calls
+                   '(("word" explicit-module)
+                     ("word" private-module))))))
 
 (provide 'my-read-k-tests)
 ;;; my-read-k-tests.el ends here

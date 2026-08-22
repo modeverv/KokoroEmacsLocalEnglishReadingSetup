@@ -6,11 +6,16 @@ readme = "README-kokoro-emacs.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "fastapi>=0.115",
-    "misaki[en]>=0.9",
+    "misaki[en,zh]>=0.9",
     "mlx-audio[server]>=0.1",
     "numpy>=1.26",
     "spacy>=3.8,<4",
     "uvicorn[standard]>=0.34",
+]
+
+[project.optional-dependencies]
+japanese = [
+    "pyopenjtalk>=0.4.1",
 ]
 
 [project.scripts]
