@@ -12,6 +12,8 @@
 ;; provide only its feature, so declare the setting used by local URL logic.
 (defvar google-translate-default-target-language "ja")
 (defvar google-translate-default-source-language "en")
+(defvar google-translate-base-url
+  "http://translate.google.com/translate_a/single")
 
 (require 'my-read-k)
 (require 'my-read-eww-math)
@@ -69,9 +71,24 @@
                      "http://translate.test")))
           (should (equal (my/read-google-translate-url "日本語です。" frame)
                          "https://translate.test"))
+          (should (equal google-translate-base-url
+                         "http://translate.google.com/translate_a/single"))
+          (should (equal (cdr (assoc "client" captured)) "dict-chrome-ex"))
           (should (equal (cdr (assoc "sl" captured)) "ja"))
           (should (equal (cdr (assoc "tl" captured)) "en")))
       (set-frame-parameter frame 'my-reading-source-language nil))))
+
+(ert-deftest my-read-google-translation-uses-working-chrome-endpoint ()
+  (let (captured-base)
+    (cl-letf (((symbol-function 'google-translate--format-request-url)
+               (lambda (_params)
+                 (setq captured-base google-translate-base-url)
+                 google-translate-base-url)))
+      (should
+       (equal (my/read-google-translate-url "This is a test.")
+              "https://clients5.google.com/translate_a/single"))
+      (should (equal captured-base
+                     "https://clients5.google.com/translate_a/single")))))
 
 (ert-deftest my-read-other-language-source-translates-to-japanese ()
   (let ((frame (selected-frame))
@@ -856,6 +873,107 @@
     (english-reading-mode -1)
     (my-read-k-mode -1)))
 
+(ert-deftest my-read-keys-only-apply-in-selected-center-window ()
+  (save-window-excursion
+    (let* ((frame (selected-frame))
+           (center (selected-window))
+           (other (split-window-right))
+           (buffer (generate-new-buffer " *my-read-key-scope*")))
+      (unwind-protect
+          (progn
+            (set-frame-parameter frame 'my-reading-frame t)
+            (set-frame-parameter frame 'my-reading-center-window center)
+            (set-frame-parameter frame 'my-reading-center-windows (list center))
+            (set-frame-parameter frame 'my-reading-epub-buffer buffer)
+            (set-window-buffer center buffer)
+            (with-current-buffer buffer
+              (setq-local my/read-center-tab-frame frame)
+              (setq-local english-reading-mode-key-active-predicate
+                          #'my/read--center-window-active-p)
+              (my-read-center-tab-mode 1)
+              (english-reading-mode 1))
+            (select-window center)
+            (should (eq (key-binding (kbd "j"))
+                        #'english-reading-mode-next-sentence))
+            (should (eq (key-binding (kbd "C-c p"))
+                        #'kokoro-reader-speak-paragraph))
+            ;; Even the same buffer must not carry my-read keys into a window
+            ;; that is not the registered center reading pane.
+            (set-window-buffer other buffer)
+            (select-window other)
+            (should-not (eq (key-binding (kbd "j"))
+                            #'english-reading-mode-next-sentence))
+            (should-not (eq (key-binding (kbd "C-c p"))
+                            #'kokoro-reader-speak-paragraph)))
+        (set-frame-parameter frame 'my-reading-frame nil)
+        (set-frame-parameter frame 'my-reading-center-window nil)
+        (set-frame-parameter frame 'my-reading-center-windows nil)
+        (set-frame-parameter frame 'my-reading-epub-buffer nil)
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest my-read-org-buffer-is-not-registered-as-a-reading-tab ()
+  (save-window-excursion
+    (let* ((frame (selected-frame))
+           (center (selected-window))
+           (epub-buffer (generate-new-buffer " *my-read-real-epub*"))
+           (org-buffer (generate-new-buffer " *my-read-org-input*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer org-buffer (org-mode))
+            (set-frame-parameter frame 'my-reading-frame t)
+            (set-frame-parameter frame 'my-reading-center-window center)
+            (set-frame-parameter frame 'my-reading-center-windows (list center))
+            (set-frame-parameter frame 'my-reading-epub-buffer epub-buffer)
+            (set-window-buffer center org-buffer)
+            (my/read--track-center-tab-buffer frame)
+            (should (eq (frame-parameter frame 'my-reading-epub-buffer)
+                        epub-buffer))
+            (with-current-buffer org-buffer
+              (should-not my-read-center-tab-mode)
+              (should-not my/read-center-tab-frame)))
+        (dolist (parameter '(my-reading-frame my-reading-center-window
+                             my-reading-center-windows
+                             my-reading-epub-buffer))
+          (set-frame-parameter frame parameter nil))
+        (kill-buffer epub-buffer)
+        (kill-buffer org-buffer)))))
+
+(ert-deftest my-read-followers-ignore-org-buffer-in-center-window ()
+  (save-window-excursion
+    (let* ((frame (selected-frame))
+           (center (selected-window))
+           (epub-buffer (generate-new-buffer " *my-read-follower-epub*"))
+           (org-buffer (generate-new-buffer " *my-read-follower-org*"))
+           (my-read-lookup-follow-mode t)
+           (my-read-translate-follow-mode t)
+           lookup-called
+           translate-called)
+      (unwind-protect
+          (progn
+            (set-frame-parameter frame 'my-reading-frame t)
+            (set-frame-parameter frame 'my-reading-center-window center)
+            (set-frame-parameter frame 'my-reading-center-windows (list center))
+            (set-frame-parameter frame 'my-reading-epub-buffer epub-buffer)
+            (with-current-buffer org-buffer (org-mode))
+            (set-window-buffer center org-buffer)
+            (select-window center)
+            (cl-letf (((symbol-function 'my/read-word-at-window)
+                       (lambda (_window) (setq lookup-called t) "word"))
+                      ((symbol-function 'my/read-translate-update-for-frame)
+                       (lambda (_frame _window)
+                         (setq translate-called t))))
+              (my/read-lookup-follow-post-command)
+              (my/read-translate-follow-post-command))
+            (should-not lookup-called)
+            (should-not translate-called))
+        (dolist (parameter '(my-reading-frame my-reading-center-window
+                             my-reading-center-windows
+                             my-reading-epub-buffer))
+          (set-frame-parameter frame parameter nil))
+        (kill-buffer epub-buffer)
+        (kill-buffer org-buffer)))))
+
 (ert-deftest my-read-translation-language-stays-local-to-each-center-buffer ()
   (let ((frame (selected-frame))
         (kindle-buffer (generate-new-buffer " *my-read-language-kindle*"))
@@ -991,21 +1109,20 @@
       (should (= (my/read-eww-math--image-scale t) 2.75))
       (should (= (my/read-eww-math--image-scale) 3.4375)))))
 
-(ert-deftest my-read-unified-layout-has-one-tabbed-center-pane ()
+(ert-deftest my-read-unified-layout-has-left-reading-and-right-utility-panes ()
   (save-window-excursion
     (let* ((frame (selected-frame))
            (kindle-buffer (generate-new-buffer " *my-read-layout-kindle*"))
            (epub-buffer (generate-new-buffer " *my-read-layout-epub*"))
-           (note-buffer (generate-new-buffer " *my-read-layout-note*"))
            (my/read-book-path "/virtual/book.epub")
-           (my/read-note-file "/virtual/notes.org"))
+           (lookup-frame-height
+            (frame-parameter frame 'lookup-window-height))
+           opened-paths)
       (unwind-protect
           (cl-letf (((symbol-function 'find-file)
                      (lambda (path)
-                       (switch-to-buffer
-                        (if (equal path (expand-file-name my/read-book-path))
-                            epub-buffer
-                          note-buffer))))
+                       (push path opened-paths)
+                       (switch-to-buffer epub-buffer)))
                     ((symbol-function 'my-read-lookup-follow-mode) #'ignore)
                     ((symbol-function 'my-read-translate-follow-mode) #'ignore)
                     ((symbol-function 'my/read-lookup-follow-post-command) #'ignore)
@@ -1015,18 +1132,37 @@
             (let ((kindle-window (my/read-kindle-window frame))
                   (epub-window (my/read-epub-window frame))
                   (eww-window (my/read-eww-window frame))
+                  (translate-window (my/read-translate-window frame))
+                  (lookup-window (my/read-lookup-window frame))
                   (eww-buffer (frame-parameter frame 'my-reading-eww-buffer)))
+              (should (= (length (window-list frame)) 3))
               (should (window-live-p kindle-window))
               (should (window-live-p epub-window))
               (should (window-live-p eww-window))
+              (should (window-live-p translate-window))
+              (should (window-live-p lookup-window))
               (should (eq kindle-window epub-window))
               (should (eq epub-window eww-window))
+              (let ((reading-edges (window-edges kindle-window))
+                    (translate-edges (window-edges translate-window))
+                    (lookup-edges (window-edges lookup-window)))
+                (should (> (car translate-edges) (car reading-edges)))
+                (should (= (car translate-edges) (car lookup-edges)))
+                (should (= (cadr translate-edges) (cadr reading-edges)))
+                (should (> (cadr lookup-edges) (cadr translate-edges)))
+                (should (= (nth 3 lookup-edges) (nth 3 reading-edges))))
+              (should-not (frame-parameter frame 'my-reading-note-window))
+              (should (= (frame-parameter frame 'lookup-window-height)
+                         my/read-lookup-entry-window-height))
+              (should (equal opened-paths
+                             (list (expand-file-name my/read-book-path))))
               (should (= (length (my/read-center-windows frame)) 1))
               (should (eq (window-buffer kindle-window) kindle-buffer))
               (with-current-buffer kindle-buffer
                 (should my-read-center-tab-mode)
                 (should (equal (my/read-center-tab-buffers)
                                (list kindle-buffer epub-buffer eww-buffer))))
+              (set-window-buffer kindle-window eww-buffer)
               (with-current-buffer eww-buffer
                 (should (equal (plist-get eww-data :url) my/read-eww-url))
                 (should (= line-spacing my/read-eww-line-spacing))
@@ -1042,6 +1178,7 @@
                             #'my/read-lookup-next-entry))
                 (should (eq (key-binding (kbd ";"))
                             #'my/read-lookup-previous-entry)))
+              (set-window-buffer kindle-window kindle-buffer)
               (my/read-toggle-center-tab)
               (should (eq (window-buffer epub-window) epub-buffer))
               (my/read-toggle-center-tab)
@@ -1058,21 +1195,23 @@
                              my-reading-lookup-window my-reading-translate-window
                              my-reading-note-window))
           (set-frame-parameter frame parameter nil))
-        (dolist (buffer (list kindle-buffer epub-buffer note-buffer
+        (dolist (buffer (list kindle-buffer epub-buffer
                               (frame-parameter frame 'my-reading-eww-buffer)
                               (frame-parameter frame 'my-reading-translate-buffer)
                               (frame-parameter frame 'my-reading-lookup-ready-buffer)))
           (when (buffer-live-p buffer) (kill-buffer buffer)))
         (set-frame-parameter frame 'my-reading-translate-buffer nil)
         (set-frame-parameter frame 'my-reading-lookup-ready-buffer nil)
-        (set-frame-parameter frame 'my-reading-eww-buffer nil)))))
+        (set-frame-parameter frame 'my-reading-eww-buffer nil)
+        (set-frame-parameter frame 'lookup-window-height
+                             lookup-frame-height)))))
 
 (ert-deftest my-read-k-r-restarts-the-connection ()
   (let ((my-read-k--reconnect-function
          (lambda () (interactive) 'reconnected)))
     (should (eq (call-interactively #'my-read-k-reconnect) 'reconnected))))
 
-(ert-deftest my-read-lookup-entry-keys-dispatch-in-left-pane-and-restore-center ()
+(ert-deftest my-read-lookup-entry-keys-dispatch-in-pane-and-restore-center ()
   (my-read-k-test--isolated
    (save-window-excursion
      (let* ((frame (selected-frame))

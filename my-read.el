@@ -1,10 +1,9 @@
 ;;; my-read.el --- Dedicated English reading frame -*- lexical-binding: t; -*-
 
 ;; English reading workspace:
-;;   left   : Lookup
-;;   center : Kindle.app, EPUB / normal book, and EWW tabs
+;;   left         : Kindle.app, EPUB / normal book, and EWW tabs
 ;;   right top    : local translation with Google fallback
-;;   right bottom : reading notes
+;;   right bottom : Lookup
 ;;
 ;; Translation policy:
 ;;   - j/k and Kokoro lifecycle are owned by english-reading-mode.el
@@ -30,12 +29,6 @@
 (defcustom my/read-book-path
   "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/einglish-book"
   "File or directory opened in the center reading window."
-  :type 'file
-  :group 'my-read)
-
-(defcustom my/read-note-file
-  "~/work/002_docs/000_org/article/english.org"
-  "Reading note file opened in the lower-right window."
   :type 'file
   :group 'my-read)
 
@@ -137,6 +130,15 @@ rebuilds the private module automatically on the next search."
   :type 'number
   :group 'my-read)
 
+(defcustom my/read-lookup-entry-window-height 4
+  "Height in lines of the Lookup dictionary-entry list in my-read.
+
+This frame-local value takes precedence over the normal
+`lookup-window-height'.  Keeping it as a small integer prevents a fractional
+global setting from shrinking the dictionary content window."
+  :type 'integer
+  :group 'my-read)
+
 (defconst my/read-translate-buffer-name "*Reading Translation*")
 
 (defface my/read-translate-overlay-face
@@ -230,10 +232,6 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
   "Return FRAME's Google Translate window."
   (my/read-window 'my-reading-translate-window frame))
 
-(defun my/read-note-window (&optional frame)
-  "Return FRAME's reading-note window."
-  (my/read-window 'my-reading-note-window frame))
-
 (defun my/read-center-tab-buffers ()
   "Return the Kindle, EPUB, and EWW buffers in the current center pane."
   (let ((frame my/read-center-tab-frame))
@@ -271,11 +269,72 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
          (or (not (derived-mode-p 'eww-mode))
              my/read-eww-enable-automatic-lookup))))
 
+(defun my/read--center-source-buffer-p (buffer frame)
+  "Return non-nil when BUFFER is a registered reading source in FRAME."
+  (and (buffer-live-p buffer)
+       (frame-live-p frame)
+       (memq buffer
+             (delq nil
+                   (mapcar
+                    (lambda (parameter)
+                      (let ((candidate (frame-parameter frame parameter)))
+                        (and (buffer-live-p candidate) candidate)))
+                    '(my-reading-kindle-buffer
+                      my-reading-epub-buffer
+                      my-reading-eww-buffer))))))
+
+(defun my/read--center-source-window-p (window frame)
+  "Return non-nil when WINDOW displays a registered source in FRAME."
+  (and (window-live-p window)
+       (eq (window-frame window) frame)
+       (memq window (my/read-center-windows frame))
+       (my/read--center-source-buffer-p (window-buffer window) frame)))
+
+(defun my/read--center-window-active-p ()
+  "Return non-nil only in the selected my-read center reading window."
+  (let* ((frame (selected-frame))
+         (window (selected-window)))
+    (and (my/read-frame-p frame)
+         (my/read--center-source-window-p window frame)
+         (eq (window-buffer window) (current-buffer))
+         (eq my/read-center-tab-frame frame))))
+
+(defun my/read--filter-center-key-binding (binding)
+  "Return BINDING only while point is in my-read's center reading window."
+  (when (my/read--center-window-active-p)
+    binding))
+
 (defvar my-read-center-tab-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c t") #'my/read-toggle-center-tab)
+    (define-key map (kbd "C-c t")
+                '(menu-item "Switch my-read tab" my/read-toggle-center-tab
+                            :filter my/read--filter-center-key-binding))
+    (define-key map (kbd "C-c p")
+                '(menu-item "Read paragraph" kokoro-reader-speak-paragraph
+                            :filter my/read--filter-center-key-binding))
+    (define-key map (kbd "C-c n")
+                '(menu-item "Read and advance" kokoro-reader-speak-and-forward
+                            :filter my/read--filter-center-key-binding))
+    (define-key map (kbd "C-c k")
+                '(menu-item "Stop reading" kokoro-reader-stop
+                            :filter my/read--filter-center-key-binding))
     map)
   "Keymap active in the Kindle, EPUB, and EWW center tabs.")
+
+;; Keep re-evaluation effective in a live Emacs where `defvar' preserves the
+;; existing map object.
+(keymap-set my-read-center-tab-mode-map "C-c t"
+            '(menu-item "Switch my-read tab" my/read-toggle-center-tab
+                        :filter my/read--filter-center-key-binding))
+(keymap-set my-read-center-tab-mode-map "C-c p"
+            '(menu-item "Read paragraph" kokoro-reader-speak-paragraph
+                        :filter my/read--filter-center-key-binding))
+(keymap-set my-read-center-tab-mode-map "C-c n"
+            '(menu-item "Read and advance" kokoro-reader-speak-and-forward
+                        :filter my/read--filter-center-key-binding))
+(keymap-set my-read-center-tab-mode-map "C-c k"
+            '(menu-item "Stop reading" kokoro-reader-stop
+                        :filter my/read--filter-center-key-binding))
 
 (define-minor-mode my-read-center-tab-mode
   "Display the my-read center sources as a dedicated tab line."
@@ -290,10 +349,14 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq-local my/read-center-tab-frame frame)
+      (setq-local english-reading-mode-key-active-predicate
+                  #'my/read--center-window-active-p)
       (setq-local tab-line-tabs-function #'my/read-center-tab-buffers)
       (setq-local tab-line-tab-name-function #'my/read-center-tab-name)
       (setq-local tab-line-close-button-show nil)
       (setq-local tab-line-new-button-show nil)
+      (when (derived-mode-p 'nov-mode 'eww-mode 'doc-view-mode)
+        (english-reading-mode 1))
       (my-read-center-tab-mode 1))))
 
 (defun my/read-toggle-center-tab ()
@@ -330,9 +393,11 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
              (parameter
               (unless (eq buffer kindle)
                 (with-current-buffer buffer
-                  (if (derived-mode-p 'eww-mode)
-                      'my-reading-eww-buffer
-                    'my-reading-epub-buffer)))))
+                  (cond
+                   ((derived-mode-p 'eww-mode)
+                    'my-reading-eww-buffer)
+                   ((derived-mode-p 'nov-mode 'doc-view-mode 'dired-mode)
+                    'my-reading-epub-buffer))))))
         (when parameter
           (set-frame-parameter frame parameter buffer)
           (my/read--configure-center-tab-buffer buffer frame))))))
@@ -489,8 +554,8 @@ normal Lookup agents, dictionaries or modules."
                 (unless (string-empty-p word)
                   word)))))))))
 
-(defun my/read-lookup-open-left-pane (buffer)
-  "Display Lookup BUFFER in the fixed left pane of the current my-read frame.
+(defun my/read-lookup-open-pane (buffer)
+  "Display Lookup BUFFER in the fixed Lookup pane of the current my-read frame.
 
 This intentionally overrides the user's normal `lookup-open-function' only
 for automatic searches performed by my-read.  It never creates another pane."
@@ -538,15 +603,15 @@ for automatic searches performed by my-read.  It never creates another pane."
                              (not (eq (window-frame lookup-main-window) frame)))
                     (setq lookup-main-window nil
                           lookup-sub-window nil))
-                  ;; Lookup's normal config opens a right pane.  my-read already
-                  ;; owns a left pane, so dynamically route this search there.
+                  ;; my-read already owns a Lookup pane, so dynamically route
+                  ;; this search there instead of creating another outer pane.
                   ;;
                   ;; IMPORTANT: use `lookup-pattern', not `lookup-word'.  The
                   ;; user's normal Lookup configuration attaches frame handling
                   ;; and "open the first entry" behavior to `lookup-pattern'.
                   ;; Calling it non-interactively with WORD does not open the
                   ;; minibuffer, but does preserve those existing advices.
-                  (let ((lookup-open-function #'my/read-lookup-open-left-pane))
+                  (let ((lookup-open-function #'my/read-lookup-open-pane))
                     (condition-case err
                         (lookup-pattern
                          word
@@ -562,7 +627,7 @@ for automatic searches performed by my-read.  It never creates another pane."
     (let* ((frame (selected-frame))
            (center (my/read-center-window frame)))
       (when (and (my/read-frame-p frame)
-                 (window-live-p center)
+                 (my/read--center-source-window-p center frame)
                  (eq (selected-window) center)
                  (my/read--center-automatic-lookup-p center)
                  (not my/read-lookup-running-p))
@@ -661,8 +726,14 @@ focus is restored to the center reading window."
 
 ;; `english-reading-mode' is active in both my-read center buffers.  Install
 ;; these explicitly so re-evaluating my-read.el updates a live session too.
-(keymap-set english-reading-mode-map "l" #'my/read-lookup-next-entry)
-(keymap-set english-reading-mode-map ";" #'my/read-lookup-previous-entry)
+(keymap-set
+ english-reading-mode-map "l"
+ '(menu-item "Next Lookup entry" my/read-lookup-next-entry
+             :filter english-reading-mode--filter-key-binding))
+(keymap-set
+ english-reading-mode-map ";"
+ '(menu-item "Previous Lookup entry" my/read-lookup-previous-entry
+             :filter english-reading-mode--filter-key-binding))
 
 
 ;;; ---------------------------------------------------------------------------
@@ -789,9 +860,15 @@ to `my/read-japanese-translation-target-language'; all other languages use the
   normal google-translate.el target."
   (pcase-let* ((`(,source-language ,target-language)
                  (my/read--translation-languages frame source-buffer))
+               ;; The old translate.google.com + client=gtx combination now
+               ;; returns HTTP 429 on otherwise ordinary requests.  Chrome's
+               ;; dictionary endpoint still provides the same nested JSON
+               ;; shape consumed by `google-translate-json-translation'.
+               (google-translate-base-url
+                "https://clients5.google.com/translate_a/single")
                (url
                 (google-translate--format-request-url
-                 `(("client" . "gtx")
+                 `(("client" . "dict-chrome-ex")
                    ("ie"     . "UTF-8")
                    ("oe"     . "UTF-8")
                    ("sl"     . ,source-language)
@@ -1062,7 +1139,7 @@ Otherwise, translate the sentence containing point."
     (let* ((frame (selected-frame))
            (center (my/read-center-window frame)))
       (when (and (my/read-frame-p frame)
-                 (window-live-p center)
+                 (my/read--center-source-window-p center frame)
                  (eq (selected-window) center))
         (my/read-translate-update-for-frame frame center)))))
 
@@ -1183,29 +1260,20 @@ Otherwise, translate the sentence containing point."
 
 (defun my/read--setup-frame (frame &optional kindle-buffer)
   "Build the my-read layout inside FRAME.
-When KINDLE-BUFFER is live, expose it, EPUB, and EWW as center tabs."
+When KINDLE-BUFFER is live, expose it, EPUB, and EWW as left-side tabs."
   (with-selected-frame frame
     (delete-other-windows)
 
-    (let* ((lookup-window (selected-window))
-           ;; left 1/3, remaining 2/3
-           (center-window
-            (split-window-right
-             (floor (/ (window-total-width lookup-window) 3))))
+    (let* ((center-window (selected-window))
+           ;; Two columns: reading on the left, translation/Lookup on the right.
+           (translate-window (split-window-right))
            epub-buffer
            eww-buffer
-           right-window
-           translate-window
-           note-window)
+           lookup-window)
 
-      ;; Split remaining 2/3 into center and right columns.
-      (select-window center-window)
-      (setq right-window (split-window-right))
-      (setq translate-window right-window)
-
-      ;; Right column: top 40% translation, bottom 60% notes.
+      ;; Right column: translation above, Lookup below.
       (select-window translate-window)
-      (setq note-window
+      (setq lookup-window
             (split-window-below
              (max window-min-height
                   (floor (* (window-total-height translate-window) 0.40)))))
@@ -1220,14 +1288,18 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as center tabs."
       (set-frame-parameter frame 'my-reading-center-windows (list center-window))
       (set-frame-parameter frame 'my-reading-kindle-buffer kindle-buffer)
       (set-frame-parameter frame 'my-reading-translate-window translate-window)
-      (set-frame-parameter frame 'my-reading-note-window note-window)
+      (set-frame-parameter frame 'my-reading-note-window nil)
+      ;; Lookup otherwise honors the user's global fractional height (0.7 in
+      ;; this setup), which leaves too little room for dictionary content.
+      (set-frame-parameter frame 'lookup-window-height
+                           my/read-lookup-entry-window-height)
 
       ;; Lookup must not reuse stale internal windows from another frame.
       (when (boundp 'lookup-main-window)
         (setq lookup-main-window nil
               lookup-sub-window nil))
 
-      ;; Left: Lookup placeholder.
+      ;; Right bottom: Lookup placeholder.
       (set-window-buffer lookup-window (my/read--prepare-ready-buffer frame))
 
       ;; Right top: local translation with Google fallback.
@@ -1243,7 +1315,7 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as center tabs."
         (set-window-buffer translate-window buffer)
         (set-window-dedicated-p translate-window t))
 
-      ;; Open the EPUB/normal book in the sole center window and remember its
+      ;; Open the EPUB/normal book in the left window and remember its
       ;; actual buffer (which may initially be Dired).
       (select-window center-window)
       (find-file (expand-file-name my/read-book-path))
@@ -1260,14 +1332,6 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as center tabs."
       (when (buffer-live-p kindle-buffer)
         (my/read--configure-center-tab-buffer kindle-buffer frame)
         (set-window-buffer center-window kindle-buffer))
-
-      ;; Right bottom: reading notes.
-      (select-window note-window)
-      (find-file (expand-file-name my/read-note-file))
-      ;; Disable buffer tabs only in the reading-note buffer.  Do this after
-      ;; `find-file', because the selected buffer changes at that point.
-      (when (fboundp 'tab-line-mode)
-        (tab-line-mode -1))
 
       ;; Start in Kindle when present; otherwise use the normal book.
       (select-window center-window)
@@ -1331,14 +1395,16 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as center tabs."
 ;;; Reading mode / convenience keys
 ;;; ---------------------------------------------------------------------------
 
-;; j/k are defined only by english-reading-mode.el.  my-read.el observes its
-;; speech lifecycle hooks above and never overrides j/k or advises Kokoro.
-(add-hook 'nov-mode-hook #'english-reading-mode)
-(add-hook 'doc-view-mode-hook #'english-reading-mode)
-
-(global-set-key (kbd "C-c p") #'kokoro-reader-speak-paragraph)
-(global-set-key (kbd "C-c n") #'kokoro-reader-speak-and-forward)
-(global-set-key (kbd "C-c k") #'kokoro-reader-stop)
+;; Reading keys are installed buffer-locally by
+;; `my/read--configure-center-tab-buffer' and filtered by the selected window.
+;; Remove registrations left by older revisions when this file is reloaded.
+(remove-hook 'nov-mode-hook #'english-reading-mode)
+(remove-hook 'doc-view-mode-hook #'english-reading-mode)
+(dolist (entry '(("C-c p" . kokoro-reader-speak-paragraph)
+                 ("C-c n" . kokoro-reader-speak-and-forward)
+                 ("C-c k" . kokoro-reader-stop)))
+  (when (eq (lookup-key global-map (kbd (car entry))) (cdr entry))
+    (define-key global-map (kbd (car entry)) nil)))
 
 (provide 'my-read)
 ;;; my-read.el ends here

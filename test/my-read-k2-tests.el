@@ -54,5 +54,18 @@
 (ert-deftest my-read-k2-is-not-a-public-command ()
   (should-not (fboundp 'my-read-k2)))
 
+(ert-deftest my-read-k2-reconnect-key-does-not-leak-into-org-mode ()
+  (let ((text-binding (lookup-key text-mode-map (kbd "r")))
+        (buffer (my-read-k2--prepare-buffer)))
+    (unwind-protect
+        (progn
+          (should (equal (lookup-key text-mode-map (kbd "r")) text-binding))
+          (with-temp-buffer
+            (org-mode)
+            (should (eq (key-binding (kbd "r"))
+                        #'org-self-insert-command))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (provide 'my-read-k2-tests)
 ;;; my-read-k2-tests.el ends here

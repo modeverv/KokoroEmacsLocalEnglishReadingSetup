@@ -75,6 +75,15 @@
   (my-read-k--show-connection-status "Kindle.appへ再接続しています。")
   (my-read-k2-attach))
 
+;; Older revisions used `local-set-key' after entering `text-mode'.  That
+;; mutated the shared `text-mode-map', so every derived mode (including Org)
+;; treated ordinary "r" input as a Kindle reconnect command.  The Kindle
+;; minor-mode map already owns this binding; repair a live polluted map here.
+(when (and (boundp 'text-mode-map)
+           (eq (lookup-key text-mode-map (kbd "r"))
+               #'my-read-k2-reconnect))
+  (define-key text-mode-map (kbd "r") nil))
+
 (setq my-read-k--bridge-command-function #'my-read-k2--bridge-command
       my-read-k--reconnect-function #'my-read-k2-reconnect)
 
@@ -86,7 +95,6 @@
         (erase-buffer)
         (insert "Connecting to Kindle.app…\n\n"
                 "Kindle.appで英語の本を開いてから r を押すと再接続します。\n")
-        (local-set-key (kbd "r") #'my-read-k2-reconnect)
         (set-buffer-modified-p nil)))
     buffer))
 

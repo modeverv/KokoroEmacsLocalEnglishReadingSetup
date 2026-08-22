@@ -56,6 +56,19 @@ This also runs on synthesis failure or explicit stop.")
 (defvar-local english-reading-mode--pdf-bbox-cache nil)
 (defvar-local english-reading-mode--pdf-image-data-cache nil)
 
+(defvar-local english-reading-mode-key-active-predicate nil
+  "Optional function deciding whether this mode's keys are active.
+
+When nil, `english-reading-mode' behaves as a normal buffer-local minor mode.
+Consumers such as my-read can set this to a window-aware predicate so a
+shared reading buffer does not keep its keys in unrelated windows.")
+
+(defun english-reading-mode--filter-key-binding (binding)
+  "Return BINDING when reading keys are active in the selected window."
+  (when (or (null english-reading-mode-key-active-predicate)
+            (funcall english-reading-mode-key-active-predicate))
+    binding))
+
 (defun english-reading-mode--enable-single-space-sentences ()
   "Treat normal English punctuation followed by one space as a sentence end."
   (unless english-reading-mode--sentence-setting-saved-p
@@ -739,10 +752,31 @@ leave point at the current sentence and report that there is nowhere to go."
 
 (defvar-keymap english-reading-mode-map
   :doc "Keymap for `english-reading-mode'."
-  "j" #'english-reading-mode-next-sentence
-  "k" #'english-reading-mode-previous-sentence
-  "p" #'kokoro-reader-speak-paragraph
-  "C-c C-k" #'english-reading-mode-stop)
+  "j" '(menu-item "Read next sentence" english-reading-mode-next-sentence
+                   :filter english-reading-mode--filter-key-binding)
+  "k" '(menu-item "Read previous sentence" english-reading-mode-previous-sentence
+                   :filter english-reading-mode--filter-key-binding)
+  "p" '(menu-item "Read paragraph" kokoro-reader-speak-paragraph
+                   :filter english-reading-mode--filter-key-binding)
+  "C-c C-k" '(menu-item "Stop reading" english-reading-mode-stop
+                         :filter english-reading-mode--filter-key-binding))
+
+;; Keep re-evaluation effective in a live Emacs where `defvar-keymap' preserves
+;; the already existing map object.
+(keymap-set english-reading-mode-map "j"
+            '(menu-item "Read next sentence"
+                        english-reading-mode-next-sentence
+                        :filter english-reading-mode--filter-key-binding))
+(keymap-set english-reading-mode-map "k"
+            '(menu-item "Read previous sentence"
+                        english-reading-mode-previous-sentence
+                        :filter english-reading-mode--filter-key-binding))
+(keymap-set english-reading-mode-map "p"
+            '(menu-item "Read paragraph" kokoro-reader-speak-paragraph
+                        :filter english-reading-mode--filter-key-binding))
+(keymap-set english-reading-mode-map "C-c C-k"
+            '(menu-item "Stop reading" english-reading-mode-stop
+                        :filter english-reading-mode--filter-key-binding))
 
 ;;;###autoload
 (define-minor-mode english-reading-mode
