@@ -65,7 +65,13 @@ curl --fail http://127.0.0.1:8000/health
 (setq my/read-book-path "/path/to/books"
       my/read-note-file "~/Documents/english-reading.org"
       my/read-eww-url "https://arxiv.org/"
+      my/read-eww-line-spacing 0.5
       my/read-eww-math-enabled t
+      my/read-eww-math-image-scale-multiplier 1.5
+      my/read-eww-math-inline-scale-multiplier 1.25
+      my/read-eww-math-image-vertical-margin 0
+      my/read-eww-math-svg-stroke-width 0.18
+      my/read-eww-math-svg-padding 1.0
       my/read-eww-enable-automatic-lookup nil)
 
 (setq kokoro-reader-server-directory
@@ -113,7 +119,7 @@ make my-read-k-build
 M-x my-read
 ```
 
-中央は同じ1ペインの `Kindle` / `EPUB` / `EWW` タブで切り替えます。EWWタブでは `g` で初期URL（既定はarXiv）、`G` で任意のURLを開けます。arXiv HTMLのTeX注釈はバックグラウンドでSVGへ変換され、変換中もEmacsの操作を妨げません。SVGは式・表示形式・文字色ごとにキャッシュされ、表示倍率は既定フォントの大きさへ自動追従します。`j` / `k` の文単位読み上げと `l` / `;` のLookup項目移動もEPUB・Kindleと同様に使えます。EWWのページ読み込み中に表示される `Loading` などを同期型辞書へ送るとEmacs全体を止めることがあるため、EWWタブでは自動Lookupだけを既定で停止します。自動翻訳と通常のEWW表示は有効です。必要なら `my/read-eww-enable-automatic-lookup` を `t` にしてください。接続し直す場合はKindleタブで `r` を押します。
+中央は同じ1ペインの `Kindle` / `EPUB` / `EWW` タブで切り替えます。EWWタブでは `g` で初期URL（既定はarXiv）、`G` で任意のURLを開けます。EWW全体の行間は `my/read-eww-line-spacing` の既定値 `0.5` により通常のおよそ1.5倍です。追加分は行の下側へ置かれます。arXiv HTMLのTeX注釈はバックグラウンドでSVGへ変換され、変換中もEmacsの操作を妨げません。SVGは式・表示形式・文字色・輪郭幅・内部余白ごとにキャッシュされます。表示倍率は既定フォントへ合わせた値のさらに1.5倍が既定で、インライン数式だけはそこから1.25倍します。それぞれ `my/read-eww-math-image-scale-multiplier` と `my/read-eww-math-inline-scale-multiplier` から調整できます。数式の太さは `my/read-eww-math-svg-stroke-width`、SVG端の余白は `my/read-eww-math-svg-padding` で調整できます。既定では四辺に1ptを加え、字形や輪郭線が `viewBox` で切れないようにします。`j` / `k` の文単位読み上げと `l` / `;` のLookup項目移動もEPUB・Kindleと同様に使えます。EWWのページ読み込み中に表示される `Loading` などを同期型辞書へ送るとEmacs全体を止めることがあるため、EWWタブでは自動Lookupだけを既定で停止します。自動翻訳と通常のEWW表示は有効です。必要なら `my/read-eww-enable-automatic-lookup` を `t` にしてください。接続し直す場合はKindleタブで `r` を押します。
 
 | キー | 動作 |
 | --- | --- |

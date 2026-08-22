@@ -855,19 +855,38 @@
       (should valid-job)
       (should (equal (plist-get valid-job :tex) "x^2")))))
 
-(ert-deftest my-read-eww-math-embeds-dark-theme-foreground-in-svg ()
-  (let ((svg-file (make-temp-file "my-read-eww-math-test-" nil ".svg")))
+(ert-deftest my-read-eww-math-embeds-foreground-and-stroke-in-svg ()
+  (let ((svg-file (make-temp-file "my-read-eww-math-test-" nil ".svg"))
+        (my/read-eww-math-svg-stroke-width 0.18)
+        (my/read-eww-math-svg-padding 1.0))
     (unwind-protect
         (progn
           (with-temp-file svg-file
-            (insert "<svg xmlns='http://www.w3.org/2000/svg'>"
+            (insert "<svg xmlns='http://www.w3.org/2000/svg' "
+                    "width='10pt' height='5pt' viewBox='1 2 10 5'>"
                     "<path fill='currentColor'/></svg>"))
           (my/read-eww-math--set-svg-foreground svg-file "00FF00")
           (with-temp-buffer
             (insert-file-contents svg-file)
             (should (search-forward "<svg color='#00FF00'" nil t))
+            (should (search-forward "stroke='currentColor'" nil t))
+            (should (search-forward "stroke-width='0.18'" nil t))
+            (should (search-forward "paint-order='stroke fill'" nil t))
+            (should (search-forward "width='12.000000pt'" nil t))
+            (should (search-forward "height='7.000000pt'" nil t))
+            (should (search-forward "viewBox='0.000000 1.000000 12.000000 7.000000'"
+                                    nil t))
             (should (search-forward "fill='currentColor'" nil t))))
       (delete-file svg-file))))
+
+(ert-deftest my-read-eww-math-auto-scale-multiplies-font-matched-size ()
+  (let ((my/read-eww-math-image-scale nil)
+        (my/read-eww-math-image-scale-multiplier 1.5)
+        (my/read-eww-math-inline-scale-multiplier 1.25))
+    (cl-letf (((symbol-function 'face-attribute)
+               (lambda (&rest _) 220)))
+      (should (= (my/read-eww-math--image-scale t) 2.75))
+      (should (= (my/read-eww-math--image-scale) 3.4375)))))
 
 (ert-deftest my-read-unified-layout-has-one-tabbed-center-pane ()
   (save-window-excursion
@@ -907,6 +926,7 @@
                                (list kindle-buffer epub-buffer eww-buffer))))
               (with-current-buffer eww-buffer
                 (should (equal (plist-get eww-data :url) my/read-eww-url))
+                (should (= line-spacing my/read-eww-line-spacing))
                 (should (eq (cdr (assq 'math
                                        shr-external-rendering-functions))
                             #'my/read-eww-math-render))

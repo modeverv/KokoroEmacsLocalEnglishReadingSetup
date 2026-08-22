@@ -59,6 +59,15 @@ Automatic translation remains enabled in EWW."
   :type 'boolean
   :group 'my-read)
 
+(defcustom my/read-eww-line-spacing 0.5
+  "Additional line spacing used in the EWW center tab.
+
+A floating-point value is relative to the default frame line height, so 0.5
+makes the distance from one baseline to the next approximately 1.5 times the
+normal height."
+  :type '(choice (const :tag "No extra spacing" nil) number)
+  :group 'my-read)
+
 (defcustom my/read-translate-idle-delay 0.1
   "Seconds to wait before translating after the target changes."
   :type 'number
@@ -1145,6 +1154,7 @@ Otherwise, translate the sentence containing point."
         (eww-mode))
       (require 'my-read-eww-math)
       (my/read-eww-math-setup)
+      (setq-local line-spacing my/read-eww-line-spacing)
       ;; Reuse the EPUB/Kindle reading controls in rendered web papers.
       ;; `eww-setup-buffer' does not re-run `eww-mode' on navigation, so this
       ;; minor mode and its j/k/l/; bindings remain active after page loads.

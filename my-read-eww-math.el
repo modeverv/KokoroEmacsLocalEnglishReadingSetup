@@ -63,7 +63,50 @@ default face height, clamped to a practical range."
   :type '(choice (const :tag "Match default face" nil) number)
   :group 'my-read-eww-math)
 
-(defconst my/read-eww-math--cache-version "v2")
+(defcustom my/read-eww-math-image-scale-multiplier 1.5
+  "Extra multiplier applied when formula scaling is automatic.
+
+The default makes inline and display formulas about 1.5 times as large as the
+font-matched size.  Set `my/read-eww-math-image-scale' to a number when an
+absolute scale is preferred instead."
+  :type 'number
+  :group 'my-read-eww-math)
+
+(defcustom my/read-eww-math-inline-scale-multiplier 1.25
+  "Additional scale applied only to inline formulas.
+
+This keeps short but semantically important expressions such as subscripts,
+superscripts, and dimension declarations legible inside prose."
+  :type 'number
+  :group 'my-read-eww-math)
+
+(defcustom my/read-eww-math-image-vertical-margin 0
+  "Vertical margin in pixels around SVG formulas.
+
+The EWW buffer normally provides its line height through
+`my/read-eww-line-spacing'; this option is available for additional
+formula-specific padding when needed."
+  :type 'integer
+  :group 'my-read-eww-math)
+
+(defcustom my/read-eww-math-svg-stroke-width 0.18
+  "Outline width added to SVG formula glyphs.
+
+A small same-color stroke makes Computer Modern math slightly bolder without
+changing the source formula or replacing its mathematical font."
+  :type 'number
+  :group 'my-read-eww-math)
+
+(defcustom my/read-eww-math-svg-padding 1.0
+  "Padding in TeX points added around the generated SVG view box.
+
+`dvisvgm --exact-bbox' otherwise places the boundary exactly on the outermost
+glyph path.  Padding prevents antialiasing and the boldening stroke from being
+clipped at any edge."
+  :type 'number
+  :group 'my-read-eww-math)
+
+(defconst my/read-eww-math--cache-version "v4")
 
 (defconst my/read-eww-math--unsafe-command-regexp
   (concat
@@ -127,12 +170,20 @@ default face height, clamped to a practical range."
         (mapconcat (lambda (value) (format "%02X" (/ value 257))) values "")
       "000000")))
 
-(defun my/read-eww-math--image-scale ()
-  "Return the SVG scale appropriate for the current default face."
+(defun my/read-eww-math--image-scale (&optional display)
+  "Return the SVG scale appropriate for the current default face.
+
+When DISPLAY is nil, apply the extra inline-formula multiplier."
   (or my/read-eww-math-image-scale
       (let ((height (face-attribute 'default :height nil t)))
         (if (integerp height)
-            (max 1.0 (min 3.0 (/ height 120.0)))
+            (max 1.0
+                 (min 6.0
+                      (* my/read-eww-math-image-scale-multiplier
+                         (if display
+                             1.0
+                           my/read-eww-math-inline-scale-multiplier)
+                         (/ height 120.0))))
           1.0))))
 
 (defun my/read-eww-math--cache-file (job)
@@ -143,7 +194,9 @@ default face height, clamped to a practical range."
                          (list my/read-eww-math--cache-version
                                (plist-get job :tex)
                                (if (plist-get job :display) "display" "inline")
-                               (plist-get job :foreground))
+                               (plist-get job :foreground)
+                               (format "%.4f" my/read-eww-math-svg-stroke-width)
+                               (format "%.4f" my/read-eww-math-svg-padding))
                          "\0"))))
     (expand-file-name (concat key ".svg")
                       my/read-eww-math-cache-directory)))
@@ -305,15 +358,43 @@ is changed only for this synchronous call and is restored even on error."
   "Set SVG-FILE's inherited text color to FOREGROUND.
 
 `dvisvgm --currentcolor' writes glyph paths using CSS `currentColor'.  Adding
-the actual EWW foreground to the root element keeps formulas visible on dark
-themes without depending on Ghostscript or PostScript color specials."
+the actual EWW foreground and a subtle same-color stroke to the root element
+keeps formulas visible and slightly bolder on dark themes without depending
+on Ghostscript or PostScript color specials."
   (with-temp-buffer
     (insert-file-contents svg-file)
     (goto-char (point-min))
     (unless (re-search-forward "<svg\\(?:[[:space:]]\\|>\\)" nil t)
       (error "dvisvgm output has no SVG root element"))
     (goto-char (+ (match-beginning 0) 4))
-    (insert (format " color='#%s'" foreground))
+    (insert (format (concat " color='#%s' stroke='currentColor'"
+                            " stroke-width='%s' stroke-linejoin='round'"
+                            " paint-order='stroke fill'")
+                    foreground my/read-eww-math-svg-stroke-width))
+    (when (> my/read-eww-math-svg-padding 0)
+      (goto-char (point-min))
+      (when (re-search-forward
+             (concat "width='\\([0-9.]+\\)pt' height='\\([0-9.]+\\)pt'"
+                     " viewBox='\\([-0-9.]+\\) \\([-0-9.]+\\)"
+                     " \\([0-9.]+\\) \\([0-9.]+\\)'")
+             nil t)
+        (let* ((padding my/read-eww-math-svg-padding)
+               (width (string-to-number (match-string 1)))
+               (height (string-to-number (match-string 2)))
+               (x (string-to-number (match-string 3)))
+               (y (string-to-number (match-string 4)))
+               (view-width (string-to-number (match-string 5)))
+               (view-height (string-to-number (match-string 6))))
+          (replace-match
+           (format (concat "width='%.6fpt' height='%.6fpt'"
+                           " viewBox='%.6f %.6f %.6f %.6f'")
+                   (+ width (* 2 padding))
+                   (+ height (* 2 padding))
+                   (- x padding)
+                   (- y padding)
+                   (+ view-width (* 2 padding))
+                   (+ view-height (* 2 padding)))
+           t t))))
     (let ((coding-system-for-write 'utf-8-unix))
       (write-region (point-min) (point-max) svg-file nil 'silent))))
 
@@ -387,7 +468,10 @@ themes without depending on Ghostscript or PostScript color specials."
                 (insert-image
                  (create-image svg-file 'svg nil
                                :ascent my/read-eww-math-image-ascent
-                               :scale (my/read-eww-math--image-scale))
+                               :scale (my/read-eww-math--image-scale
+                                       (plist-get job :display))
+                               :margin
+                               (cons 0 my/read-eww-math-image-vertical-margin))
                  tex)
                 (put-text-property image-begin (point) 'help-echo tex)))
           (error
