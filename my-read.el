@@ -255,7 +255,10 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
       " Kindle ")
      ((and (frame-live-p frame)
            (eq buffer (frame-parameter frame 'my-reading-epub-buffer)))
-      " EPUB ")
+      (if (with-current-buffer buffer
+            (derived-mode-p 'doc-view-mode))
+          " PDF "
+        " EPUB "))
      ((and (frame-live-p frame)
            (eq buffer (frame-parameter frame 'my-reading-eww-buffer)))
       " EWW ")
@@ -474,12 +477,17 @@ normal Lookup agents, dictionaries or modules."
   (when (window-live-p window)
     (with-current-buffer (window-buffer window)
       (unless (derived-mode-p 'dired-mode)
-        (save-excursion
-          (goto-char (window-point window))
-          (when-let ((word (thing-at-point 'word t)))
-            (setq word (string-trim word))
-            (unless (string-empty-p word)
-              word)))))))
+        (let ((virtual
+               (and (fboundp 'english-reading-mode-current-text-location)
+                    (english-reading-mode-current-text-location
+                     (current-buffer)))))
+          (with-current-buffer (or (nth 1 virtual) (current-buffer))
+            (save-excursion
+              (goto-char (or (nth 2 virtual) (window-point window)))
+              (when-let ((word (thing-at-point 'word t)))
+                (setq word (string-trim word))
+                (unless (string-empty-p word)
+                  word)))))))))
 
 (defun my/read-lookup-open-left-pane (buffer)
   "Display Lookup BUFFER in the fixed left pane of the current my-read frame.
@@ -670,21 +678,24 @@ source."
   (when (window-live-p window)
     (with-current-buffer (window-buffer window)
       (unless (derived-mode-p 'dired-mode)
-        (save-excursion
-          (goto-char (window-point window))
-          (let ((sentence-end-double-space nil))
-            (when-let ((bounds (bounds-of-thing-at-point 'sentence)))
-              (goto-char (car bounds))
-              (skip-chars-forward " \t\n\r" (cdr bounds))
-              (let ((beg (point)))
-                (goto-char (cdr bounds))
-                (skip-chars-backward " \t\n\r" beg)
-                (let ((end (point)))
-                  (when (< beg end)
-                    (list (buffer-substring-no-properties beg end)
-                          (current-buffer)
-                          beg
-                          end)))))))))))
+        (or (and (fboundp 'english-reading-mode-current-text-location)
+                 (english-reading-mode-current-text-location
+                  (current-buffer)))
+            (save-excursion
+              (goto-char (window-point window))
+              (let ((sentence-end-double-space nil))
+                (when-let ((bounds (bounds-of-thing-at-point 'sentence)))
+                  (goto-char (car bounds))
+                  (skip-chars-forward " \t\n\r" (cdr bounds))
+                  (let ((beg (point)))
+                    (goto-char (cdr bounds))
+                    (skip-chars-backward " \t\n\r" beg)
+                    (let ((end (point)))
+                      (when (< beg end)
+                        (list (buffer-substring-no-properties beg end)
+                              (current-buffer)
+                              beg
+                              end))))))))))))
 
 (defun my/read--kokoro-context-for-frame-p (frame)
   "Return non-nil when English-reading speech locks translation for FRAME."
@@ -1323,6 +1334,7 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as center tabs."
 ;; j/k are defined only by english-reading-mode.el.  my-read.el observes its
 ;; speech lifecycle hooks above and never overrides j/k or advises Kokoro.
 (add-hook 'nov-mode-hook #'english-reading-mode)
+(add-hook 'doc-view-mode-hook #'english-reading-mode)
 
 (global-set-key (kbd "C-c p") #'kokoro-reader-speak-paragraph)
 (global-set-key (kbd "C-c n") #'kokoro-reader-speak-and-forward)

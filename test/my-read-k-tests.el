@@ -222,6 +222,109 @@
        (should sentence-end-double-space)
        (should (local-variable-p 'sentence-end-double-space))))))
 
+(ert-deftest english-reading-mode-makes-buffer-read-only-and-restores-writable-state ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (should-not buffer-read-only)
+     (english-reading-mode 1)
+     (should buffer-read-only)
+     (english-reading-mode -1)
+     (should-not buffer-read-only))))
+
+(ert-deftest english-reading-mode-preserves-an-existing-read-only-state ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (read-only-mode 1)
+     (english-reading-mode 1)
+     (should buffer-read-only)
+     (english-reading-mode -1)
+     (should buffer-read-only))))
+
+(ert-deftest english-reading-mode-splits-pdftotext-output-into-pages ()
+  (with-temp-buffer
+    (insert "Page one.\fPage two.\fPage three.")
+    (should (equal (append (english-reading-mode--pdf-page-ranges) nil)
+                   '((1 . 10) (11 . 20) (21 . 32))))))
+
+(ert-deftest english-reading-mode-pdf-j-and-k-follow-extracted-text-and-pages ()
+  (let ((pdf-buffer (generate-new-buffer " *english-reading-pdf-test*"))
+        (text-buffer (generate-new-buffer " *english-reading-pdf-text-test*"))
+        (shown-page 1)
+        spoken)
+    (unwind-protect
+        (progn
+          (with-current-buffer text-buffer
+            (insert "First sentence. Second sentence.\f2\n\nThird sentence.")
+            (setq-local sentence-end-double-space nil)
+            (setq-local english-reading-mode t))
+          (with-current-buffer pdf-buffer
+            (setq-local major-mode 'doc-view-mode)
+            (setq-local buffer-file-name "/tmp/english-reading-test.pdf")
+            (setq-local english-reading-mode t)
+            (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+            (setq-local english-reading-mode--pdf-page-ranges
+                        (with-current-buffer text-buffer
+                          (english-reading-mode--pdf-page-ranges)))
+            (setq-local english-reading-mode--pdf-page 1)
+            (setq-local english-reading-mode--pdf-text-point 1)
+            (cl-letf (((symbol-function 'doc-view-current-page)
+                       (lambda () shown-page))
+                      ((symbol-function 'doc-view-goto-page)
+                       (lambda (page) (setq shown-page page)))
+                      ((symbol-function 'kokoro-reader--speak-bounds)
+                       (lambda (beg end)
+                         (push (buffer-substring-no-properties beg end)
+                               spoken))))
+              (english-reading-mode-next-sentence)
+              (should (equal (car spoken) "First sentence."))
+              (should (equal (car (english-reading-mode-current-text-location))
+                             "Second sentence."))
+              (english-reading-mode-next-sentence)
+              (should (equal (car spoken) "Second sentence."))
+              (english-reading-mode-next-sentence)
+              (should (= shown-page 2))
+              (should (equal (car spoken) "Third sentence."))
+              (english-reading-mode-previous-sentence)
+              (should (equal (car spoken) "Third sentence.")))))
+      (when (buffer-live-p pdf-buffer)
+        (kill-buffer pdf-buffer))
+      (when (buffer-live-p text-buffer)
+        (kill-buffer text-buffer)))))
+
+(ert-deftest english-reading-mode-pdf-matches-words-and-merges-line-rectangles ()
+  (let* ((words
+          (vector
+           '(:text "First" :xmin 10.0 :ymin 20.0 :xmax 30.0 :ymax 30.0)
+           '(:text "sentence." :xmin 32.0 :ymin 20.0 :xmax 70.0 :ymax 30.0)
+           '(:text "Second" :xmin 10.0 :ymin 35.0 :xmax 40.0 :ymax 45.0)))
+         (starts
+          (english-reading-mode--pdf-token-match-starts
+           '("first" "sentence.") words)))
+    (should (equal starts '(0)))
+    (should
+     (equal (english-reading-mode--pdf-word-rectangles words 0 2)
+            '((10.0 20.0 70.0 30.0))))))
+
+(ert-deftest english-reading-mode-pdf-builds-highlight-svg-at-docview-width ()
+  (let (captured)
+    (cl-letf (((symbol-function 'english-reading-mode--pdf-image-data-uri)
+               (lambda (_file) "data:image/png;base64,AAAA"))
+              ((symbol-function 'create-image)
+               (lambda (data type data-p &rest properties)
+                 (setq captured (list data type data-p properties))
+                 'highlight-image)))
+      (should
+       (eq (english-reading-mode--pdf-svg-highlight
+            '(image :type png :file "/tmp/page.png" :width 850)
+            '(:width 612.0 :height 792.0)
+            '((10.0 20.0 70.0 30.0)))
+           'highlight-image))
+      (should (eq (nth 1 captured) 'svg))
+      (should (nth 2 captured))
+      (should (equal (plist-get (nth 3 captured) :width) 850))
+      (should (string-match-p "data:image/png;base64,AAAA" (car captured)))
+      (should (string-match-p "<rect x='8\\.500'" (car captured))))))
+
 (ert-deftest my-read-translation-target-uses-one-sentence-and-exact-bounds ()
   (my-read-k-test--isolated
    (save-window-excursion

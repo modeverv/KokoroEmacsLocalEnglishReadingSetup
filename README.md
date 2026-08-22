@@ -2,12 +2,12 @@
 
 Emacsで書籍を読みながら、ローカルKokoroによる読み上げ、ローカル翻訳、Lookup辞書、読書メモを一つの専用フレームにまとめるプロジェクトです。
 
-`my-read` は、通常のEPUB・テキスト、EWWで読むarXiv、Kindle.appで表示中の英語本文を一つのフレームに統合します。Kindle本文はmacOS Accessibilityから現在表示中のページだけを取得します。スクリーンショット取得、OCR、Kindleファイルの復号は行いません。
+`my-read` は、通常のEPUB・テキスト、DocViewで読むPDF、EWWで読むarXiv、Kindle.appで表示中の英語本文を一つのフレームに統合します。Kindle本文はmacOS Accessibilityから現在表示中のページだけを取得します。スクリーンショット取得、OCR、Kindleファイルの復号は行いません。
 
 専用フレームは次の4領域で構成されます。
 
 - 左: カーソル位置の単語を自動検索するLookup
-- 中央: タブで切り替えるKindle本文、EPUB・テキスト、EWW
+- 中央: タブで切り替えるKindle本文、EPUB・テキスト・PDF、EWW
 - 右上: カーソル位置、または読み上げ中の1文のローカル翻訳
 - 右下: 読書メモ
 
@@ -34,6 +34,7 @@ Emacsで書籍を読みながら、ローカルKokoroによる読み上げ、ロ
 - ローカル翻訳を使う場合はOllamaと `translategemma:4b`
 - Emacsパッケージ `google-translate` と `lookup`
 - EPUBを読む場合は `nov.el`
+- PDFを読む場合はPopplerの `pdftotext`
 - EWWでarXiv数式を画像表示する場合はTeX Liveの `latex` と `dvisvgm`
 
 Kindle.appの本文取得にはmacOSのアクセシビリティ権限が必要です。Lookup本体、辞書エージェント、EPWING辞書などは別途設定してください。
@@ -120,6 +121,8 @@ M-x my-read
 ```
 
 中央は同じ1ペインの `Kindle` / `EPUB` / `EWW` タブで切り替えます。EWWタブでは `g` で初期URL（既定はarXiv）、`G` で任意のURLを開けます。EWW全体の行間は `my/read-eww-line-spacing` の既定値 `0.5` により通常のおよそ1.5倍です。追加分は行の下側へ置かれます。arXiv HTMLのTeX注釈はバックグラウンドでSVGへ変換され、変換中もEmacsの操作を妨げません。SVGは式・表示形式・文字色・輪郭幅・内部余白ごとにキャッシュされます。表示倍率は既定フォントへ合わせた値のさらに1.5倍が既定で、インライン数式だけはそこから1.25倍します。それぞれ `my/read-eww-math-image-scale-multiplier` と `my/read-eww-math-inline-scale-multiplier` から調整できます。数式の太さは `my/read-eww-math-svg-stroke-width`、SVG端の余白は `my/read-eww-math-svg-padding` で調整できます。既定では四辺に1ptを加え、字形や輪郭線が `viewBox` で切れないようにします。`j` / `k` の文単位読み上げと `l` / `;` のLookup項目移動もEPUB・Kindleと同様に使えます。EWWのページ読み込み中に表示される `Loading` などを同期型辞書へ送るとEmacs全体を止めることがあるため、EWWタブでは自動Lookupだけを既定で停止します。自動翻訳と通常のEWW表示は有効です。必要なら `my/read-eww-enable-automatic-lookup` を `t` にしてください。接続し直す場合はKindleタブで `r` を押します。
+
+中央でPDFを開くと `doc-view-mode` と `english-reading-mode` が連携し、PDF画像を表示したまま `pdftotext` の抽出本文を裏側で文単位に移動します。`j` / `k` はページ境界でDocViewの表示ページも自動的に進めたり戻したりし、翻訳とLookupも同じ抽出本文を参照します。読み上げ中は `pdftotext -bbox-layout` の単語座標を使って該当箇所をPDF画像上へ半透明表示し、読み上げ終了時に通常画像へ戻します。色と透明度は `english-reading-mode-pdf-highlight-color` と `english-reading-mode-pdf-highlight-opacity` で変更できます。ページ番号など英字を実質的に含まない断片は読み飛ばします。テキストレイヤーを持たないスキャンPDFはOCR対象外です。
 
 | キー | 動作 |
 | --- | --- |
