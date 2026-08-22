@@ -75,6 +75,14 @@ The bridge currently supports two."
 (defvar my-read-k--back-queue nil)
 (defvar my-read-k--back-source-fingerprint nil)
 
+(defconst my-read-k--nonterminal-abbreviations
+  '("Mr." "Mrs." "Ms." "Dr." "Prof." "Sr." "Jr." "St." "Mt."
+    "Gen." "Rep." "Sen." "Gov." "Lt." "Col." "Sgt." "Capt."
+    "Cmdr." "Rev." "Hon." "Pres." "No." "Nos." "Fig." "Figs."
+    "Eq." "Eqs." "Vol." "p." "pp." "vs." "etc." "e.g." "i.e."
+    "a.m." "p.m.")
+  "Abbreviations that do not end a displayed sentence line.")
+
 (defun my-read-k--alist-get (key alist)
   "Return KEY from JSON ALIST, accepting symbol or string keys."
   (or (alist-get key alist)
@@ -106,6 +114,52 @@ The bridge currently supports two."
       (kill-local-variable 'kokoro-reader-voice)
       (kill-local-variable 'kokoro-reader-macos-voice))
     language))
+
+(defun my-read-k--nonterminal-abbreviation-p (sentence)
+  "Return non-nil when SENTENCE ends in a nonterminal abbreviation."
+  (let ((bare (replace-regexp-in-string "[\"'”’)]*\\'" "" sentence)))
+    (or (cl-some (lambda (abbreviation)
+                   (string-suffix-p abbreviation bare t))
+                 my-read-k--nonterminal-abbreviations)
+        (string-match-p "\\b[[:upper:]]\\.\\'" bare))))
+
+(defun my-read-k--one-sentence-per-line (text)
+  "Return Kindle TEXT normalized to one logical sentence per line.
+Accessibility text contains no paragraph boundaries, so this function does
+not attempt to reconstruct them.  A leading chapter label is kept on its own
+line, and common abbreviations are not treated as sentence endings."
+  (let* ((normalized (replace-regexp-in-string
+                      "[[:space:]\u00a0]+" " " (string-trim text)))
+         (case-fold-search t)
+         heading
+         candidates
+         sentences)
+    (when (string-match
+           "\\`\\(Prologue\\|Epilogue\\|Chapter[[:space:]]+\\(?:[0-9]+\\|[IVXLCDM]+\\)\\)[[:space:]]+"
+           normalized)
+      (setq heading (match-string 1 normalized)
+            normalized (substring normalized (match-end 0))))
+    (with-temp-buffer
+      (insert normalized)
+      (setq-local sentence-end-double-space nil)
+      (goto-char (point-min))
+      (while (< (point) (point-max))
+        (skip-chars-forward "[:space:]")
+        (let ((beginning (point)))
+          (forward-sentence)
+          (let ((sentence
+                 (string-trim
+                  (buffer-substring-no-properties beginning (point)))))
+            (unless (string-empty-p sentence)
+              (push sentence candidates))))))
+    (dolist (sentence (nreverse candidates))
+      (if (and sentences
+               (my-read-k--nonterminal-abbreviation-p (car sentences)))
+          (setcar sentences (concat (car sentences) " " sentence))
+        (push sentence sentences)))
+    (string-join (append (and heading (list heading))
+                         (nreverse sentences))
+                 "\n")))
 
 (defun my-read-k--target-book-name (title url)
   "Return a stable Kindle book identifier from target TITLE and URL."
@@ -398,7 +452,7 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
       (with-current-buffer my-read-k--buffer
         (let ((inhibit-read-only t))
           (erase-buffer)
-          (insert text)
+          (insert (my-read-k--one-sentence-per-line text))
           (unless (bolp) (insert "\n"))
           (my-read-k--position-for-direction direction)
           (setq buffer-read-only t)

@@ -135,11 +135,23 @@
         (fingerprint . "abc") (ocrMs . 12) (lines . nil))
       'next nil)
      (should buffer-read-only)
-     (should (equal (buffer-string) "First sentence.\n\nSecond sentence.\n"))
+     (should (equal (buffer-string) "First sentence.\nSecond sentence.\n"))
      (should (equal (thing-at-point 'word t) "First"))
      (should (equal my-read-k--last-fingerprint "abc"))
      (should (equal (my-read-k--alist-get 'text my-read-k--current-result)
                     "First sentence.\n\nSecond sentence.")))))
+
+(ert-deftest my-read-k-formats-accessibility-text-one-sentence-per-line ()
+  (should
+   (equal
+    (my-read-k--one-sentence-per-line
+     "Prologue \u201cReady, Sousuke? We need paper.\u201d Chidori spoke to Mr. Sayama. He nodded.")
+    (string-join '("Prologue"
+                   "\u201cReady, Sousuke?"
+                   "We need paper.\u201d"
+                   "Chidori spoke to Mr. Sayama."
+                   "He nodded.")
+                 "\n"))))
 
 (ert-deftest my-read-k-mode-keeps-kindle-buffer-read-only ()
   (my-read-k-test--isolated
