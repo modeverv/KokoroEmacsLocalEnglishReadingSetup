@@ -1329,6 +1329,24 @@
       (goto-char (point-min))
       (should-not (my/read-vocab-target-at-point (selected-window))))))
 
+(ert-deftest my-read-vocabulary-capture-deactivates-selected-region ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (insert "In spite of everything, she went.")
+      (goto-char (point-min))
+      (set-mark (point))
+      (search-forward "in spite of")
+      (setq transient-mark-mode t)
+      (activate-mark)
+      (should (use-region-p))
+      (cl-letf (((symbol-function 'my/read--center-window-active-p)
+                 (lambda () t))
+                ((symbol-function 'my/read-vocab-lookup-meaning)
+                 (lambda (_term _callback &rest _))))
+        (my/read-vocab-capture))
+      (should-not mark-active))))
+
 (ert-deftest my-read-vocabulary-normalized-key-folds-case-and-punctuation ()
   (should (equal (my/read-vocab-normalize-key " Anxiety, ") "anxiety"))
   (should (equal (my/read-vocab-normalize-key "  In\n spite   of! ")

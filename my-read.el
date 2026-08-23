@@ -1173,6 +1173,8 @@ Return (STATUS . COUNT), where STATUS is `added' or `saved'."
          (term (my/read-vocab-target-at-point center)))
     (unless (and term (not (string-empty-p term)))
       (user-error "No word or phrase at point"))
+    (when phrase-p
+      (deactivate-mark))
     (let* ((sentence-data (my/read-current-sentence-at-window center))
            (sentence (my/read-vocab-normalize-text
                       (or (car sentence-data) term)))
