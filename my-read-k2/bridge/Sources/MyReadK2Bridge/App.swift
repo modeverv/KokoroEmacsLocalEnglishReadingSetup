@@ -42,8 +42,10 @@ final class BridgeRuntime {
     }
 
     private func attach(params: [String: JSONValue]) throws -> [String: JSONValue] {
-        targetTitle = params.string("bookTitle", default: "Kindle.app")!
         var result = try client.attach()
+        targetTitle = KindleBookTitle.resolve(
+            override: params.string("bookTitle"),
+            detected: result["title"]?.string)
         result["title"] = .string(targetTitle)
         attached = true
         return result

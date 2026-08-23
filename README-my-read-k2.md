@@ -29,8 +29,13 @@ The reader keys are the same as `my-read-k`: `j`/`k` read by sentence and cross
 page boundaries, `C-v`/`M-v` turn pages directly, `C-c g` refreshes, and `r`
 reconnects to Kindle.app.
 
-Set `my-read-k2-book-name` to the current book title if notes should use a name
-more specific than `Kindle.app`.
+The bridge automatically reads the current book title from Kindle's local
+`BookData.sqlite` metadata database in read-only mode. It does not use OCR or
+send library data over the network. To override the detected title manually:
+
+```elisp
+(setq my-read-k2-book-name "My preferred title")
+```
 
 The bridge never crawls or saves a whole book. It reads only the currently
 visible page and temporarily visits at most two following pages for the

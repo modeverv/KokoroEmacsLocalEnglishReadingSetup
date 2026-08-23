@@ -18,9 +18,11 @@
   :type '(choice (const :tag "Package release binary" nil) file)
   :group 'my-read-k2)
 
-(defcustom my-read-k2-book-name "Kindle.app"
-  "Book name used by my-read notes for the currently open Kindle.app book."
-  :type 'string
+(defcustom my-read-k2-book-name nil
+  "Optional override for the current Kindle.app book title.
+When nil, the bridge detects the most recently opened title from Kindle's
+local, read-only metadata database."
+  :type '(choice (const :tag "Detect automatically" nil) string)
   :group 'my-read-k2)
 
 (defun my-read-k2--bridge-command ()

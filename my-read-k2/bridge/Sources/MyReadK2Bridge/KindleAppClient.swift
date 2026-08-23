@@ -59,7 +59,7 @@ final class KindleAppClient {
         _ = try capturePage()
         return [
             "targetId": .string(String(running.processIdentifier)),
-            "title": .string("Kindle.app"),
+            "title": .string(KindleBookCatalog.currentTitle() ?? "Kindle.app"),
             "url": .string("kindle-app://reader")
         ]
     }

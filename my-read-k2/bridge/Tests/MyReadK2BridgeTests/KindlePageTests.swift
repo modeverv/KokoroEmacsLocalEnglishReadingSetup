@@ -13,4 +13,19 @@ struct KindlePageTests {
         let page = KindlePage(text: "English text", identifier: "ignored", start: 10, end: 20)
         #expect(page.fingerprint == "kindle-position:10-20")
     }
+
+    @Test func automaticBookTitleUsesDetectedMetadata() {
+        #expect(KindleBookTitle.resolve(
+            override: nil,
+            detected: "Full Metal Panic! Volume 1") == "Full Metal Panic! Volume 1")
+        #expect(KindleBookTitle.resolve(
+            override: "Kindle.app",
+            detected: "Full Metal Panic! Volume 1") == "Full Metal Panic! Volume 1")
+    }
+
+    @Test func explicitBookTitleOverridesDetectedMetadata() {
+        #expect(KindleBookTitle.resolve(
+            override: "My preferred title",
+            detected: "Metadata title") == "My preferred title")
+    }
 }
