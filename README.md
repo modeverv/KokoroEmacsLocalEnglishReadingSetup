@@ -20,7 +20,8 @@ Emacsで書籍を読みながら、ローカルKokoroによる読み上げ、ロ
 - Kindleでは前後2ページをメモリ上だけにキャッシュ
 - Kindle本文をファイルへ保存しない
 - Google翻訳を既定とし、必要に応じてローカル翻訳へ切り替え可能
-- 翻訳結果を記録・保存しない
+- `u` で単語や選択フレーズを例文・意味・日本語訳とともにOrgへ蓄積
+- 通常の自動翻訳は記録・保存しない
 
 ## 必要環境
 
@@ -65,6 +66,7 @@ curl --fail http://127.0.0.1:8000/health
 
 (setq my/read-book-path "/path/to/books"
       my/read-note-file "~/Documents/english-reading.org"
+      my/read-vocabulary-file "~/my-read/vocabulary.org"
       my/read-eww-url "https://arxiv.org/"
       my/read-eww-line-spacing 0.5
       my/read-eww-math-enabled t
@@ -136,8 +138,98 @@ M-x my-read
 | `C-c g` | 現在ページを再取得 |
 | `C-c C-k` | 合成または再生を停止 |
 | `l` / `;` | Lookupの次／前の項目 |
+| `u` | 単語、または選択中のフレーズを語彙Orgファイルへ保存 |
 | `C-c t` | Kindle／EPUB／EWWタブを順に切り替える |
 | `r` | Kindle.appへ再接続 |
+
+## 単語・フレーズの保存
+
+中央のKindle／EPUB／PDF／EWW読書ペインで `u` を押すと、覚えておきたい
+単語やフレーズを `my/read-vocabulary-file` のOrgファイルへ保存します。このキーは
+`my-read` の読書ペイン内だけで有効で、通常のEmacsバッファの `u` には影響しません。
+同じ操作は `M-x my/read-vocab-capture` でも実行できます。
+
+- リージョンが有効な場合: 選択範囲全体をフレーズとして保存
+- リージョンがない場合: カーソル位置の単語を保存
+- 選択範囲内の改行や連続空白は1個の空白へ正規化
+- 大文字小文字と周辺の句読点を無視して既存項目を検索
+- 同じ単語・フレーズを再登録すると、見出しを増やさず新しい用例を追加
+
+既定の保存先は次のファイルです。ファイルと親ディレクトリは初回保存時に
+自動作成されます。
+
+```elisp
+(setq my/read-vocabulary-file "~/my-read/vocabulary.org")
+```
+
+各項目には、次の情報を保存します。
+
+- 単語またはフレーズ
+- 既存のmy-read Lookupで得られた英英辞書の定義
+- 既存のmy-read Lookupで得られた英和辞書の定義
+- 単語または選択フレーズ自体のGoogle翻訳
+- 遭遇日時
+- Kindleの書名、EPUB／PDFのファイル名、またはEWWのページタイトル
+- 単語・フレーズを含む英語の1文
+- 既存のmy-read翻訳バックエンドによる日本語訳
+- 安価に取得できる場合は、ファイルパスやURLなどの参照元
+
+Orgファイルでは、正規化後の単語・フレーズごとにトップレベル見出しを1個だけ
+作ります。再登録時は `COUNT` と `UPDATED` を更新し、`Examples` の下へ用例を
+追加します。
+
+```org
+* anxiety
+:PROPERTIES:
+:TYPE: word
+:CREATED: [2026-08-23 Sun 07:20]
+:UPDATED: [2026-08-23 Sun 07:26]
+:COUNT: 2
+:END:
+
+** Meaning
+English-English [English]:
+anxiety | a feeling of worry, nervousness, or unease.
+
+English-Japanese [Japanese - English]:
+名詞 不安、心配。
+
+Google Translate:
+不安
+
+** Examples
+
+*** [2026-08-23 Sun 07:20] Some Light Novel Vol. 1
+:PROPERTIES:
+:BOOK: Some Light Novel Vol. 1
+:END:
+
+English:
+She felt a strange anxiety about what would happen next.
+
+Japanese:
+彼女は次に何が起こるのか、妙な不安を感じていた。
+```
+
+Lookupや翻訳が利用できない場合も登録自体は中止せず、取得できた情報だけを
+保存します。カーソル位置に単語がなく、リージョンもない場合は何も書き込まず
+`No word or phrase at point` と表示します。既存項目の `COUNT` や `Examples` が
+壊れていて安全に更新できない場合も、元のファイルを変更せずエラーを報告します。
+
+英英・英和辞書はLookupの辞書タイトルから判定します。辞書タイトルが既定の
+`English`、`Japanese - English`、`英語辞典`、英和・和英を含むタイトルと異なる
+場合は、次の正規表現を環境に合わせて変更できます。
+
+```elisp
+(setq my/read-vocab-english-dictionary-title-regexp
+      "\\`English\\'\\|英英\\|英語辞典"
+      my/read-vocab-japanese-dictionary-title-regexp
+      "Japanese[[:space:]]*-[[:space:]]*English\\|英和\\|和英")
+```
+
+例文の日本語訳は `my/read-translation-backend` の設定に従いますが、Meaning内の
+単語・フレーズ訳は常にGoogle翻訳を使います。既存項目を再登録した場合は、用例の
+追加と同時にMeaningの3ブロックも最新結果へ置き換えます。
 
 ## Google翻訳とローカル翻訳
 
@@ -164,7 +256,9 @@ Ollamaが未起動、タイムアウト、または不正な応答を返した�
 `my/read-google-translation-fallback` を `nil` にしてください。既定のGoogle翻訳へ
 戻す場合は `my/read-translation-backend` を `google` に設定します。
 
-翻訳は画面に表示するだけで、原文・訳文ともファイルには記録しません。
+通常の自動翻訳は画面に表示するだけで、原文・訳文ともファイルには記録しません。
+ただし、読書ペインで `u` を押して明示的に語彙登録した場合は、その用例の
+英語原文と日本語訳を `my/read-vocabulary-file` へ保存します。
 
 ## 状態確認
 
@@ -193,7 +287,7 @@ make my-read-k-check
 | `kokoro_server.py` | ローカルKokoro HTTPサーバー |
 | `kokoro-reader.el` | 非同期音声生成・再生・ハイライト |
 | `english-reading-mode.el` | 1文単位の移動と読み上げ状態通知 |
-| `my-read.el` | 専用フレーム、Lookup、ローカル翻訳とGoogleフォールバック |
+| `my-read.el` | 専用フレーム、Lookup、翻訳、語彙Orgファイルへの保存 |
 | `my-read-k.el` | Kindle本文バッファ、ページ移動、メモリキャッシュ |
 | `my-read-k2.el` | Kindle.app Accessibilityバックエンド |
 | `my-read-k2/bridge/` | macOS Accessibilityを読むSwiftブリッジ |
