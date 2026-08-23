@@ -129,6 +129,22 @@ more transparent; 1 is fully opaque."
   :type 'string
   :group 'my-read)
 
+(defcustom my/read-japanese-macos-voice "Kyoko (Enhanced)"
+  "macOS voice used when a center-pane EPUB contains Japanese text.
+
+Japanese EPUB speech deliberately uses macOS while the optional Kokoro
+Japanese frontend is unavailable, so opening a Japanese book never leaves the
+buffer configured with an English Kokoro voice."
+  :type '(choice (const :tag "System default" nil) string)
+  :group 'my-read)
+
+(defcustom my/read-japanese-macos-rate 540
+  "Speaking rate used for Japanese EPUBs, in words per minute.
+
+This is three times the normal `kokoro-reader-macos-rate' default of 180."
+  :type 'integer
+  :group 'my-read)
+
 (defcustom my/read-lookup-dictionary-ids
   '("nmacos"
     "ndeb+~/Sync/004_dic/ee/:simpleen"
@@ -369,6 +385,26 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
   (when (fboundp 'tab-line-mode)
     (tab-line-mode (if my-read-center-tab-mode 1 -1))))
 
+(defun my/read--buffer-contains-japanese-p ()
+  "Return non-nil when the current buffer contains Japanese script."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (re-search-forward "[ぁ-んァ-ヶ一-龠々]" nil t))))
+
+(defun my/read--configure-speech-language ()
+  "Configure speech for the language of the current EPUB buffer."
+  (if (my/read--buffer-contains-japanese-p)
+      (setq-local my/read-source-language "ja"
+                  kokoro-reader-backend 'macos
+                  kokoro-reader-macos-voice my/read-japanese-macos-voice
+                  kokoro-reader-macos-rate my/read-japanese-macos-rate)
+    (setq-local my/read-source-language "en")
+    (kill-local-variable 'kokoro-reader-backend)
+    (kill-local-variable 'kokoro-reader-macos-voice)
+    (kill-local-variable 'kokoro-reader-macos-rate)))
+
 (defun my/read--configure-center-tab-buffer (buffer frame)
   "Configure BUFFER as one of FRAME's center reading tabs."
   (when (buffer-live-p buffer)
@@ -380,6 +416,8 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
       (setq-local tab-line-tab-name-function #'my/read-center-tab-name)
       (setq-local tab-line-close-button-show nil)
       (setq-local tab-line-new-button-show nil)
+      (when (derived-mode-p 'nov-mode)
+        (my/read--configure-speech-language))
       (when (derived-mode-p 'nov-mode 'eww-mode 'doc-view-mode)
         (english-reading-mode 1))
       (my-read-center-tab-mode 1))))

@@ -43,6 +43,30 @@
          (my-read-k--back-source-fingerprint nil))
      ,@body))
 
+(ert-deftest my-read-japanese-epub-uses-macos-japanese-speech ()
+  (with-temp-buffer
+    (insert "あの日、わたしとあいつとの関係が壊れた。")
+    (my/read--configure-speech-language)
+    (should (equal my/read-source-language "ja"))
+    (should (eq kokoro-reader-backend 'macos))
+    (should (equal kokoro-reader-macos-voice
+                   my/read-japanese-macos-voice))
+    (should (= kokoro-reader-macos-rate 540))
+    (should (= kokoro-reader-macos-rate
+               (* 3 (default-value 'kokoro-reader-macos-rate))))))
+
+(ert-deftest my-read-english-epub-clears-japanese-speech-overrides ()
+  (with-temp-buffer
+    (setq-local kokoro-reader-backend 'macos)
+    (setq-local kokoro-reader-macos-voice "Kyoko (Enhanced)")
+    (setq-local kokoro-reader-macos-rate 540)
+    (insert "This is an English sentence.")
+    (my/read--configure-speech-language)
+    (should (equal my/read-source-language "en"))
+    (should-not (local-variable-p 'kokoro-reader-backend))
+    (should-not (local-variable-p 'kokoro-reader-macos-voice))
+    (should-not (local-variable-p 'kokoro-reader-macos-rate))))
+
 (ert-deftest my-read-k-uses-reported-language-and-defaults-to-english ()
   (should (equal (my-read-k--language-from-result '((language . "en-US")))
                  "en"))
