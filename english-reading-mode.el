@@ -294,17 +294,23 @@ This currently exposes the text layer used behind a DocView PDF."
         (or (english-reading-mode--pdf-location)
             (user-error "PDF page %s has no readable text" next)))))
 
-(defun english-reading-mode--pdf-next-sentence ()
-  "Read the PDF sentence at the virtual cursor, then advance it."
-  (let* ((pdf-buffer (current-buffer))
-         (location (english-reading-mode--pdf-next-location))
+(defun english-reading-mode--pdf-speak-current-sentence ()
+  "Read the PDF sentence at the virtual cursor without advancing it."
+  (let* ((location (english-reading-mode--pdf-next-location))
          (text-buffer (nth 1 location))
          (beg (nth 2 location))
          (end (nth 3 location)))
     (with-current-buffer text-buffer
-      (kokoro-reader--speak-bounds beg end))
-    (with-current-buffer pdf-buffer
-      (setq english-reading-mode--pdf-text-point end))))
+      (kokoro-reader--speak-bounds beg end))))
+
+(defun english-reading-mode--pdf-next-sentence ()
+  "Move the PDF virtual cursor to the next sentence without reading it."
+  (let* ((location (english-reading-mode--pdf-next-location))
+         (end (nth 3 location)))
+    (setq english-reading-mode--pdf-text-point end)
+    ;; Resolve the next location now so crossing a page boundary updates the
+    ;; displayed page as part of this movement command.
+    (english-reading-mode--pdf-next-location)))
 
 (defun english-reading-mode--pdf-previous-location ()
   "Move backward and return the preceding PDF text location."
@@ -706,16 +712,19 @@ period proves that synthesis failed before playback started."
   (pcase-let ((`(,beg . ,end) (english-reading-mode--sentence-bounds)))
     (kokoro-reader--speak-bounds beg end)))
 
+(defun english-reading-mode-speak-current-sentence ()
+  "Read the current sentence without moving the text cursor."
+  (interactive)
+  (if (english-reading-mode--pdf-buffer-p)
+      (english-reading-mode--pdf-speak-current-sentence)
+    (english-reading-mode--speak-at-point)))
+
 (defun english-reading-mode-next-sentence ()
-  "Read the sentence at point, then immediately move to the next sentence."
+  "Move to the next sentence without reading it."
   (interactive)
   (if (english-reading-mode--pdf-buffer-p)
       (english-reading-mode--pdf-next-sentence)
-    (pcase-let ((`(,beg . ,end) (english-reading-mode--sentence-bounds)))
-      ;; Start hook is emitted before this call returns.
-      (kokoro-reader--speak-bounds beg end)
-      ;; Keep the desired j behaviour: audio continues while point is already
-      ;; positioned at the following sentence.
+    (pcase-let ((`(,_ . ,end) (english-reading-mode--sentence-bounds)))
       (goto-char end)
       (skip-chars-forward " \t\n\r"))))
 
@@ -752,28 +761,34 @@ leave point at the current sentence and report that there is nowhere to go."
 
 (defvar-keymap english-reading-mode-map
   :doc "Keymap for `english-reading-mode'."
-  "j" '(menu-item "Read next sentence" english-reading-mode-next-sentence
+  "k" '(menu-item "Read current sentence" english-reading-mode-speak-current-sentence
                    :filter english-reading-mode--filter-key-binding)
-  "k" '(menu-item "Read previous sentence" english-reading-mode-previous-sentence
+  "j" '(menu-item "Move to next sentence" english-reading-mode-next-sentence
                    :filter english-reading-mode--filter-key-binding)
-  "p" '(menu-item "Read paragraph" kokoro-reader-speak-paragraph
+  "i" '(menu-item "Read previous sentence" english-reading-mode-previous-sentence
                    :filter english-reading-mode--filter-key-binding)
+;;  "" '(menu-item "Read paragraph" kokoro-reader-speak-paragraph
+;;                   :filter english-reading-mode--filter-key-binding)
   "C-c C-k" '(menu-item "Stop reading" english-reading-mode-stop
                          :filter english-reading-mode--filter-key-binding))
 
 ;; Keep re-evaluation effective in a live Emacs where `defvar-keymap' preserves
 ;; the already existing map object.
+(keymap-set english-reading-mode-map "k"
+            '(menu-item "Read current sentence"
+                        english-reading-mode-speak-current-sentence
+                        :filter english-reading-mode--filter-key-binding))
 (keymap-set english-reading-mode-map "j"
-            '(menu-item "Read next sentence"
+            '(menu-item "Move to next sentence"
                         english-reading-mode-next-sentence
                         :filter english-reading-mode--filter-key-binding))
-(keymap-set english-reading-mode-map "k"
+(keymap-set english-reading-mode-map "i"
             '(menu-item "Read previous sentence"
                         english-reading-mode-previous-sentence
                         :filter english-reading-mode--filter-key-binding))
-(keymap-set english-reading-mode-map "p"
-            '(menu-item "Read paragraph" kokoro-reader-speak-paragraph
-                        :filter english-reading-mode--filter-key-binding))
+;;(keymap-set english-reading-mode-map "p"
+;;            '(menu-item "Read paragraph" kokoro-reader-speak-paragraph
+;;                        :filter english-reading-mode--filter-key-binding))
 (keymap-set english-reading-mode-map "C-c C-k"
             '(menu-item "Stop reading" english-reading-mode-stop
                         :filter english-reading-mode--filter-key-binding))
@@ -782,10 +797,10 @@ leave point at the current sentence and report that there is nowhere to go."
 (define-minor-mode english-reading-mode
   "Read English text or a DocView PDF one sentence at a time with Kokoro.
 
-`j' reads the sentence at point and immediately advances point to the next
-sentence.  `k' moves back and reads the previous sentence.  `p' reads the
-current paragraph without moving point.  The buffer is read-only while this
-mode is active.  Speech lifecycle
+`j' reads the sentence at point without moving point.  `n' moves to the next
+sentence without reading it.  `k' moves back and reads the previous sentence.
+`p' reads the current paragraph without moving point.  The buffer is read-only
+while this mode is active.  Speech lifecycle
 is exposed through `english-reading-mode-speech-start-hook' and
 `english-reading-mode-speech-finish-hook'."
   :lighter " EnglishRead"

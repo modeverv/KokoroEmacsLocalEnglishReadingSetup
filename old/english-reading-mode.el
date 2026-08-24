@@ -47,16 +47,16 @@
 
 (defvar-keymap english-reading-mode-map
   :doc "Keymap for `english-reading-mode'."
-  "j" #'english-reading-mode-next-sentence
-  "k" #'english-reading-mode-previous-sentence
+  "k" #'english-reading-mode-next-sentence
+  "i" #'english-reading-mode-previous-sentence
   "C-c C-k" #'english-reading-mode-stop)
 
 ;;;###autoload
 (define-minor-mode english-reading-mode
   "Read English EPUB text one sentence at a time with local Kokoro.
 
-In a nov.el buffer, use `j` to read the sentence at point and advance to the
-next sentence.  Use `k` to move back and read the previous sentence.  The
+In a nov.el buffer, use `k` to read the sentence at point. `j` to advance to the
+next sentence.  Use `i` to move back and read the previous sentence.  The
 mode reuses `kokoro-reader-mode`'s server settings."
   :lighter " EnglishRead"
   :keymap english-reading-mode-map

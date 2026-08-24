@@ -721,14 +721,14 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
           (error nil))))))
 
 (defun my-read-k-forward ()
-  "Run existing j behavior, fetching the next Kindle page at the boundary."
+  "Move forward one sentence, fetching the next Kindle page at the boundary."
   (interactive)
   (cond
    (my-read-k--busy-p
-    (setq my-read-k--pending-intent (cons 'next t)))
+    (setq my-read-k--pending-intent (cons 'next nil)))
    ((my-read-k--sentence-at-point-p)
     (english-reading-mode-next-sentence))
-   (t (my-read-k--request-page 'next t))))
+   (t (my-read-k--request-page 'next nil))))
 
 (defun my-read-k-backward ()
   "Run existing k behavior, fetching the previous Kindle page at the boundary."
@@ -765,8 +765,9 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
 
 (defvar-keymap my-read-k-mode-map
   :doc "Keymap for the Kindle.app accessibility source."
+  "k" #'english-reading-mode-speak-current-sentence
   "j" #'my-read-k-forward
-  "k" #'my-read-k-backward
+  "i" #'my-read-k-backward
   "<down>" #'my-read-k-down
   "<up>" #'my-read-k-up
   "C-n" #'my-read-k-down

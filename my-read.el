@@ -339,6 +339,31 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
   (when (my/read--center-window-active-p)
     binding))
 
+(defun my/read-next-word ()
+  "Move point to the beginning of the next word in the reading pane."
+  (interactive)
+  (let* ((origin (point))
+         (bounds (bounds-of-thing-at-point 'word))
+         (search-start (if bounds (cdr bounds) (point))))
+    (goto-char search-start)
+    (forward-word 1)
+    (if (> (point) search-start)
+        (backward-word 1)
+      (goto-char origin)
+      (message "Already at the last word"))))
+
+(defun my/read-previous-word ()
+  "Move point to the beginning of the previous word in the reading pane."
+  (interactive)
+  (let* ((origin (point))
+         (bounds (bounds-of-thing-at-point 'word))
+         (search-start (if bounds (car bounds) (point))))
+    (goto-char search-start)
+    (backward-word 1)
+    (when (= (point) search-start)
+      (goto-char origin)
+      (message "Already at the first word"))))
+
 (defvar my-read-center-tab-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c t")
@@ -355,6 +380,12 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
                             :filter my/read--filter-center-key-binding))
     (define-key map (kbd "u")
                 '(menu-item "Save vocabulary" my/read-vocab-capture
+                            :filter my/read--filter-center-key-binding))
+    (define-key map (kbd ";")
+                '(menu-item "Next word" my/read-next-word
+                            :filter my/read--filter-center-key-binding))
+    (define-key map (kbd "l")
+                '(menu-item "Previous word" my/read-previous-word
                             :filter my/read--filter-center-key-binding))
     map)
   "Keymap active in the Kindle, EPUB, and EWW center tabs.")
@@ -375,6 +406,12 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
                         :filter my/read--filter-center-key-binding))
 (keymap-set my-read-center-tab-mode-map "u"
             '(menu-item "Save vocabulary" my/read-vocab-capture
+                        :filter my/read--filter-center-key-binding))
+(keymap-set my-read-center-tab-mode-map ";"
+            '(menu-item "Next word" my/read-next-word
+                        :filter my/read--filter-center-key-binding))
+(keymap-set my-read-center-tab-mode-map "l"
+            '(menu-item "Previous word" my/read-previous-word
                         :filter my/read--filter-center-key-binding))
 
 (define-minor-mode my-read-center-tab-mode
@@ -790,11 +827,11 @@ focus is restored to the center reading window."
 ;; `english-reading-mode' is active in both my-read center buffers.  Install
 ;; these explicitly so re-evaluating my-read.el updates a live session too.
 (keymap-set
- english-reading-mode-map "l"
+ english-reading-mode-map "p"
  '(menu-item "Next Lookup entry" my/read-lookup-next-entry
              :filter english-reading-mode--filter-key-binding))
 (keymap-set
- english-reading-mode-map ";"
+ english-reading-mode-map "o"
  '(menu-item "Previous Lookup entry" my/read-lookup-previous-entry
              :filter english-reading-mode--filter-key-binding))
 
