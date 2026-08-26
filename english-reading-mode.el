@@ -353,13 +353,22 @@ This currently exposes the text layer used behind a DocView PDF."
     location))
 
 (defun english-reading-mode--pdf-previous-sentence ()
-  "Move to and read the preceding PDF sentence."
-  (let* ((location (english-reading-mode--pdf-previous-location))
-         (text-buffer (nth 1 location))
-         (beg (nth 2 location))
-         (end (nth 3 location)))
-    (with-current-buffer text-buffer
-      (kokoro-reader--speak-bounds beg end))))
+  "Move to the preceding PDF sentence without reading it."
+  (english-reading-mode--pdf-sync)
+  (let* ((origin-page english-reading-mode--pdf-page)
+         (origin-point english-reading-mode--pdf-text-point)
+         (location (english-reading-mode--pdf-previous-location)))
+    ;; A page number before the first real sentence can make the generic
+    ;; previous-location scan resolve back to the original sentence.  In that
+    ;; case, continue explicitly from the end of the preceding page.
+    (when (and (= english-reading-mode--pdf-page origin-page)
+               (>= (nth 2 location) origin-point)
+               (> origin-page 1))
+      (english-reading-mode--pdf-goto-page (1- origin-page))
+      (setq english-reading-mode--pdf-text-point
+            (cdr (english-reading-mode--pdf-page-range (1- origin-page))))
+      (setq location (english-reading-mode--pdf-previous-location)))
+    location))
 
 (defun english-reading-mode--pdf-bbox-page (page)
   "Return PAGE geometry and positioned words from `pdftotext -bbox-layout'."
@@ -593,9 +602,32 @@ This currently exposes the text layer used behind a DocView PDF."
         :text (if (fboundp 'kokoro-reader--text)
                   (kokoro-reader--text beg end)
                 (string-trim
-                 (replace-regexp-in-string
+                  (replace-regexp-in-string
                   "[ \t\n\r]+" " "
                   (buffer-substring-no-properties beg end))))))
+
+(defun english-reading-mode--position-spoken-start (context)
+  "Keep the beginning of spoken CONTEXT at the configured window position."
+  (let ((window (plist-get context :window))
+        (buffer (plist-get context :buffer))
+        (beg (plist-get context :beg)))
+    ;; PDF speech uses a hidden extracted-text buffer while WINDOW displays the
+    ;; DocView image, so normal text recentering applies only when they match.
+    (when (and (window-live-p window)
+               (buffer-live-p buffer)
+               (eq (window-buffer window) buffer)
+               (integer-or-marker-p beg)
+               (<= (with-current-buffer buffer (point-min)) beg)
+               (<= beg (with-current-buffer buffer (point-max))))
+      (with-selected-window window
+        (save-excursion
+          (goto-char beg)
+          ;; With a nil argument Emacs uses the visual center, accounting for
+          ;; enlarged or variable-height reading text.
+          (recenter))))))
+
+(add-hook 'english-reading-mode-speech-start-hook
+          #'english-reading-mode--position-spoken-start)
 
 (defvar english-reading-mode--speech-watch-timer nil
   "Timer used to watch Kokoro request/playback lifetime.")
@@ -729,7 +761,7 @@ period proves that synthesis failed before playback started."
       (skip-chars-forward " \t\n\r"))))
 
 (defun english-reading-mode-previous-sentence ()
-  "Move to the previous sentence and read it with Kokoro.
+  "Move to the previous sentence without reading it.
 
 At the beginning of the buffer, do not signal `beginning-of-buffer'; just
 leave point at the current sentence and report that there is nowhere to go."
@@ -749,8 +781,7 @@ leave point at the current sentence and report that there is nowhere to go."
            (goto-char origin))
           (error
            (goto-char origin)))
-        (if moved
-            (english-reading-mode--speak-at-point)
+        (unless moved
           (goto-char origin)
           (message "Already at the first sentence"))))))
 
@@ -765,7 +796,7 @@ leave point at the current sentence and report that there is nowhere to go."
                    :filter english-reading-mode--filter-key-binding)
   "j" '(menu-item "Move to next sentence" english-reading-mode-next-sentence
                    :filter english-reading-mode--filter-key-binding)
-  "i" '(menu-item "Read previous sentence" english-reading-mode-previous-sentence
+  "i" '(menu-item "Move to previous sentence" english-reading-mode-previous-sentence
                    :filter english-reading-mode--filter-key-binding)
 ;;  "" '(menu-item "Read paragraph" kokoro-reader-speak-paragraph
 ;;                   :filter english-reading-mode--filter-key-binding)
@@ -783,7 +814,7 @@ leave point at the current sentence and report that there is nowhere to go."
                         english-reading-mode-next-sentence
                         :filter english-reading-mode--filter-key-binding))
 (keymap-set english-reading-mode-map "i"
-            '(menu-item "Read previous sentence"
+            '(menu-item "Move to previous sentence"
                         english-reading-mode-previous-sentence
                         :filter english-reading-mode--filter-key-binding))
 ;;(keymap-set english-reading-mode-map "p"

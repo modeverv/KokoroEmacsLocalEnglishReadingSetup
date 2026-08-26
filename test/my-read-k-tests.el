@@ -252,8 +252,28 @@
          (should (= (length spoken) 1))
          (should (looking-at-p "Second sentence\\."))
          (english-reading-mode-previous-sentence)
+         (should (= (length spoken) 1))
          (should (equal (car spoken) "First sentence."))
          (should (= (point) (point-min)))
+         (english-reading-mode -1))))))
+
+(ert-deftest english-reading-mode-i-moves-to-previous-sentence-without-speaking ()
+  (my-read-k-test--isolated
+   (with-temp-buffer
+     (insert "First sentence. Second sentence.")
+     (let ((my-read-k-mode t)
+           (spoken 0))
+       (cl-letf (((symbol-function 'kokoro-reader--speak-bounds)
+                  (lambda (&rest _) (cl-incf spoken))))
+         (english-reading-mode 1)
+         (goto-char (point-min))
+         (search-forward "Second")
+         (should (eq (lookup-key english-reading-mode-map (kbd "i"))
+                     #'english-reading-mode-previous-sentence))
+         (should (eq (key-binding (kbd "i")) #'my-read-k-backward))
+         (call-interactively (key-binding (kbd "i")))
+         (should (looking-at-p "First sentence\\."))
+         (should (= spoken 0))
          (english-reading-mode -1))))))
 
 (ert-deftest english-reading-mode-restores-buffer-sentence-spacing-setting ()
@@ -284,6 +304,35 @@
      (should buffer-read-only)
      (english-reading-mode -1)
      (should buffer-read-only))))
+
+(ert-deftest english-reading-mode-centers-spoken-sentence-start ()
+  (save-window-excursion
+    (let ((buffer (generate-new-buffer " *english-reading-center-test*"))
+          recentered-at
+          recentered-line)
+      (unwind-protect
+          (progn
+            (switch-to-buffer buffer)
+            (dotimes (number 80)
+              (insert (format "Sentence %d.\n" number)))
+            (goto-char (point-min))
+            (forward-line 60)
+            (let ((beg (point))
+                  (original-point (1+ (point))))
+              (goto-char original-point)
+              (cl-letf (((symbol-function 'recenter)
+                         (lambda (&optional line)
+                           (setq recentered-at (point)
+                                 recentered-line line))))
+                (english-reading-mode--position-spoken-start
+                 (list :window (selected-window)
+                       :buffer buffer
+                       :beg beg)))
+              (should (= recentered-at beg))
+              (should-not recentered-line)
+              (should (= (point) original-point))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
 (ert-deftest english-reading-mode-splits-pdftotext-output-into-pages ()
   (with-temp-buffer
@@ -335,8 +384,11 @@
               (should (= (length spoken) 2))
               (should (equal (car (english-reading-mode-current-text-location))
                              "Third sentence."))
-              (english-reading-mode-previous-sentence)
-              (should (equal (car spoken) "Third sentence.")))))
+              (let ((location (english-reading-mode-previous-sentence)))
+                (should (equal (car location) "Second sentence.")))
+              (should (= (length spoken) 2))
+              (should (equal (car (english-reading-mode-current-text-location))
+                             "Second sentence.")))))
       (when (buffer-live-p pdf-buffer)
         (kill-buffer pdf-buffer))
       (when (buffer-live-p text-buffer)
@@ -702,11 +754,13 @@
      (insert "First sentence. Second sentence.")
      (goto-char (point-min))
      (let (request)
+       (should (eq (lookup-key my-read-k-mode-map (kbd "i"))
+                   #'my-read-k-backward))
        (cl-letf (((symbol-function 'my-read-k--request-page)
                   (lambda (direction &optional speak)
                     (setq request (list direction speak)))))
          (my-read-k-backward)
-         (should (equal request '(prev t))))))))
+         (should (equal request '(prev nil))))))))
 
 (ert-deftest my-read-k-busy-input-is-serialized-as-last-intent ()
   (my-read-k-test--isolated
@@ -714,7 +768,7 @@
    (my-read-k-forward)
    (should (equal my-read-k--pending-intent '(next)))
    (my-read-k-backward)
-   (should (equal my-read-k--pending-intent '(prev . t)))))
+   (should (equal my-read-k--pending-intent '(prev)))))
 
 (ert-deftest my-read-k-down-within-buffer-keeps-normal-line-movement ()
   (my-read-k-test--isolated

@@ -731,14 +731,14 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
    (t (my-read-k--request-page 'next nil))))
 
 (defun my-read-k-backward ()
-  "Run existing k behavior, fetching the previous Kindle page at the boundary."
+  "Move backward, fetching the previous Kindle page at the boundary."
   (interactive)
   (cond
    (my-read-k--busy-p
-    (setq my-read-k--pending-intent (cons 'prev t)))
+    (setq my-read-k--pending-intent (list 'prev)))
    ((my-read-k--previous-sentence-available-p)
     (english-reading-mode-previous-sentence))
-   (t (my-read-k--request-page 'prev t))))
+   (t (my-read-k--request-page 'prev nil))))
 
 (defun my-read-k--move-line-or-page (move-function direction)
   "Call MOVE-FUNCTION, or request a page in DIRECTION at a buffer edge."
