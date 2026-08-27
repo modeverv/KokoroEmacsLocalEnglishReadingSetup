@@ -112,6 +112,9 @@ It uses the same local Kokoro server settings as `kokoro-reader-mode`:
 
 | Key | Action |
 |---|---|
-| `j` | Read the sentence at point, then move to the next sentence |
-| `k` | Move to the previous sentence and read it |
+| `j` | Move to the next sentence |
+| `k` | Move to the previous sentence |
+| `SPC` | Read the sentence at point |
+| `s` | Read continuously, one sentence at a time |
+| `i` | Insert an Org-noter note while a session is active |
 | `C-c C-k` | Stop reading |

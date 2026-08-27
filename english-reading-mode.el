@@ -1,6 +1,6 @@
 ;;; english-reading-mode.el --- Sentence-by-sentence English reading -*- lexical-binding: t; -*-
 
-;; j/k and Kokoro lifecycle belong here.  Consumers such as my-read.el can
+;; Reader navigation and speech lifecycle belong here.  Consumers such as my-read.el can
 ;; observe speech without reimplementing cursor movement or advising Kokoro.
 
 (require 'cl-lib)
@@ -27,6 +27,13 @@
   "Opacity of the spoken-sentence highlight on a PDF page."
   :type 'number
   :group 'english-reading-mode)
+
+(defvar english-reading-mode-pdf-text-buffer-hook nil
+  "Hook run in a PDF's extracted text buffer after text normalization.
+
+Clients can use this to detect the document language and select a matching
+speech backend.  The extracted buffer, rather than the DocView image buffer,
+is where PDF speech is actually synthesized.")
 
 (defvar english-reading-mode-speech-start-hook nil
   "Hook run when an English-reading Kokoro utterance starts.
@@ -134,6 +141,21 @@ shared reading buffer does not keep its keys in unrelated windows.")
         english-reading-mode--pdf-bbox-cache nil
         english-reading-mode--pdf-image-data-cache nil))
 
+(defun english-reading-mode--normalize-pdf-japanese-spacing ()
+  "Join Japanese glyphs separated only by PDF layout whitespace.
+
+Some PDFs position every Japanese glyph independently, causing `pdftotext' to
+emit one glyph per line.  Leaving those separators in place makes a speech
+engine pronounce isolated character names instead of Japanese words.  Page
+breaks are deliberately excluded so page ranges remain intact."
+  (let ((regexp
+         "\\([ぁ-んァ-ヶ一-龠々〆ヵヶ]\\)[ \t\n\r]+\\([ぁ-んァ-ヶ一-龠々〆ヵヶ]\\)"))
+    (goto-char (point-min))
+    (while (re-search-forward regexp nil t)
+      (replace-match "\\1\\2" nil nil)
+      ;; Revisit the second glyph so a chain such as `基  礎  理' is joined.
+      (goto-char (max (point-min) (1- (point)))))))
+
 (defun english-reading-mode--pdf-extract-text ()
   "Extract the current PDF's text layer and return its helper buffer."
   (unless (english-reading-mode--pdf-buffer-p)
@@ -156,6 +178,7 @@ shared reading buffer does not keep its keys in unrelated windows.")
           (goto-char (point-min))
           (while (search-forward "\r" nil t)
             (replace-match "" t t))
+          (english-reading-mode--normalize-pdf-japanese-spacing)
           (goto-char (point-min))
           (unless (re-search-forward "[[:alpha:]]" nil t)
             (user-error
@@ -165,6 +188,7 @@ shared reading buffer does not keep its keys in unrelated windows.")
           ;; non-nil.  The helper is never displayed, but it is the true text
           ;; source behind the visible PDF window.
           (setq-local english-reading-mode t)
+          (run-hooks 'english-reading-mode-pdf-text-buffer-hook)
           (setq-local buffer-read-only t))
       (error
        (kill-buffer helper)
@@ -638,6 +662,15 @@ This currently exposes the text layer used behind a DocView PDF."
 (defvar english-reading-mode--speech-player-seen-p nil
   "Non-nil after the active utterance has reached actual audio playback.")
 
+(defvar english-reading-mode--continuous-state nil
+  "State plist for sentence-by-sentence continuous reading.")
+
+(defvar english-reading-mode--continuous-timer nil
+  "Timer that starts the next continuous-reading sentence.")
+
+(defvar-local english-reading-mode-continuous-next-function nil
+  "Optional source-specific function that advances and speaks the next sentence.")
+
 (defun english-reading-mode--finish (context)
   "Finish CONTEXT once and notify listeners."
   (when (eq context english-reading-mode--active-speech)
@@ -727,6 +760,117 @@ period proves that synthesis failed before playback started."
   (when english-reading-mode--active-speech
     (english-reading-mode--finish english-reading-mode--active-speech)))
 
+(defun english-reading-mode--continuous-live-p ()
+  "Return non-nil when continuous reading still owns the displayed source."
+  (let ((buffer (plist-get english-reading-mode--continuous-state :buffer))
+        (window (plist-get english-reading-mode--continuous-state :window))
+        (frame (plist-get english-reading-mode--continuous-state :frame)))
+    (and (buffer-live-p buffer)
+         (window-live-p window)
+         (frame-live-p frame)
+         (eq (window-buffer window) buffer))))
+
+(defun english-reading-mode-stop-continuous (&optional quiet)
+  "Stop sentence-by-sentence continuous reading.
+When QUIET is non-nil, do not stop an already active audio process."
+  (interactive)
+  (setq english-reading-mode--continuous-state nil)
+  (when (timerp english-reading-mode--continuous-timer)
+    (cancel-timer english-reading-mode--continuous-timer))
+  (setq english-reading-mode--continuous-timer nil)
+  (unless quiet (kokoro-reader-stop))
+  (unless quiet (message "Continuous reading stopped")))
+
+(defun english-reading-mode--continuous-default-next ()
+  "Advance a PDF/EPUB/text source and speak its next sentence."
+  (cond
+   ((english-reading-mode--pdf-buffer-p)
+    (english-reading-mode--pdf-next-sentence)
+    (english-reading-mode-speak-current-sentence))
+   (t
+    (english-reading-mode-next-sentence)
+    (cond
+     ((bounds-of-thing-at-point 'sentence)
+      (english-reading-mode-speak-current-sentence))
+     ((and (derived-mode-p 'nov-mode)
+           (boundp 'nov-documents-index)
+           (boundp 'nov-documents)
+           (< nov-documents-index (1- (length nov-documents))))
+      (nov-next-document)
+      (goto-char (point-min))
+      (skip-chars-forward " \t\n\r")
+      (english-reading-mode-speak-current-sentence))
+     (t (user-error "Reached the end of the document"))))))
+
+(defun english-reading-mode--continuous-next ()
+  "Advance and speak once for the active continuous-reading source."
+  (setq english-reading-mode--continuous-timer nil)
+  (if (not (english-reading-mode--continuous-live-p))
+      (english-reading-mode-stop-continuous t)
+    (let ((buffer (plist-get english-reading-mode--continuous-state :buffer))
+          (window (plist-get english-reading-mode--continuous-state :window))
+          (frame (plist-get english-reading-mode--continuous-state :frame)))
+      (condition-case err
+          (with-selected-frame frame
+            (with-selected-window window
+              (with-current-buffer buffer
+                (if (functionp english-reading-mode-continuous-next-function)
+                    (funcall english-reading-mode-continuous-next-function)
+                  (english-reading-mode--continuous-default-next)))))
+        (error
+         (english-reading-mode-stop-continuous t)
+         (message "Continuous reading finished: %s" (error-message-string err)))))))
+
+(defun english-reading-mode--continuous-context-owned-p (context)
+  "Return non-nil when speech CONTEXT belongs to the continuous source.
+
+Normal text speaks directly from the displayed buffer.  A DocView PDF speaks
+from its hidden `pdftotext' helper, so that helper must be treated as speech
+originating from the displayed PDF buffer."
+  (let ((speech-buffer (plist-get context :buffer))
+        (source-buffer
+         (plist-get english-reading-mode--continuous-state :buffer)))
+    (and (buffer-live-p source-buffer)
+         (or (eq speech-buffer source-buffer)
+             (with-current-buffer source-buffer
+               (and (english-reading-mode--pdf-buffer-p)
+                    (buffer-live-p english-reading-mode--pdf-text-buffer)
+                    (eq speech-buffer
+                        english-reading-mode--pdf-text-buffer)))))))
+
+(defun english-reading-mode--continuous-speech-finished (context)
+  "Continue after the sentence represented by CONTEXT has finished."
+  (when (and english-reading-mode--continuous-state
+             (english-reading-mode--continuous-context-owned-p context))
+    (when (timerp english-reading-mode--continuous-timer)
+      (cancel-timer english-reading-mode--continuous-timer))
+    (setq english-reading-mode--continuous-timer
+          (run-at-time 0 nil #'english-reading-mode--continuous-next))))
+
+(add-hook 'english-reading-mode-speech-finish-hook
+          #'english-reading-mode--continuous-speech-finished)
+
+(defun english-reading-mode-continuous-read ()
+  "Read continuously, synthesizing and playing exactly one sentence at a time.
+Press `s' again to stop."
+  (interactive)
+  (if english-reading-mode--continuous-state
+      (english-reading-mode-stop-continuous)
+    ;; Stop any unrelated one-shot utterance while STATE is still nil, so its
+    ;; completion cannot schedule a spurious first advance.
+    (kokoro-reader-stop)
+    (setq english-reading-mode--continuous-state
+          (list :buffer (current-buffer)
+                :window (selected-window)
+                :frame (selected-frame)))
+    (condition-case err
+        (progn
+          (english-reading-mode-speak-current-sentence)
+          (message "Continuous reading started"))
+      (error
+       (english-reading-mode-stop-continuous t)
+       (signal (car err) (cdr err))))))
+
 ;; Re-evaluation safe lifecycle integration.
 (advice-remove 'kokoro-reader--speak-bounds
                #'english-reading-mode--around-kokoro-speak-bounds)
@@ -788,15 +932,17 @@ leave point at the current sentence and report that there is nowhere to go."
 (defun english-reading-mode-stop ()
   "Stop the current Kokoro reading."
   (interactive)
-  (kokoro-reader-stop))
+  (english-reading-mode-stop-continuous))
 
 (defvar-keymap english-reading-mode-map
   :doc "Keymap for `english-reading-mode'."
-  "k" '(menu-item "Read current sentence" english-reading-mode-speak-current-sentence
-                   :filter english-reading-mode--filter-key-binding)
   "j" '(menu-item "Move to next sentence" english-reading-mode-next-sentence
                    :filter english-reading-mode--filter-key-binding)
-  "i" '(menu-item "Move to previous sentence" english-reading-mode-previous-sentence
+  "k" '(menu-item "Move to previous sentence" english-reading-mode-previous-sentence
+                   :filter english-reading-mode--filter-key-binding)
+  "SPC" '(menu-item "Read current sentence" english-reading-mode-speak-current-sentence
+                     :filter english-reading-mode--filter-key-binding)
+  "s" '(menu-item "Continuous sentence reading" english-reading-mode-continuous-read
                    :filter english-reading-mode--filter-key-binding)
 ;;  "" '(menu-item "Read paragraph" kokoro-reader-speak-paragraph
 ;;                   :filter english-reading-mode--filter-key-binding)
@@ -805,17 +951,24 @@ leave point at the current sentence and report that there is nowhere to go."
 
 ;; Keep re-evaluation effective in a live Emacs where `defvar-keymap' preserves
 ;; the already existing map object.
-(keymap-set english-reading-mode-map "k"
-            '(menu-item "Read current sentence"
-                        english-reading-mode-speak-current-sentence
-                        :filter english-reading-mode--filter-key-binding))
 (keymap-set english-reading-mode-map "j"
             '(menu-item "Move to next sentence"
                         english-reading-mode-next-sentence
                         :filter english-reading-mode--filter-key-binding))
-(keymap-set english-reading-mode-map "i"
+(keymap-set english-reading-mode-map "k"
             '(menu-item "Move to previous sentence"
                         english-reading-mode-previous-sentence
+                        :filter english-reading-mode--filter-key-binding))
+(keymap-set english-reading-mode-map "SPC"
+            '(menu-item "Read current sentence"
+                        english-reading-mode-speak-current-sentence
+                        :filter english-reading-mode--filter-key-binding))
+;; `i' belongs exclusively to Org-noter.  Explicit removal also fixes an
+;; already loaded map, because `defvar-keymap' preserves its old entries.
+(define-key english-reading-mode-map (kbd "i") nil)
+(keymap-set english-reading-mode-map "s"
+            '(menu-item "Continuous sentence reading"
+                        english-reading-mode-continuous-read
                         :filter english-reading-mode--filter-key-binding))
 ;;(keymap-set english-reading-mode-map "p"
 ;;            '(menu-item "Read paragraph" kokoro-reader-speak-paragraph
@@ -828,10 +981,10 @@ leave point at the current sentence and report that there is nowhere to go."
 (define-minor-mode english-reading-mode
   "Read English text or a DocView PDF one sentence at a time with Kokoro.
 
-`j' reads the sentence at point without moving point.  `n' moves to the next
-sentence without reading it.  `k' moves back and reads the previous sentence.
-`p' reads the current paragraph without moving point.  The buffer is read-only
-while this mode is active.  Speech lifecycle
+`j' and `k' move to the next and previous sentences, `SPC' reads the sentence
+at point, and `s' reads continuously one sentence at a time.  `i' is reserved
+for Org-noter.  The buffer is
+read-only while this mode is active.  Speech lifecycle
 is exposed through `english-reading-mode-speech-start-hook' and
 `english-reading-mode-speech-finish-hook'."
   :lighter " EnglishRead"

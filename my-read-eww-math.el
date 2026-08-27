@@ -143,7 +143,10 @@ clipped at any edge."
   (when-let* ((semantics (dom-child-by-tag dom 'semantics))
               (annotation (dom-child-by-tag semantics 'annotation))
               ((equal (dom-attr annotation 'encoding) "application/x-tex"))
-              (text (string-trim (dom-inner-text annotation)))
+              (text (string-trim
+                     (if (fboundp 'dom-inner-text)
+                         (dom-inner-text annotation)
+                       (dom-text annotation))))
               ((not (string-empty-p text))))
     text))
 
@@ -310,7 +313,11 @@ is changed only for this synchronous call and is restored even on error."
     (if (not (and tex
                   (my/read-eww-math--trusted-page-p target)
                   (my/read-eww-math--safe-tex-p tex)))
-        (shr-tag-math dom)
+        (if (fboundp 'shr-tag-math)
+            (shr-tag-math dom)
+          ;; Emacs 30 removed the private SHR handler.  Preserve the embedded
+          ;; TeX as readable text on untrusted pages instead of failing.
+          (insert (or tex (dom-text dom))))
       (let (id generation)
         (with-current-buffer target
           (setq id (cl-incf my/read-eww-math--job-counter)

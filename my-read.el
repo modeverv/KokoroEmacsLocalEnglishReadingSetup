@@ -2,7 +2,8 @@
 
 ;; English reading workspace:
 ;;   left         : Kindle.app, EPUB / normal book, and EWW tabs
-;;   right top    : local translation with Google fallback
+;;   right top    : Org-noter notes
+;;   right middle : local translation with Google fallback
 ;;   right bottom : Lookup
 ;;
 ;; Translation policy:
@@ -129,17 +130,17 @@ more transparent; 1 is fully opaque."
   :type 'string
   :group 'my-read)
 
-(defcustom my/read-japanese-macos-voice "Kyoko (Enhanced)"
-  "macOS voice used when a center-pane EPUB contains Japanese text.
+(defcustom my/read-japanese-macos-voice "Kyoko"
+  "macOS voice used when a center-pane EPUB or PDF contains Japanese text.
 
-Japanese EPUB speech deliberately uses macOS while the optional Kokoro
-Japanese frontend is unavailable, so opening a Japanese book never leaves the
-buffer configured with an English Kokoro voice."
+Japanese EPUB/PDF speech deliberately uses macOS while the optional Kokoro
+Japanese frontend is unavailable, so opening a Japanese document never leaves
+the extracted text configured with an English Kokoro voice."
   :type '(choice (const :tag "System default" nil) string)
   :group 'my-read)
 
 (defcustom my/read-japanese-macos-rate 540
-  "Speaking rate used for Japanese EPUBs, in words per minute.
+  "Speaking rate used for Japanese EPUBs and PDFs, in words per minute.
 
 This is three times the normal `kokoro-reader-macos-rate' default of 180."
   :type 'integer
@@ -267,6 +268,10 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
   "Return FRAME's Google Translate window."
   (my/read-window 'my-reading-translate-window frame))
 
+(defun my/read-note-window (&optional frame)
+  "Return FRAME's Org-noter notes window."
+  (my/read-window 'my-reading-note-window frame))
+
 (defun my/read-center-tab-buffers ()
   "Return the Kindle, EPUB, and EWW buffers in the current center pane."
   (let ((frame my/read-center-tab-frame))
@@ -378,6 +383,9 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
     (define-key map (kbd "C-c k")
                 '(menu-item "Stop reading" kokoro-reader-stop
                             :filter my/read--filter-center-key-binding))
+    (define-key map (kbd "C-c o")
+                '(menu-item "Open Org-noter notes" my/read-org-noter-follow-source
+                            :filter my/read--filter-center-key-binding))
     (define-key map (kbd "u")
                 '(menu-item "Save vocabulary" my/read-vocab-capture
                             :filter my/read--filter-center-key-binding))
@@ -403,6 +411,9 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
                         :filter my/read--filter-center-key-binding))
 (keymap-set my-read-center-tab-mode-map "C-c k"
             '(menu-item "Stop reading" kokoro-reader-stop
+                        :filter my/read--filter-center-key-binding))
+(keymap-set my-read-center-tab-mode-map "C-c o"
+            '(menu-item "Open Org-noter notes" my/read-org-noter-follow-source
                         :filter my/read--filter-center-key-binding))
 (keymap-set my-read-center-tab-mode-map "u"
             '(menu-item "Save vocabulary" my/read-vocab-capture
@@ -431,7 +442,7 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
       (re-search-forward "[ぁ-んァ-ヶ一-龠々]" nil t))))
 
 (defun my/read--configure-speech-language ()
-  "Configure speech for the language of the current EPUB buffer."
+  "Configure speech for the language of the current reading-text buffer."
   (if (my/read--buffer-contains-japanese-p)
       (setq-local my/read-source-language "ja"
                   kokoro-reader-backend 'macos
@@ -441,6 +452,9 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
     (kill-local-variable 'kokoro-reader-backend)
     (kill-local-variable 'kokoro-reader-macos-voice)
     (kill-local-variable 'kokoro-reader-macos-rate)))
+
+(add-hook 'english-reading-mode-pdf-text-buffer-hook
+          #'my/read--configure-speech-language)
 
 (defun my/read--configure-center-tab-buffer (buffer frame)
   "Configure BUFFER as one of FRAME's center reading tabs."
@@ -482,7 +496,9 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
         (cancel-timer my/read-lookup-timer))
       (setq my/read-lookup-timer nil
             my/read-lookup-last-target nil))
-    (my/read-translate-follow-post-command)))
+    (my/read-translate-follow-post-command)
+    (when (fboundp 'my/read-org-noter-follow-source)
+      (my/read-org-noter-follow-source frame))))
 
 (defun my/read--track-center-tab-buffer (frame)
   "Remember a newly displayed center buffer in FRAME by source type."
@@ -500,7 +516,10 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
                     'my-reading-epub-buffer))))))
         (when parameter
           (set-frame-parameter frame parameter buffer)
-          (my/read--configure-center-tab-buffer buffer frame))))))
+          (my/read--configure-center-tab-buffer buffer frame)
+          (when (and (eq window (my/read-center-window frame))
+                     (fboundp 'my/read-org-noter-follow-source))
+            (my/read-org-noter-follow-source frame)))))))
 
 (add-hook 'window-buffer-change-functions #'my/read--track-center-tab-buffer)
 
@@ -1734,6 +1753,21 @@ Otherwise, translate the sentence containing point."
 ;;; my-read frame setup
 ;;; ---------------------------------------------------------------------------
 
+(require 'my-read-org-noter)
+
+(defun my/read--prepare-notes-buffer (frame)
+  "Create and return FRAME's Org-noter landing buffer."
+  (let ((buffer (frame-parameter frame 'my-reading-note-ready-buffer)))
+    (unless (buffer-live-p buffer)
+      (setq buffer (generate-new-buffer "*Org-noter Ready*"))
+      (set-frame-parameter frame 'my-reading-note-ready-buffer buffer))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (org-mode)
+        (insert "* Org-noter\n\nPDF / EPUB / Kindleを開くと、この領域にノートを表示します。\n")))
+    buffer))
+
 (defun my/read--prepare-ready-buffer (frame)
   "Create and return FRAME's Lookup placeholder buffer."
   (let ((buffer (frame-parameter frame 'my-reading-lookup-ready-buffer)))
@@ -1762,7 +1796,7 @@ Otherwise, translate the sentence containing point."
       (setq-local line-spacing my/read-eww-line-spacing)
       ;; Reuse the EPUB/Kindle reading controls in rendered web papers.
       ;; `eww-setup-buffer' does not re-run `eww-mode' on navigation, so this
-      ;; minor mode and its j/k/l/; bindings remain active after page loads.
+      ;; minor mode and its reader bindings remain active after page loads.
       (english-reading-mode 1)
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -1782,18 +1816,21 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as left-side tabs."
     (delete-other-windows)
 
     (let* ((center-window (selected-window))
-           ;; Two columns: reading on the left, translation/Lookup on the right.
-           (translate-window (split-window-right))
+           ;; Two columns: reading on the left, three utilities on the right.
+           (note-window (split-window-right))
            epub-buffer
            eww-buffer
+           translate-window
            lookup-window)
 
-      ;; Right column: translation above, Lookup below.
-      (select-window translate-window)
-      (setq lookup-window
+      ;; Right column: Org-noter, translation, then Lookup.
+      (select-window note-window)
+      (setq translate-window
             (split-window-below
              (max window-min-height
-                  (floor (* (window-total-height translate-window) 0.40)))))
+                  (floor (/ (window-total-height note-window) 3.0)))))
+      (select-window translate-window)
+      (setq lookup-window (split-window-below))
 
       ;; Store window identity on the frame.
       (set-frame-parameter frame 'my-reading-lookup-window lookup-window)
@@ -1805,7 +1842,7 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as left-side tabs."
       (set-frame-parameter frame 'my-reading-center-windows (list center-window))
       (set-frame-parameter frame 'my-reading-kindle-buffer kindle-buffer)
       (set-frame-parameter frame 'my-reading-translate-window translate-window)
-      (set-frame-parameter frame 'my-reading-note-window nil)
+      (set-frame-parameter frame 'my-reading-note-window note-window)
       ;; Lookup otherwise honors the user's global fractional height (0.7 in
       ;; this setup), which leaves too little room for dictionary content.
       (set-frame-parameter frame 'lookup-window-height
@@ -1816,10 +1853,13 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as left-side tabs."
         (setq lookup-main-window nil
               lookup-sub-window nil))
 
+      ;; Right top: Org-noter notes placeholder (replaced by a live session).
+      (set-window-buffer note-window (my/read--prepare-notes-buffer frame))
+
       ;; Right bottom: Lookup placeholder.
       (set-window-buffer lookup-window (my/read--prepare-ready-buffer frame))
 
-      ;; Right top: local translation with Google fallback.
+      ;; Right middle: local translation with Google fallback.
       (let ((buffer (my/read-translate-buffer frame)))
         (with-current-buffer buffer
           (let ((inhibit-read-only t))
@@ -1861,7 +1901,9 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as left-side tabs."
 
       ;; Initial refresh.
       (my/read-lookup-follow-post-command)
-      (my/read-translate-follow-post-command))))
+      (my/read-translate-follow-post-command)
+      ;; Kindle attaches asynchronously; EPUB/PDF can start immediately.
+      (my/read-org-noter-follow-source frame))))
 
 ;;;###autoload
 (defun my-read ()
@@ -1895,7 +1937,8 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as left-side tabs."
     (my/read-translate-delete-overlay frame)
 
     (dolist (parameter '(my-reading-translate-buffer
-                         my-reading-lookup-ready-buffer))
+                         my-reading-lookup-ready-buffer
+                         my-reading-note-ready-buffer))
       (when-let ((buffer (frame-parameter frame parameter)))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))

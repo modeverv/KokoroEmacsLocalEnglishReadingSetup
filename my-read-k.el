@@ -66,6 +66,8 @@ The bridge currently supports two."
 (defvar my-read-k--buffer nil)
 (defvar my-read-k--last-fingerprint nil)
 (defvar my-read-k--current-result nil)
+(defvar my-read-k--page-number 1
+  "Fallback one-based Kindle page counter when Accessibility has no location.")
 (defvar my-read-k--target-title nil)
 (defvar my-read-k--target-url nil)
 (defvar my-read-k--detected-language nil)
@@ -74,6 +76,9 @@ The bridge currently supports two."
 (defvar my-read-k--prefetch-attempted-fingerprint nil)
 (defvar my-read-k--back-queue nil)
 (defvar my-read-k--back-source-fingerprint nil)
+
+(define-derived-mode my-read-k-document-mode text-mode "KindleDoc"
+  "Major mode for the virtual document exposed by Kindle.app.")
 
 (defconst my-read-k--nonterminal-abbreviations
   '("Mr." "Mrs." "Ms." "Dr." "Prof." "Sr." "Jr." "St." "Mt."
@@ -192,7 +197,9 @@ line, and common abbreviations are not treated as sentence endings."
       (set-frame-parameter
        my-read-k--frame
        'my-reading-kindle-book-name
-       (my-read-k--target-book-name title url)))))
+       (my-read-k--target-book-name title url))
+      (when (fboundp 'my/read-org-noter-follow-source)
+        (my/read-org-noter-follow-source my-read-k--frame)))))
 
 (defun my-read-k--bridge-command ()
   "Return the command list used to launch the accessibility bridge."
@@ -439,10 +446,16 @@ When ERROR-P is non-nil, mark the Kindle header as disconnected."
 
 (defun my-read-k--apply-page (result direction speak)
   "Replace the Kindle buffer from RESULT and finish DIRECTION update.
-When SPEAK is non-nil, continue the existing j/k Kokoro flow."
+When SPEAK is non-nil, continue the existing sentence-reading flow."
   (let ((text (my-read-k--alist-get 'text result)))
     (unless (and (stringp text) (not (string-empty-p text)))
       (error "Bridge returned no page text"))
+    (unless (equal my-read-k--last-fingerprint
+                   (my-read-k--alist-get 'fingerprint result))
+      (pcase direction
+        ('next (cl-incf my-read-k--page-number))
+        ('prev (setq my-read-k--page-number
+                     (max 1 (1- my-read-k--page-number))))))
     (setq my-read-k--last-fingerprint (my-read-k--alist-get 'fingerprint result)
           my-read-k--current-result result)
     (let* ((language (my-read-k--configure-buffer-language result))
@@ -477,16 +490,22 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
                      my-read-k--buffer))
             (with-selected-frame my-read-k--frame
               (with-selected-window (my/read-kindle-window my-read-k--frame)
-                (if (eq direction 'prev)
-                    (english-reading-mode--speak-at-point)
-                  (english-reading-mode-next-sentence)))))
+                (cond
+                 ((eq speak 'continuous)
+                  (english-reading-mode-speak-current-sentence))
+                 ((eq direction 'prev)
+                  (english-reading-mode--speak-at-point))
+                 (t (english-reading-mode-next-sentence))))))
            ;; Unit-level and non-workspace callers still support speech, but a
            ;; live workspace must never speak a hidden Kindle tab.
            ((not (frame-live-p my-read-k--frame))
             (with-current-buffer my-read-k--buffer
-              (if (eq direction 'prev)
-                  (english-reading-mode--speak-at-point)
-                (english-reading-mode-next-sentence)))))
+              (cond
+               ((eq speak 'continuous)
+                (english-reading-mode-speak-current-sentence))
+               ((eq direction 'prev)
+                (english-reading-mode--speak-at-point))
+               (t (english-reading-mode-next-sentence))))))
         (error (my-read-k--record-error "TTS_ERROR" (error-message-string err)))))
     (my-read-k--refresh-followers)))
 
@@ -494,7 +513,12 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
   "Finish a page RESPONSE for GENERATION, DIRECTION and SPEAK intent."
   (when (= generation my-read-k--generation)
     (unwind-protect
-        (unless (my-read-k--response-error response)
+        (if (my-read-k--response-error response)
+            ;; A continuous turn-page request can fail at the final page (or
+            ;; when Kindle temporarily exposes no text).  Do not leave `s'
+            ;; armed after that terminal request.
+            (when (eq speak 'continuous)
+              (english-reading-mode-stop-continuous t))
           (let ((old-result my-read-k--current-result))
             (setq my-read-k--last-error nil)
             (pcase direction
@@ -740,6 +764,17 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
     (english-reading-mode-previous-sentence))
    (t (my-read-k--request-page 'prev nil))))
 
+(defun my-read-k-continuous-next ()
+  "Advance Kindle by one sentence and continue continuous speech."
+  (pcase-let ((`(,_beg . ,end)
+               (or (bounds-of-thing-at-point 'sentence)
+                   (cons (point) (point)))))
+    (goto-char end)
+    (skip-chars-forward " \t\n\r")
+    (if (bounds-of-thing-at-point 'sentence)
+        (english-reading-mode-speak-current-sentence)
+      (my-read-k--request-page 'next 'continuous))))
+
 (defun my-read-k--move-line-or-page (move-function direction)
   "Call MOVE-FUNCTION, or request a page in DIRECTION at a buffer edge."
   (if my-read-k--busy-p
@@ -765,9 +800,9 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
 
 (defvar-keymap my-read-k-mode-map
   :doc "Keymap for the Kindle.app accessibility source."
-  "k" #'english-reading-mode-speak-current-sentence
   "j" #'my-read-k-forward
-  "i" #'my-read-k-backward
+  "k" #'my-read-k-backward
+  "SPC" #'english-reading-mode-speak-current-sentence
   "<down>" #'my-read-k-down
   "<up>" #'my-read-k-up
   "C-n" #'my-read-k-down
@@ -781,6 +816,11 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
 
 ;; `defvar-keymap' preserves an existing map on reload; install the new binding
 ;; explicitly so a live my-read-k session gains it without restarting Emacs.
+(keymap-set my-read-k-mode-map "j" #'my-read-k-forward)
+(keymap-set my-read-k-mode-map "k" #'my-read-k-backward)
+(keymap-set my-read-k-mode-map "SPC"
+            #'english-reading-mode-speak-current-sentence)
+(define-key my-read-k-mode-map (kbd "i") nil)
 (keymap-set my-read-k-mode-map "<down>" #'my-read-k-down)
 (keymap-set my-read-k-mode-map "<up>" #'my-read-k-up)
 (keymap-set my-read-k-mode-map "C-n" #'my-read-k-down)
@@ -843,10 +883,12 @@ When SPEAK is non-nil, continue the existing j/k Kokoro flow."
   "Create and initialize the Kindle pane used by the unified workspace."
   (let ((buffer (get-buffer-create my-read-k-buffer-name)))
     (with-current-buffer buffer
-      (text-mode)
+      (my-read-k-document-mode)
       (visual-line-mode 1)
       (my-read-k-mode 1)
       (english-reading-mode 1)
+      (setq-local english-reading-mode-continuous-next-function
+                  #'my-read-k-continuous-next)
       (setq-local my/read-source-language nil)
       (let ((inhibit-read-only t))
         (erase-buffer)

@@ -52,11 +52,14 @@ final class BridgeRuntime {
     }
 
     private func pageResult(_ page: KindlePage) -> [String: JSONValue] {
-        [
+        var result: [String: JSONValue] = [
             "fingerprint": .string(page.fingerprint),
             "language": .string("en"),
             "text": .string(page.text)
         ]
+        if let start = page.start { result["start"] = .number(Double(start)) }
+        if let end = page.end { result["end"] = .number(Double(end)) }
+        return result
     }
 
     private func capture() throws -> [String: JSONValue] {

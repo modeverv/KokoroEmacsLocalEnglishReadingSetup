@@ -1,6 +1,8 @@
 run:
 	uv run python kokoro_server.py --host 127.0.0.1 --port 8000
 
+ORG_NOTER_DIR := $(shell find $(HOME)/.emacs.d/elpa -maxdepth 1 -type d -name 'org-noter-*' 2>/dev/null | sort | tail -1)
+
 .PHONY: my-read-k-build my-read-k-test my-read-k-ert my-read-k-check
 
 my-read-k-build:
@@ -18,6 +20,8 @@ my-read-k-test:
 
 my-read-k-ert:
 	/Applications/Emacs-takaxp/Emacs.app/Contents/MacOS/Emacs -Q --batch -L . \
+		-L $(ORG_NOTER_DIR) \
+		--eval "(setq native-comp-jit-compilation nil native-comp-enable-subr-trampolines nil)" \
 		-l test/my-read-k-tests.el -l test/my-read-k2-tests.el \
 		-f ert-run-tests-batch-and-exit
 

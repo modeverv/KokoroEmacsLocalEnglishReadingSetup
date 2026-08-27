@@ -55,7 +55,8 @@ local, read-only metadata database."
   "Attach the shared reader UI to the English book open in Kindle.app."
   (interactive)
   (my-read-k--clear-navigation-caches)
-  (setq my-read-k--prefetch-busy-p nil
+  (setq my-read-k--page-number 1
+        my-read-k--prefetch-busy-p nil
         my-read-k--sync-busy-p nil
         my-read-k--detected-language nil
         my-read-k--state 'attaching)
