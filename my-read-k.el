@@ -371,6 +371,38 @@ When ERROR-P is non-nil, mark the Kindle header as disconnected."
        (equal my-read-k--prefetch-source-fingerprint
               my-read-k--last-fingerprint)))
 
+(defun my-read-k--continuous-prefetch-page-texts (_context count)
+  "Return up to COUNT speech chunks from cached future Kindle pages."
+  (when (and (> count 0) (my-read-k--prefetch-valid-p))
+    (let (chunks)
+      (dolist (page my-read-k--prefetch-queue)
+        (when (< (length chunks) count)
+          (when-let ((text (my-read-k--alist-get 'text page)))
+            (with-temp-buffer
+              (insert (my-read-k--one-sentence-per-line text))
+              (setq-local sentence-end-double-space nil)
+              (setq-local kokoro-reader-backend 'macos)
+              (let ((english-reading-mode--continuous-state
+                     (list :buffer (current-buffer))))
+                (setq chunks
+                      (append
+                       chunks
+                       (english-reading-mode--speech-texts-after-position
+                        (current-buffer) (point-min)
+                        (- count (length chunks))))))))))
+      chunks)))
+
+(defun my-read-k--refresh-continuous-speech-prefetch ()
+  "Refresh macOS speech lookahead after the Kindle page cache changes."
+  (when (and english-reading-mode--continuous-state
+             english-reading-mode--active-speech
+             (eq (plist-get english-reading-mode--continuous-state :buffer)
+                 my-read-k--buffer)
+             (eq (plist-get english-reading-mode--active-speech :buffer)
+                 my-read-k--buffer))
+    (english-reading-mode--prefetch-next-macos-sentence
+     english-reading-mode--active-speech)))
+
 (defun my-read-k--history-valid-p ()
   "Return non-nil when the cached previous page belongs to the displayed page."
   (and my-read-k--back-queue
@@ -556,7 +588,8 @@ When SPEAK is non-nil, continue the existing sentence-reading flow."
               (setq my-read-k--last-error nil
                     my-read-k--prefetch-queue pages
                     my-read-k--prefetch-source-fingerprint source-fingerprint)
-              (my-read-k--update-prefetch-header)))
+              (my-read-k--update-prefetch-header)
+              (my-read-k--refresh-continuous-speech-prefetch)))
         ;; End-of-book and transient prefetch failures must not interrupt the
         ;; current reading page.  The normal boundary request remains usable.
         (let ((error (my-read-k--alist-get 'error response)))
@@ -624,6 +657,7 @@ When SPEAK is non-nil, continue the existing sentence-reading flow."
     (setq my-read-k--prefetch-source-fingerprint
           (and my-read-k--prefetch-queue expected-fingerprint))
     (my-read-k--update-prefetch-header)
+    (my-read-k--refresh-continuous-speech-prefetch)
     (my-read-k--send
      "advanceNext" (my-read-k--navigation-params)
      (lambda (response)
@@ -889,6 +923,8 @@ When SPEAK is non-nil, continue the existing sentence-reading flow."
       (english-reading-mode 1)
       (setq-local english-reading-mode-continuous-next-function
                   #'my-read-k-continuous-next)
+      (setq-local english-reading-mode-continuous-prefetch-text-function
+                  #'my-read-k--continuous-prefetch-page-texts)
       (setq-local my/read-source-language nil)
       (let ((inhibit-read-only t))
         (erase-buffer)

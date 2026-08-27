@@ -496,8 +496,7 @@
             (english-reading-mode--continuous-speech-finished
              (list :buffer text-buffer)))
           (should (eq scheduled #'english-reading-mode--continuous-next))
-          (should (= scheduled-delay
-                     english-reading-mode-macos-continuous-gap)))
+          (should (zerop scheduled-delay)))
       (kill-buffer pdf-buffer)
       (kill-buffer text-buffer))))
 
@@ -520,42 +519,137 @@
          (list :buffer source-buffer)))
       (should (zerop scheduled-delay)))))
 
-(ert-deftest english-reading-mode-prefetches-next-macos-sentence ()
+(ert-deftest english-reading-mode-prefetches-two-macos-chunks ()
   (with-temp-buffer
-    (insert "最初の文です。次の文を先読みします。最後の文です。")
+    (insert "一番です。二番です。三番です。四番です。五番です。六番です。")
     (setq-local sentence-end-double-space nil)
     (setq-local kokoro-reader-backend 'macos)
     (let ((source-buffer (current-buffer))
           (english-reading-mode--continuous-state nil)
+          (english-reading-mode-macos-continuous-sentence-count 2)
           prefetched)
       (setq english-reading-mode--continuous-state
             (list :buffer source-buffer
                   :window (selected-window)
                   :frame (selected-frame)))
-      (cl-letf (((symbol-function 'kokoro-reader-prefetch-macos-text)
-                 (lambda (text) (setq prefetched text))))
+      (cl-letf (((symbol-function 'kokoro-reader-prefetch-macos-texts)
+                 (lambda (texts) (setq prefetched texts))))
         (english-reading-mode--prefetch-next-macos-sentence
          (list :buffer source-buffer
                :beg (point-min)
                :end (save-excursion
                       (goto-char (point-min))
-                      (cdr (bounds-of-thing-at-point 'sentence)))))
-        (should (equal prefetched "次の文を先読みします。"))))))
+                      (forward-sentence 2)
+                      (point))))
+        (should (equal prefetched
+                       '("三番です。四番です。"
+                         "五番です。六番です。")))))))
+
+(ert-deftest english-reading-mode-macos-continuous-speaks-six-sentence-chunks ()
+  (with-temp-buffer
+    (insert "一番目です。二番目です。三番目です。四番目です。五番目です。六番目です。七番目です。")
+    (goto-char (point-min))
+    (setq-local sentence-end-double-space nil)
+    (setq-local kokoro-reader-backend 'macos)
+    (let ((english-reading-mode--continuous-state
+           (list :buffer (current-buffer)))
+          spoken-bounds)
+      (cl-letf (((symbol-function 'kokoro-reader--speak-bounds)
+                 (lambda (beg end) (setq spoken-bounds (cons beg end)))))
+        (english-reading-mode-speak-current-sentence))
+      (should (equal (buffer-substring-no-properties
+                      (car spoken-bounds) (cdr spoken-bounds))
+                     "一番目です。二番目です。三番目です。四番目です。五番目です。六番目です。")))))
+
+(ert-deftest kokoro-reader-promotes-running-macos-prefetch ()
+  (let ((kokoro-reader--macos-prefetch-queue
+         '((:key matching-key :process prefetch-process
+            :file "/tmp/prefetch.aiff" :ready nil))))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_process) t)))
+      (should (equal (kokoro-reader--take-running-macos-prefetch 'matching-key)
+                     '(prefetch-process . "/tmp/prefetch.aiff"))))
+    (should-not kokoro-reader--macos-prefetch-queue)))
+
+(ert-deftest english-reading-mode-continuous-resumes-after-completed-chunk ()
+  (with-temp-buffer
+    (insert "一番目です。二番目です。三番目です。四番目です。")
+    (goto-char (point-min))
+    (setq-local sentence-end-double-space nil)
+    (let ((source-buffer (current-buffer))
+          (english-reading-mode--continuous-state nil)
+          spoken)
+      (setq english-reading-mode--continuous-state
+            (list :buffer source-buffer
+                  :next-speech-buffer source-buffer
+                  :next-speech-position
+                  (save-excursion
+                    (forward-sentence 3)
+                    (point))))
+      (cl-letf (((symbol-function 'english-reading-mode-speak-current-sentence)
+                 (lambda () (setq spoken (thing-at-point 'sentence t)))))
+        (should (english-reading-mode--continuous-resume-next-chunk)))
+      (should (string-prefix-p "四番目です。" spoken)))))
 
 (ert-deftest kokoro-reader-takes-only-matching-ready-macos-prefetch ()
   (let* ((file (make-temp-file "kokoro-prefetch-test-"))
          (key '("次の文です。" "/usr/bin/say" "Kyoko" 540))
-         (kokoro-reader--macos-prefetch-process nil)
-         (kokoro-reader--macos-prefetch-file file)
-         (kokoro-reader--macos-prefetch-key key)
-         (kokoro-reader--macos-prefetch-ready-p t))
+         (kokoro-reader--macos-prefetch-queue
+          (list (list :key key :process nil :file file :ready t))))
     (unwind-protect
         (progn
           (with-temp-file file (insert (make-string 5000 ?a)))
           (should-not (kokoro-reader--take-macos-prefetch '(different)))
           (should (equal (kokoro-reader--take-macos-prefetch key) file))
-          (should-not kokoro-reader--macos-prefetch-file))
+          (should-not kokoro-reader--macos-prefetch-queue))
       (when (file-exists-p file) (delete-file file)))))
+
+(ert-deftest english-reading-mode-prefetch-crosses-pdf-page-boundary ()
+  (let ((pdf-buffer (generate-new-buffer " *prefetch-pdf*"))
+        (text-buffer (generate-new-buffer " *prefetch-pdf-text*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer text-buffer
+            (insert "Page one final.\f2 Page two first. Page two second.")
+            (setq-local sentence-end-double-space nil)
+            (setq-local kokoro-reader-backend 'macos))
+          (with-current-buffer pdf-buffer
+            (setq-local major-mode 'doc-view-mode)
+            (setq-local buffer-file-name "/tmp/prefetch.pdf")
+            (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+            (setq-local english-reading-mode--pdf-page-ranges
+                        (with-current-buffer text-buffer
+                          (english-reading-mode--pdf-page-ranges))))
+          (let ((english-reading-mode--continuous-state
+                 (list :buffer pdf-buffer))
+                (english-reading-mode-macos-continuous-sentence-count 1))
+            (should
+             (equal
+              (english-reading-mode--next-speech-texts
+               (list :buffer text-buffer
+                     :end (with-current-buffer text-buffer
+                            (cdr (aref
+                                  (with-current-buffer pdf-buffer
+                                    english-reading-mode--pdf-page-ranges)
+                                  0))))
+               2)
+              '("Page two first." "Page two second.")))))
+      (kill-buffer pdf-buffer)
+      (kill-buffer text-buffer))))
+
+(ert-deftest my-read-k-speech-prefetch-uses-cached-future-pages ()
+  (my-read-k-test--isolated
+   (let ((my-read-k--last-fingerprint "current")
+         (my-read-k--prefetch-source-fingerprint "current")
+         (my-read-k--prefetch-queue
+          '(((fingerprint . "next")
+             (text . "Next page one. Next page two."))
+            ((fingerprint . "later")
+             (text . "Later page one. Later page two."))))
+         (english-reading-mode-macos-continuous-sentence-count 2))
+     (should
+      (equal (my-read-k--continuous-prefetch-page-texts nil 2)
+             '("Next page one. Next page two."
+               "Later page one. Later page two."))))))
 
 (ert-deftest my-read-k-continuous-reading-turns-page-with-continuation-intent ()
   (my-read-k-test--isolated
@@ -686,6 +780,63 @@
     (insert "Page one.\fPage two.\fPage three.")
     (should (equal (append (english-reading-mode--pdf-page-ranges) nil)
                    '((1 . 10) (11 . 20) (21 . 32))))))
+
+(ert-deftest english-reading-mode-pdf-sync-keeps-roll-speech-page ()
+  (let ((pdf-buffer (generate-new-buffer " *pdf-roll-sync*"))
+        (text-buffer (generate-new-buffer " *pdf-roll-sync-text*")))
+    (unwind-protect
+        (with-current-buffer pdf-buffer
+          (setq-local major-mode 'pdf-view-mode)
+          (setq-local buffer-file-name "/tmp/pdf-roll-sync.pdf")
+          (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+          (setq-local english-reading-mode--pdf-page-ranges
+                      [(1 . 100) (101 . 200)])
+          ;; Speech is on page 2 while the top of the continuous roll remains
+          ;; on page 1.  Synchronization must not rewind the speech cursor.
+          (setq-local english-reading-mode--pdf-page 2)
+          (setq-local english-reading-mode--pdf-text-point 150)
+          (let ((english-reading-mode--continuous-state
+                 (list :buffer pdf-buffer)))
+            (cl-letf (((symbol-function
+                        'english-reading-mode--pdf-current-page)
+                       (lambda () 1)))
+              (english-reading-mode--pdf-sync)))
+          (should (= english-reading-mode--pdf-page 2))
+          (should (= english-reading-mode--pdf-text-point 150)))
+      (when (buffer-live-p pdf-buffer)
+        (kill-buffer pdf-buffer))
+      (when (buffer-live-p text-buffer)
+        (kill-buffer text-buffer)))))
+
+(ert-deftest english-reading-mode-pdf-roll-page-crossing-does-not-snap ()
+  (let ((pdf-buffer (generate-new-buffer " *pdf-roll-crossing*"))
+        (text-buffer (generate-new-buffer " *pdf-roll-crossing-text*"))
+        displayed-page)
+    (unwind-protect
+        (progn
+          (with-current-buffer text-buffer
+            (insert (make-string 200 ?x)))
+          (with-current-buffer pdf-buffer
+            (setq-local major-mode 'pdf-view-mode)
+            (setq-local buffer-file-name "/tmp/pdf-roll-crossing.pdf")
+            (setq-local pdf-view-roll-minor-mode t)
+            (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+            (setq-local english-reading-mode--pdf-page-ranges
+                        [(1 . 100) (101 . 200)])
+            (setq-local english-reading-mode--pdf-page 1)
+            (setq-local english-reading-mode--pdf-text-point 90)
+            (let ((english-reading-mode--continuous-state
+                   (list :buffer pdf-buffer)))
+              (cl-letf (((symbol-function 'pdf-view-goto-page)
+                         (lambda (page) (setq displayed-page page))))
+                (english-reading-mode--pdf-goto-page 2)))
+            (should-not displayed-page)
+            (should (= english-reading-mode--pdf-page 2))
+            (should (= english-reading-mode--pdf-text-point 101))))
+      (when (buffer-live-p pdf-buffer)
+        (kill-buffer pdf-buffer))
+      (when (buffer-live-p text-buffer)
+        (kill-buffer text-buffer)))))
 
 (ert-deftest english-reading-mode-pdf-selection-moves-reading-position ()
   (let ((pdf-buffer (generate-new-buffer " *english-reading-pdf-selection*"))
@@ -888,6 +1039,29 @@
        words)
       '((0 . 2))))))
 
+(ert-deftest english-reading-mode-pdf-anchors-multi-sentence-bbox-order-mismatch ()
+  (let* ((words
+          (vector
+           '(:text "これは先頭の文章です。" :xmin 10.0 :ymin 20.0
+             :xmax 200.0 :ymax 30.0)
+           '(:text "図表の注記が途中にあります。" :xmin 10.0 :ymin 35.0
+             :xmax 240.0 :ymax 45.0)
+           '(:text "抽出順だけが本文と異なります。" :xmin 10.0 :ymin 50.0
+             :xmax 260.0 :ymax 60.0)
+           '(:text "これは最後の文章です。" :xmin 10.0 :ymin 65.0
+             :xmax 210.0 :ymax 75.0)))
+         (context
+          '(:text "これは先頭の文章です。抽出順だけが本文と異なります。図表の注記が途中にあります。これは最後の文章です。"
+            :beg 1 :end 100)))
+    (should-not
+     (english-reading-mode--pdf-compact-match-ranges
+      (plist-get context :text) words))
+    (should
+     (equal
+      (english-reading-mode--pdf-anchored-match-range
+       context words '(1 . 100))
+      '(0 . 4)))))
+
 (ert-deftest english-reading-mode-pdf-builds-highlight-svg-at-docview-width ()
   (let (captured)
     (cl-letf (((symbol-function 'english-reading-mode--pdf-image-data-uri)
@@ -992,10 +1166,14 @@
         (should (equal restored '(3 test-window)))
         (should-not english-reading-mode--pdf-highlight-page)))))
 
-(ert-deftest english-reading-mode-pdf-highlight-precedes-prefetched-playback ()
+(ert-deftest english-reading-mode-pdf-highlight-is-deferred-after-scroll ()
   (with-temp-buffer
     (setq-local english-reading-mode t)
     (let ((english-reading-mode--active-speech nil)
+          (english-reading-mode--pdf-highlight-timer nil)
+          (english-reading-mode--pdf-highlight-pending-context nil)
+          scheduled-function
+          scheduled-context
           events)
       (cl-letf (((symbol-function 'english-reading-mode--make-context)
                  (lambda (_beg _end) '(:id 1 :text "Short sentence.")))
@@ -1004,6 +1182,11 @@
                  (lambda (_context) (push 'center events)))
                 ((symbol-function 'english-reading-mode--pdf-highlight-start)
                  (lambda (_context) (push 'highlight events)))
+                ((symbol-function 'run-at-time)
+                 (lambda (_delay _repeat function context)
+                   (setq scheduled-function function
+                         scheduled-context context)
+                   'fake-highlight-timer))
                 ((symbol-function 'english-reading-mode--start-watch)
                  (lambda (_context) (push 'watch events))))
         (english-reading-mode--around-kokoro-speak-bounds
@@ -1011,13 +1194,52 @@
            (push 'play events)
            'playing)
          1 2)
-        (should (equal (nreverse events)
-                       '(center highlight play watch)))))))
+        (should (equal (reverse events)
+                       '(play center watch)))
+        (should (eq scheduled-function
+                    #'english-reading-mode--run-deferred-pdf-highlight))
+        (funcall scheduled-function scheduled-context)
+        (should (equal (reverse events)
+                       '(play center watch highlight)))))))
 
-(ert-deftest english-reading-mode-pdf-highlight-restores-on-speech-error ()
+(ert-deftest english-reading-mode-pdf-highlight-waits-for-stable-scroll ()
+  (let* ((context '(:id 1 :text "Moving sentence."))
+         (english-reading-mode--active-speech context)
+         (english-reading-mode--pdf-highlight-pending-context context)
+         (english-reading-mode--pdf-highlight-pending-scroll-state '(10 20 1))
+         (english-reading-mode--pdf-highlight-timer nil)
+         (current-scroll-state '(11 25 1))
+         scheduled-function
+         scheduled-context
+         highlighted)
+    (cl-letf (((symbol-function
+                'english-reading-mode--pdf-highlight-scroll-state)
+               (lambda (_context) current-scroll-state))
+              ((symbol-function 'run-at-time)
+               (lambda (_delay _repeat function callback-context)
+                 (setq scheduled-function function
+                       scheduled-context callback-context)
+                 'fake-highlight-timer))
+              ((symbol-function 'english-reading-mode--pdf-highlight-start)
+               (lambda (_context) (setq highlighted t))))
+      (english-reading-mode--run-deferred-pdf-highlight context)
+      (should-not highlighted)
+      (should (equal english-reading-mode--pdf-highlight-pending-scroll-state
+                     current-scroll-state))
+      (should (eq scheduled-function
+                  #'english-reading-mode--run-deferred-pdf-highlight))
+      ;; With no further scroll change, the second delay may draw the layer.
+      (funcall scheduled-function scheduled-context)
+      (should highlighted)
+      (should-not english-reading-mode--pdf-highlight-pending-context)
+      (should-not english-reading-mode--pdf-highlight-pending-scroll-state))))
+
+(ert-deftest english-reading-mode-pdf-highlight-is-not-scheduled-on-speech-error ()
   (with-temp-buffer
     (setq-local english-reading-mode t)
     (let ((english-reading-mode--active-speech nil)
+          (english-reading-mode--pdf-highlight-timer nil)
+          (english-reading-mode--pdf-highlight-pending-context nil)
           events)
       (cl-letf (((symbol-function 'english-reading-mode--make-context)
                  (lambda (_beg _end) '(:id 1 :text "Short sentence.")))
@@ -1032,7 +1254,8 @@
          (english-reading-mode--around-kokoro-speak-bounds
           (lambda (&rest _) (error "speech failed"))
           1 2))
-        (should (equal (nreverse events) '(highlight restore)))))))
+        (should-not events)
+        (should-not english-reading-mode--pdf-highlight-pending-context)))))
 
 (ert-deftest english-reading-mode-pdf-continuous-centers-spoken-line ()
   (save-window-excursion
@@ -1072,6 +1295,75 @@
         (when (buffer-live-p text-buffer)
           (kill-buffer text-buffer))))))
 
+(ert-deftest english-reading-mode-pdf-continuous-rolls-across-page-boundaries ()
+  (save-window-excursion
+    (let ((pdf-buffer (generate-new-buffer " *continuous-pdf-roll*"))
+          (text-buffer (generate-new-buffer " *continuous-pdf-roll-text*"))
+          goto-page
+          (goto-count 0)
+          forward-scrolls
+          single-page-scroll)
+      (unwind-protect
+          (progn
+            (switch-to-buffer pdf-buffer)
+            (setq-local major-mode 'pdf-view-mode)
+            (setq-local buffer-file-name "/tmp/continuous-roll.pdf")
+            (setq-local pdf-view-roll-minor-mode t)
+            (setq-local english-reading-mode--pdf-page 3)
+            (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+            (let ((english-reading-mode--continuous-state
+                   (list :buffer pdf-buffer)))
+              (cl-letf (((symbol-function
+                          'english-reading-mode--pdf-context-rectangles)
+                         (lambda (context)
+                           (if (= (plist-get context :beg) 1)
+                               '((:height 1000.0)
+                                 ((10.0 500.0 100.0 520.0)))
+                             '((:height 1000.0)
+                               ((10.0 600.0 100.0 620.0))))))
+                        ((symbol-function 'pdf-roll-goto-page)
+                         (lambda (page window)
+                           (cl-incf goto-count)
+                           (setq goto-page (list page window))))
+                        ((symbol-function 'pdf-roll-display-page)
+                         (lambda (&rest _) 2000))
+                        ((symbol-function 'pdf-roll-scroll-forward)
+                         (lambda (pixels window pixelwise)
+                           (push (list pixels window pixelwise)
+                                 forward-scrolls)))
+                        ((symbol-function 'pdf-roll-scroll-backward)
+                         #'ignore)
+                        ((symbol-function 'pdf-view-image-size)
+                         (lambda (&optional _displayed _window)
+                           '(1000 . 2000)))
+                        ((symbol-function 'pdf-view-image-offset)
+                         (lambda (&optional _window) '(0 . 0)))
+                        ((symbol-function 'window-inside-pixel-edges)
+                         (lambda (&optional _window) '(0 0 500 800)))
+                        ((symbol-function 'image-set-window-vscroll)
+                         (lambda (value) (setq single-page-scroll value))))
+                (english-reading-mode--pdf-center-continuous-speech
+                 (list :window (selected-window)
+                       :buffer text-buffer
+                       :text "Spoken sentence."
+                       :beg 1 :end 17))
+                (english-reading-mode--pdf-center-continuous-speech
+                 (list :window (selected-window)
+                       :buffer text-buffer
+                       :text "Following sentence."
+                       :beg 18 :end 37))))
+            (should (equal (car goto-page) 3))
+            (should (= goto-count 1))
+            (should (equal (mapcar #'car (reverse forward-scrolls))
+                           '(620 200)))
+            (should (cl-every (lambda (scroll) (eq (nth 2 scroll) t))
+                              forward-scrolls))
+            (should-not single-page-scroll))
+        (when (buffer-live-p pdf-buffer)
+          (kill-buffer pdf-buffer))
+        (when (buffer-live-p text-buffer)
+          (kill-buffer text-buffer))))))
+
 (ert-deftest english-reading-mode-pdf-centering-corrects-for-slice-offset ()
   (should
    (= (english-reading-mode--pdf-continuous-vscroll
@@ -1092,20 +1384,21 @@
        (equal (english-reading-mode--pdf-continuous-position '(:beg 151))
               '((:height 1000.0) (0.0 500.0 0.0 500.0)))))))
 
-(ert-deftest english-reading-mode-pdf-zoom-recenters-active-speech ()
+(ert-deftest english-reading-mode-pdf-zoom-recenters-before-highlight ()
   (let ((english-reading-mode--continuous-state '(:buffer active-pdf))
         (english-reading-mode--active-speech '(:text "Current sentence."))
         (this-command 'pdf-view-enlarge)
-        centered
-        refreshed)
-    (cl-letf (((symbol-function 'english-reading-mode--pdf-highlight-start)
-               (lambda (context) (setq refreshed context)))
+        events)
+    (cl-letf (((symbol-function 'english-reading-mode--schedule-pdf-highlight)
+               (lambda (context) (push (list 'highlight context) events)))
               ((symbol-function
                 'english-reading-mode--pdf-center-continuous-speech)
-               (lambda (context) (setq centered context))))
+               (lambda (context) (push (list 'center context) events))))
       (english-reading-mode--pdf-post-command))
-    (should (equal refreshed english-reading-mode--active-speech))
-    (should (equal centered english-reading-mode--active-speech))))
+    (should
+     (equal (reverse events)
+            (list (list 'center english-reading-mode--active-speech)
+                  (list 'highlight english-reading-mode--active-speech))))))
 
 (ert-deftest english-reading-mode-pdf-one-shot-does-not-auto-scroll ()
   (save-window-excursion
@@ -1800,6 +2093,47 @@
         (kill-buffer epub-buffer)
         (kill-buffer org-buffer)))))
 
+(ert-deftest my-read-registers-opened-files-in-source-specific-tabs ()
+  (save-window-excursion
+    (let* ((frame (selected-frame))
+           (center (selected-window))
+           (epub-buffer (generate-new-buffer " *my-read-opened-epub*"))
+           (pdf-buffer (generate-new-buffer " *my-read-opened-pdf*"))
+           (dired-buffer (generate-new-buffer " *my-read-opened-dired*")))
+      (unwind-protect
+          (progn
+            (set-frame-parameter frame 'my-reading-frame t)
+            (set-frame-parameter frame 'my-reading-center-window center)
+            (set-frame-parameter frame 'my-reading-center-windows (list center))
+            (cl-letf (((symbol-function 'my/read--configure-center-tab-buffer)
+                       #'ignore)
+                      ((symbol-function 'my/read-org-noter-follow-source)
+                       #'ignore))
+              (dolist (entry `((,dired-buffer dired-mode
+                                my-reading-dired-buffer)
+                               (,epub-buffer nov-mode
+                                my-reading-epub-buffer)
+                               (,pdf-buffer pdf-view-mode
+                                my-reading-pdf-buffer)))
+                (with-current-buffer (nth 0 entry)
+                  (setq major-mode (nth 1 entry)))
+                (set-window-buffer center (nth 0 entry))
+                (my/read--track-center-tab-buffer frame)
+                (should (eq (frame-parameter frame (nth 2 entry))
+                            (nth 0 entry)))))
+            (should (eq (frame-parameter frame 'my-reading-dired-buffer)
+                        dired-buffer))
+            (should (eq (frame-parameter frame 'my-reading-epub-buffer)
+                        epub-buffer))
+            (should (eq (frame-parameter frame 'my-reading-pdf-buffer)
+                        pdf-buffer)))
+        (dolist (parameter '(my-reading-frame my-reading-center-window
+                             my-reading-center-windows my-reading-epub-buffer
+                             my-reading-pdf-buffer my-reading-dired-buffer))
+          (set-frame-parameter frame parameter nil))
+        (dolist (buffer (list epub-buffer pdf-buffer dired-buffer))
+          (kill-buffer buffer))))))
+
 (ert-deftest my-read-followers-ignore-org-buffer-in-center-window ()
   (save-window-excursion
     (let* ((frame (selected-frame))
@@ -1970,11 +2304,113 @@
       (should (= (my/read-eww-math--image-scale t) 2.75))
       (should (= (my/read-eww-math--image-scale) 3.4375)))))
 
+(ert-deftest my-read-eww-math-replacement-preserves-reading-point ()
+  (with-temp-buffer
+    (insert "prefix FORMULA suffix")
+    (add-text-properties 8 15 '(my/read-eww-math-job 1))
+    (goto-char 16)
+    (let ((job (list :tex "FORMULA"
+                     :display nil
+                     :buffer (current-buffer)
+                     :generation 0
+                     :id 1)))
+      (cl-letf (((symbol-function 'create-image) (lambda (&rest _) 'image))
+                ((symbol-function 'insert-image)
+                 (lambda (_image &optional _string _area _slice)
+                   (insert "I"))))
+        (my/read-eww-math--replace-placeholder job "/unused/formula.svg"))
+      (should (looking-at "suffix"))
+      (should (equal (buffer-string) "prefix I suffix")))))
+
+(ert-deftest my-read-eww-math-fills-concurrent-process-slots ()
+  (with-temp-buffer
+    (let ((my/read-eww-math-max-processes 4)
+          (my/read-eww-math--queue '(one two three four five))
+          (my/read-eww-math--active-processes nil)
+          compiled)
+      (cl-letf (((symbol-function 'my/read-eww-math--job-valid-p)
+                 (lambda (_job) t))
+                ((symbol-function 'my/read-eww-math--cache-file)
+                 (lambda (job) (format "/unused/%s.svg" job)))
+                ((symbol-function 'file-exists-p) (lambda (_file) nil))
+                ((symbol-function 'executable-find) (lambda (_program) t))
+                ((symbol-function 'my/read-eww-math--compile)
+                 (lambda (job _cache)
+                   (push job compiled)
+                   (push (make-symbol (format "process-%s" job))
+                         my/read-eww-math--active-processes))))
+        (my/read-eww-math--next (current-buffer)))
+      (should (= (length compiled) 4))
+      (should (= (length my/read-eww-math--active-processes) 4))
+      (should (equal my/read-eww-math--queue '(five))))))
+
+(ert-deftest my-read-eww-background-only-lightens-arxiv-article-images ()
+  (with-temp-buffer
+    (eww-mode)
+    (setq-local my/read--eww-image-background-installed-p t)
+    (let ((my/read-eww-article-image-background "#f5f5f5")
+          (my/read-eww-article-svg-max-width 720)
+          (article '(image :type svg
+                          :data "<svg viewBox='-1.5 2 10.25 20.5'></svg>"))
+          (formula '(image :type svg :file "/tmp/formula.svg"))
+          (logo '(image :type svg :data "logo")))
+      (let ((inhibit-read-only t))
+        (insert "A M L")
+        (put-text-property 1 2 'display article)
+        (put-text-property
+         1 2 'image-url
+         "https://arxiv.org/html/1706.03762v7/Figures/ModalNet-20.png")
+        (put-text-property 3 4 'display formula)
+        (put-text-property 5 6 'display logo)
+        (put-text-property
+         5 6 'image-url
+         "https://arxiv.org/static/base/1.0.1/images/arxiv-logo.svg"))
+      (goto-char 3)
+      (cl-letf (((symbol-function 'my/read--eww-rasterize-svg)
+                 (lambda (_data _color) "rasterized-png")))
+        (should (= (my/read--eww-apply-article-image-background) 1)))
+      (should (= (point) 3))
+      (should (equal (plist-get (cdr (get-text-property 1 'display))
+                                :background)
+                     nil))
+      (should (eq (plist-get (cdr (get-text-property 1 'display)) :type)
+                  'png))
+      (should (equal (plist-get (cdr (get-text-property 1 'display)) :data)
+                     "rasterized-png"))
+      (should (numberp
+               (plist-get (cdr (get-text-property 1 'display)) :scale)))
+      (should-not (plist-get (cdr (get-text-property 3 'display)) :background))
+      (should-not (plist-get (cdr (get-text-property 5 'display)) :background)))))
+
+(ert-deftest my-read-eww-svg-rasterization-fallback-never-enlarges-native-svg ()
+  (let ((my/read-eww-article-image-background "#f5f5f5"))
+    (cl-letf (((symbol-function 'my/read--eww-rasterize-svg)
+               (lambda (&rest _) nil)))
+      (let* ((result
+              (my/read--eww-image-with-background
+               '(image :type svg
+                       :scale 3.0
+                       :data "<svg viewBox='0 0 10 20'></svg>")))
+             (properties (cdr result)))
+        (should (eq (plist-get properties :type) 'svg))
+        (should (eq (plist-get properties :scale) 'default))
+        (should (string-match-p "my-read-eww-background"
+                                (plist-get properties :data)))))))
+
+(ert-deftest my-read-eww-rasterizes-svg-to-png-with-librsvg ()
+  (skip-unless (executable-find my/read-eww-svg-raster-program))
+  (let ((my/read-eww-article-svg-max-width 2))
+    (let ((png (my/read--eww-rasterize-svg
+                "<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2'/>"
+                "#f5f5f5")))
+      (should (string-prefix-p (unibyte-string #x89 ?P ?N ?G) png)))))
+
 (ert-deftest my-read-unified-layout-has-left-reading-and-right-utility-panes ()
   (save-window-excursion
     (let* ((frame (selected-frame))
            (kindle-buffer (generate-new-buffer " *my-read-layout-kindle*"))
            (epub-buffer (generate-new-buffer " *my-read-layout-epub*"))
+           (dired-buffer (generate-new-buffer " *my-read-layout-dired*"))
            (my/read-book-path "/virtual/book.epub")
            (lookup-frame-height
             (frame-parameter frame 'lookup-window-height))
@@ -1983,28 +2419,39 @@
           (cl-letf (((symbol-function 'find-file)
                      (lambda (path)
                        (push path opened-paths)
-                       (switch-to-buffer epub-buffer)))
+                       (switch-to-buffer epub-buffer)
+                       (setq major-mode 'nov-mode)))
+                    ((symbol-function 'dired-noselect)
+                     (lambda (_directory) dired-buffer))
                     ((symbol-function 'my-read-lookup-follow-mode) #'ignore)
                     ((symbol-function 'my-read-translate-follow-mode) #'ignore)
                     ((symbol-function 'my/read-lookup-follow-post-command) #'ignore)
-                    ((symbol-function 'my/read-translate-follow-post-command) #'ignore))
+                    ((symbol-function 'my/read-translate-follow-post-command) #'ignore)
+                    ((symbol-function 'my/read-org-noter-follow-source) #'ignore))
             (set-frame-parameter frame 'my-reading-frame t)
             (my/read--setup-frame frame kindle-buffer)
             (let ((kindle-window (my/read-kindle-window frame))
                   (epub-window (my/read-epub-window frame))
+                  (pdf-window (my/read-pdf-window frame))
+                  (dired-window (my/read-dired-window frame))
                   (eww-window (my/read-eww-window frame))
                   (translate-window (my/read-translate-window frame))
                   (lookup-window (my/read-lookup-window frame))
                   (note-window (my/read-note-window frame))
+                  (pdf-buffer (frame-parameter frame 'my-reading-pdf-buffer))
                   (eww-buffer (frame-parameter frame 'my-reading-eww-buffer)))
               (should (= (length (window-list frame)) 4))
               (should (window-live-p kindle-window))
               (should (window-live-p epub-window))
+              (should (window-live-p pdf-window))
+              (should (window-live-p dired-window))
               (should (window-live-p eww-window))
               (should (window-live-p translate-window))
               (should (window-live-p lookup-window))
               (should (window-live-p note-window))
               (should (eq kindle-window epub-window))
+              (should (eq epub-window pdf-window))
+              (should (eq pdf-window dired-window))
               (should (eq epub-window eww-window))
               (let ((reading-edges (window-edges kindle-window))
                     (note-edges (window-edges note-window))
@@ -2027,11 +2474,18 @@
               (should (equal opened-paths
                              (list (expand-file-name my/read-book-path))))
               (should (= (length (my/read-center-windows frame)) 1))
-              (should (eq (window-buffer kindle-window) kindle-buffer))
+              (should (eq (window-buffer dired-window) dired-buffer))
               (with-current-buffer kindle-buffer
                 (should my-read-center-tab-mode)
                 (should (equal (my/read-center-tab-buffers)
-                               (list kindle-buffer epub-buffer eww-buffer))))
+                               (list dired-buffer kindle-buffer pdf-buffer
+                                     epub-buffer eww-buffer)))
+                (should (equal (mapcar #'my/read-center-tab-name
+                                       (my/read-center-tab-buffers))
+                               '(" DIRED " " Kindle " " PDF " " EPUB "
+                                 " EWW ")))
+                (with-current-buffer pdf-buffer
+                  (should (eq my/read-center-tab-placeholder-type 'pdf))))
               (set-window-buffer kindle-window eww-buffer)
               (with-current-buffer eww-buffer
                 (should (equal (plist-get eww-data :url) my/read-eww-url))
@@ -2052,7 +2506,11 @@
                             #'my/read-previous-word))
                 (should (eq (key-binding (kbd ";"))
                             #'my/read-next-word)))
-              (set-window-buffer kindle-window kindle-buffer)
+              (set-window-buffer dired-window dired-buffer)
+              (my/read-toggle-center-tab)
+              (should (eq (window-buffer kindle-window) kindle-buffer))
+              (my/read-toggle-center-tab)
+              (should (eq (window-buffer pdf-window) pdf-buffer))
               (my/read-toggle-center-tab)
               (should (eq (window-buffer epub-window) epub-buffer))
               (my/read-toggle-center-tab)
@@ -2061,20 +2519,26 @@
               (let ((my/read-eww-enable-automatic-lookup t))
                 (should (my/read--center-automatic-lookup-p eww-window)))
               (my/read-toggle-center-tab)
-              (should (eq (window-buffer kindle-window) kindle-buffer))))
-        (dolist (parameter '(my-reading-frame my-reading-center-window
-                             my-reading-center-windows my-reading-kindle-window
-                             my-reading-epub-window my-reading-eww-window
-                             my-reading-kindle-buffer my-reading-epub-buffer
-                             my-reading-lookup-window my-reading-translate-window
-                             my-reading-note-window my-reading-note-ready-buffer))
-          (set-frame-parameter frame parameter nil))
-        (dolist (buffer (list kindle-buffer epub-buffer
+              (should (eq (window-buffer dired-window) dired-buffer))))
+        (dolist (buffer (list kindle-buffer epub-buffer dired-buffer
+                              (frame-parameter frame 'my-reading-pdf-buffer)
                               (frame-parameter frame 'my-reading-eww-buffer)
                               (frame-parameter frame 'my-reading-translate-buffer)
                               (frame-parameter frame 'my-reading-lookup-ready-buffer)
                               (frame-parameter frame 'my-reading-note-ready-buffer)))
           (when (buffer-live-p buffer) (kill-buffer buffer)))
+        (dolist (parameter '(my-reading-frame my-reading-center-window
+                             my-reading-center-windows my-reading-kindle-window
+                             my-reading-epub-window my-reading-pdf-window
+                             my-reading-dired-window my-reading-eww-window
+                             my-reading-kindle-buffer my-reading-epub-buffer
+                             my-reading-pdf-buffer my-reading-dired-buffer
+                             my-reading-kindle-placeholder-buffer
+                             my-reading-pdf-placeholder-buffer
+                             my-reading-epub-placeholder-buffer
+                             my-reading-lookup-window my-reading-translate-window
+                             my-reading-note-window my-reading-note-ready-buffer))
+          (set-frame-parameter frame parameter nil))
         (set-frame-parameter frame 'my-reading-translate-buffer nil)
         (set-frame-parameter frame 'my-reading-lookup-ready-buffer nil)
         (set-frame-parameter frame 'my-reading-note-ready-buffer nil)

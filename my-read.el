@@ -1,7 +1,7 @@
 ;;; my-read.el --- Dedicated English reading frame -*- lexical-binding: t; -*-
 
 ;; English reading workspace:
-;;   left         : Kindle.app, EPUB / normal book, and EWW tabs
+;;   left         : Kindle.app, PDF, EPUB, EWW, and DIRED tabs
 ;;   right top    : Org-noter notes
 ;;   right middle : local translation with Google fallback
 ;;   right bottom : Lookup
@@ -113,6 +113,230 @@ makes the distance from one baseline to the next approximately 1.5 times the
 normal height."
   :type '(choice (const :tag "No extra spacing" nil) number)
   :group 'my-read)
+
+(defcustom my/read-eww-article-image-background "#f5f5f5"
+  "Background color used behind arXiv article figures in EWW.
+
+Many paper figures have transparent pixels and otherwise inherit the dark
+reader background.  This only affects images served from an arXiv HTML paper;
+formula SVGs, site icons, and logos keep their existing appearance."
+  :type 'color
+  :group 'my-read)
+
+(defcustom my/read-eww-image-convert-program "magick"
+  "ImageMagick executable used to flatten transparent raster figures."
+  :type 'string
+  :group 'my-read)
+
+(defcustom my/read-eww-svg-raster-program "rsvg-convert"
+  "Executable used to rasterize complex arXiv SVG figures once."
+  :type 'string
+  :group 'my-read)
+
+(defcustom my/read-eww-article-svg-max-width 720
+  "Maximum raster width in pixels for arXiv article SVG figures.
+
+Figures are fitted to 95 percent of the current EWW window, up to this width.
+This avoids expensive native SVG redraws while keeping the entire figure
+visible.  Formula SVGs, site icons, raster figures, and logos are not affected."
+  :type 'integer
+  :group 'my-read)
+
+(defvar-local my/read--eww-image-background-installed-p nil)
+(defconst my/read--eww-image-background-version "v6")
+
+(defun my/read--eww-arxiv-article-image-url-p (url)
+  "Return non-nil when URL names an image inside an arXiv HTML paper."
+  (and (stringp url)
+       (string-match-p
+        (concat "\\`https://\\(?:www\\.\\)?arxiv\\.org/html/[^/]+/.+"
+                "\\.\\(?:png\\|jpe?g\\|svg\\)\\(?:[?#].*\\)?\\'")
+        url)))
+
+(defun my/read--eww-svg-with-background (data color)
+  "Return SVG DATA with a COLOR rectangle behind its existing content."
+  (if (not (stringp data))
+      data
+    (let* ((numbers
+            (when (string-match
+                   "viewBox=['\"]\\([^'\"]+\\)['\"]" data)
+              (split-string (match-string 1 data) "[ ,]+" t)))
+           (rectangle
+            (if (= (length numbers) 4)
+                (format
+                 (concat "<rect id='my-read-eww-background'"
+                         " x='%s' y='%s' width='%s' height='%s' fill='%s'/>")
+                 (nth 0 numbers) (nth 1 numbers)
+                 (nth 2 numbers) (nth 3 numbers) color)
+              (format
+               (concat "<rect id='my-read-eww-background' x='0' y='0'"
+                       " width='100%%' height='100%%' fill='%s'/>")
+               color))))
+      (cond
+       ((string-match
+         "<rect id=['\"]my-read-eww-background['\"][^>]*/>" data)
+        (replace-match rectangle t t data))
+       ((string-match "<svg\\(?:.\\|\n\\)*?>" data)
+        (concat (substring data 0 (match-end 0))
+                rectangle
+                (substring data (match-end 0))))
+       (t data)))))
+
+(defun my/read--eww-flatten-raster-background (data color)
+  "Composite transparent raster DATA over COLOR using ImageMagick."
+  (when-let* ((program (executable-find my/read-eww-image-convert-program)))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert data)
+      (let ((coding-system-for-read 'binary)
+            (coding-system-for-write 'binary))
+        (when (= (call-process-region
+                  (point-min) (point-max) program t (list t nil) nil
+                  "-" "-background" color "-alpha" "remove" "-alpha" "off"
+                  "png:-")
+                 0)
+          (buffer-string))))))
+
+(defun my/read--eww-article-svg-target-width ()
+  "Return a raster width that fits the current EWW window."
+  (let ((window (get-buffer-window (current-buffer) t)))
+    (min my/read-eww-article-svg-max-width
+         (if (window-live-p window)
+             (max 1 (floor (* 0.95 (window-body-width window t))))
+           my/read-eww-article-svg-max-width))))
+
+(defun my/read--eww-article-svg-display-scale ()
+  "Return the scale that displays rasterized SVGs at logical pixel size."
+  (let* ((window (get-buffer-window (current-buffer) t))
+         (factor (if (and (window-live-p window)
+                          (fboundp 'frame-scale-factor))
+                     (frame-scale-factor (window-frame window))
+                   1.0)))
+    (/ 1.0 (max 1.0 factor))))
+
+(defun my/read--eww-rasterize-svg (data color)
+  "Rasterize SVG DATA once over COLOR and return PNG data.
+
+Using librsvg here prevents Emacs from repeatedly rendering large, complex
+paper SVGs whenever their display rows enter the window."
+  (when-let* ((program (executable-find my/read-eww-svg-raster-program))
+              ((stringp data)))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert (encode-coding-string data 'utf-8 t))
+      (let ((coding-system-for-read 'binary)
+            (coding-system-for-write 'binary))
+        (when (= (call-process-region
+                  (point-min) (point-max) program t (list t nil) nil
+                  "--width"
+                  (number-to-string (my/read--eww-article-svg-target-width))
+                  "--keep-aspect-ratio"
+                  "--background-color" color "--format" "png" "-")
+                 0)
+          (buffer-string))))))
+
+(defun my/read--eww-image-with-background (display)
+  "Return article image DISPLAY composited over the configured background."
+  (let* ((properties (copy-sequence (cdr display)))
+         (type (plist-get properties :type))
+         (data (plist-get properties :data))
+         (color my/read-eww-article-image-background)
+         output-type
+         (output-scale 'default)
+         updated-data)
+    (cond
+     ((eq type 'svg)
+      (setq updated-data (my/read--eww-rasterize-svg data color))
+      (if updated-data
+          (setq output-type 'png
+                output-scale (my/read--eww-article-svg-display-scale))
+        ;; Keep the fallback cheap: an enlarged native SVG can freeze Emacs
+        ;; for seconds each time it is scrolled into view.
+        (setq updated-data (my/read--eww-svg-with-background data color)
+              output-type 'svg)))
+     ((and (memq type '(png imagemagick)) (stringp data))
+      (setq updated-data
+            (my/read--eww-flatten-raster-background data color)
+            output-type 'png)))
+    (if updated-data
+        (progn
+          (setq properties (plist-put properties :data updated-data))
+          (setq properties (plist-put properties :type output-type))
+          ;; The zoom is baked into PNG data.  Never scale a native fallback.
+          (setq properties (plist-put properties :scale output-scale))
+          (cons 'image properties))
+      ;; This is a best-effort fallback for systems without ImageMagick.
+      (cons 'image (plist-put properties :background color)))))
+
+(defun my/read--eww-apply-article-image-background (&optional begin end &rest _)
+  "Apply the configured light background to this buffer's paper figures."
+  (when (and my/read--eww-image-background-installed-p
+             (derived-mode-p 'eww-mode))
+    (let ((position (or (and begin (marker-position begin)) (point-min)))
+          (limit (or (and end (marker-position end)) (point-max)))
+          (changed 0)
+          (inhibit-read-only t)
+          (inhibit-modification-hooks t))
+      (save-excursion
+        (setq position (max (point-min) position)
+              limit (min (point-max) (max position limit)))
+        (while (< position limit)
+          (let* ((next (next-single-property-change
+                        position 'display nil limit))
+                 (display (get-text-property position 'display))
+                 (url (get-text-property position 'image-url))
+                 (applied (get-text-property
+                           position 'my/read-eww-image-background))
+                 (application-token
+                 (list my/read--eww-image-background-version
+                        my/read-eww-article-image-background
+                        (my/read--eww-article-svg-target-width)
+                        (my/read--eww-article-svg-display-scale)
+                        my/read-eww-svg-raster-program)))
+            (when (and (consp display)
+                       (eq (car display) 'image)
+                       (not (equal applied application-token))
+                       (my/read--eww-arxiv-article-image-url-p url))
+              (let ((updated (my/read--eww-image-with-background display)))
+                (unless (equal display updated)
+                  (put-text-property position next 'display updated)
+                  (put-text-property
+                   position next 'my/read-eww-image-background
+                   application-token)
+                  (cl-incf changed))))
+            (setq position next))))
+      (when (> changed 0)
+        (force-window-update (current-buffer)))
+      changed)))
+
+(defun my/read--eww-after-image-fetched
+    (_status buffer _start _end &optional _flags)
+  "Apply the article background after SHR downloads an image into BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when my/read--eww-image-background-installed-p
+        ;; The placeholder may already have been marked by the render hook.
+        ;; Clear only this fetched image's marker, then process its real data.
+        (let ((inhibit-read-only t)
+              (begin-position (marker-position _start))
+              (end-position (marker-position _end)))
+          (when (and begin-position end-position
+                     (< begin-position end-position))
+            (remove-text-properties
+             begin-position end-position
+             '(my/read-eww-image-background nil))))
+        (my/read--eww-apply-article-image-background _start _end)))))
+
+(defun my/read--eww-image-background-setup ()
+  "Enable light arXiv article-image backgrounds in the current EWW buffer."
+  (setq-local my/read--eww-image-background-installed-p t)
+  (add-hook 'eww-after-render-hook
+            #'my/read--eww-apply-article-image-background nil t)
+  (unless (advice-member-p #'my/read--eww-after-image-fetched
+                           'shr-image-fetched)
+    (advice-add 'shr-image-fetched :after
+                #'my/read--eww-after-image-fetched))
+  (my/read--eww-apply-article-image-background))
 
 (defcustom my/read-translate-idle-delay 0.1
   "Seconds to wait before translating after the target changes."
@@ -239,6 +463,9 @@ translation remains pinned to CONTEXT's :text until the matching finish event.")
 (defvar-local my/read-center-tab-frame nil
   "my-read frame owning this center-tab buffer.")
 
+(defvar-local my/read-center-tab-placeholder-type nil
+  "Source type represented by this empty fixed-tab placeholder.")
+
 
 
 ;;; ---------------------------------------------------------------------------
@@ -270,7 +497,7 @@ translation remains pinned to CONTEXT's :text until the matching finish event.")
 
 (defun my/read-center-window (&optional frame)
   "Return the active center reading window in FRAME.
-The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
+The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
   (let* ((frame (or frame (selected-frame)))
          (windows (my/read-center-windows frame))
          (selected (and (eq frame (selected-frame)) (selected-window))))
@@ -290,8 +517,16 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
   (my/read-window 'my-reading-kindle-window frame))
 
 (defun my/read-epub-window (&optional frame)
-  "Return FRAME's center window hosting the EPUB/normal-book tab."
+  "Return FRAME's center window hosting the EPUB tab."
   (my/read-window 'my-reading-epub-window frame))
+
+(defun my/read-pdf-window (&optional frame)
+  "Return FRAME's center window hosting the PDF tab."
+  (my/read-window 'my-reading-pdf-window frame))
+
+(defun my/read-dired-window (&optional frame)
+  "Return FRAME's center window hosting the persistent DIRED tab."
+  (my/read-window 'my-reading-dired-window frame))
 
 (defun my/read-position-file ()
   "Return the persistent PDF/EPUB position file."
@@ -531,6 +766,7 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
                (delete-dups
                 (delq nil
                       (list (frame-parameter frame 'my-reading-epub-buffer)
+                            (frame-parameter frame 'my-reading-pdf-buffer)
                             (and (window-live-p window)
                                  (window-buffer window))))))
         (my/read-position-save-buffer
@@ -551,14 +787,16 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
   (my/read-window 'my-reading-note-window frame))
 
 (defun my/read-center-tab-buffers ()
-  "Return the Kindle, EPUB, and EWW buffers in the current center pane."
+  "Return FRAME's registered center-tab buffers in display order."
   (let ((frame my/read-center-tab-frame))
     (when (frame-live-p frame)
       (delq nil
             (mapcar (lambda (parameter)
                       (let ((buffer (frame-parameter frame parameter)))
                         (and (buffer-live-p buffer) buffer)))
-                    '(my-reading-kindle-buffer
+                    '(my-reading-dired-buffer
+                      my-reading-kindle-buffer
+                      my-reading-pdf-buffer
                       my-reading-epub-buffer
                       my-reading-eww-buffer))))))
 
@@ -571,10 +809,13 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
       " Kindle ")
      ((and (frame-live-p frame)
            (eq buffer (frame-parameter frame 'my-reading-epub-buffer)))
-      (if (with-current-buffer buffer
-            (derived-mode-p 'doc-view-mode 'pdf-view-mode))
-          " PDF "
-        " EPUB "))
+      " EPUB ")
+     ((and (frame-live-p frame)
+           (eq buffer (frame-parameter frame 'my-reading-pdf-buffer)))
+      " PDF ")
+     ((and (frame-live-p frame)
+           (eq buffer (frame-parameter frame 'my-reading-dired-buffer)))
+      " DIRED ")
      ((and (frame-live-p frame)
            (eq buffer (frame-parameter frame 'my-reading-eww-buffer)))
       " EWW ")
@@ -598,8 +839,10 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
                       (let ((candidate (frame-parameter frame parameter)))
                         (and (buffer-live-p candidate) candidate)))
                     '(my-reading-kindle-buffer
+                      my-reading-pdf-buffer
                       my-reading-epub-buffer
-                      my-reading-eww-buffer))))))
+                      my-reading-eww-buffer
+                      my-reading-dired-buffer))))))
 
 (defun my/read--center-source-window-p (window frame)
   "Return non-nil when WINDOW displays a registered source in FRAME."
@@ -674,7 +917,7 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
                 '(menu-item "Previous word" my/read-previous-word
                             :filter my/read--filter-center-key-binding))
     map)
-  "Keymap active in the Kindle, EPUB, and EWW center tabs.")
+  "Keymap active in the my-read center tabs.")
 
 ;; Keep re-evaluation effective in a live Emacs where `defvar' preserves the
 ;; existing map object.
@@ -811,7 +1054,7 @@ overlay; preserve the current page across that repair."
       (my-read-center-tab-mode 1))))
 
 (defun my/read-toggle-center-tab ()
-  "Cycle FRAME's center window through its Kindle, EPUB, and EWW tabs."
+  "Cycle FRAME's center window through its registered tabs."
   (interactive)
   (let* ((frame (or my/read-center-tab-frame (selected-frame)))
          (window (my/read-center-window frame))
@@ -850,9 +1093,12 @@ overlay; preserve the current page across that repair."
                   (cond
                    ((derived-mode-p 'eww-mode)
                     'my-reading-eww-buffer)
-                   ((derived-mode-p 'nov-mode 'doc-view-mode 'pdf-view-mode
-                                    'dired-mode)
-                    'my-reading-epub-buffer))))))
+                   ((derived-mode-p 'nov-mode)
+                    'my-reading-epub-buffer)
+                   ((derived-mode-p 'doc-view-mode 'pdf-view-mode)
+                    'my-reading-pdf-buffer)
+                   ((derived-mode-p 'dired-mode)
+                    'my-reading-dired-buffer))))))
         (when parameter
           (set-frame-parameter frame parameter buffer)
           (my/read--configure-center-tab-buffer buffer frame)
@@ -2132,6 +2378,7 @@ Otherwise, translate the sentence containing point."
         (eww-mode))
       (require 'my-read-eww-math)
       (my/read-eww-math-setup)
+      (my/read--eww-image-background-setup)
       (setq-local line-spacing my/read-eww-line-spacing)
       ;; Reuse the EPUB/Kindle reading controls in rendered web papers.
       ;; `eww-setup-buffer' does not re-run `eww-mode' on navigation, so this
@@ -2148,9 +2395,25 @@ Otherwise, translate the sentence containing point."
       (plist-put eww-data :url my/read-eww-url))
     buffer))
 
+(defun my/read--prepare-center-tab-placeholder (frame type)
+  "Return FRAME's persistent empty center-tab placeholder for TYPE."
+  (let* ((parameter (intern (format "my-reading-%s-placeholder-buffer" type)))
+         (buffer (frame-parameter frame parameter)))
+    (unless (buffer-live-p buffer)
+      (setq buffer
+            (generate-new-buffer
+             (format "*my-read %s*" (upcase (symbol-name type)))))
+      (set-frame-parameter frame parameter buffer))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (special-mode))
+      (setq-local my/read-center-tab-placeholder-type type))
+    buffer))
+
 (defun my/read--setup-frame (frame &optional kindle-buffer)
   "Build the my-read layout inside FRAME.
-When KINDLE-BUFFER is live, expose it, EPUB, and EWW as left-side tabs."
+When KINDLE-BUFFER is live, expose it with the center document tabs."
   (with-selected-frame frame
     (delete-other-windows)
 
@@ -2158,6 +2421,8 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as left-side tabs."
            ;; Two columns: reading on the left, three utilities on the right.
            (note-window (split-window-right))
            epub-buffer
+           pdf-buffer
+           dired-buffer
            eww-buffer
            translate-window
            lookup-window)
@@ -2174,9 +2439,10 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as left-side tabs."
       ;; Store window identity on the frame.
       (set-frame-parameter frame 'my-reading-lookup-window lookup-window)
       (set-frame-parameter frame 'my-reading-center-window center-window)
-      (set-frame-parameter frame 'my-reading-kindle-window
-                           (and (buffer-live-p kindle-buffer) center-window))
+      (set-frame-parameter frame 'my-reading-kindle-window center-window)
       (set-frame-parameter frame 'my-reading-epub-window center-window)
+      (set-frame-parameter frame 'my-reading-pdf-window center-window)
+      (set-frame-parameter frame 'my-reading-dired-window center-window)
       (set-frame-parameter frame 'my-reading-eww-window center-window)
       (set-frame-parameter frame 'my-reading-center-windows (list center-window))
       (set-frame-parameter frame 'my-reading-kindle-buffer kindle-buffer)
@@ -2211,25 +2477,53 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as left-side tabs."
         (set-window-buffer translate-window buffer)
         (set-window-dedicated-p translate-window t))
 
-      ;; Open the EPUB/normal book in the left window and remember its
-      ;; actual buffer (which may initially be Dired).
+      ;; Open the configured path and register it by source type.  Keep its
+      ;; containing Dired buffer alive as a permanent tab even after RET opens
+      ;; an EPUB or PDF in this same window.
       (select-window center-window)
-      (find-file (expand-file-name my/read-book-path))
-      (setq epub-buffer (current-buffer))
+      (let ((book-path (expand-file-name my/read-book-path)))
+        (find-file book-path)
+        (cond
+         ((derived-mode-p 'dired-mode)
+          (setq dired-buffer (current-buffer)))
+         ((or (derived-mode-p 'pdf-view-mode 'doc-view-mode)
+              (string-match-p "\\.pdf\\'" book-path))
+          (setq pdf-buffer (current-buffer)))
+         (t
+          (setq epub-buffer (current-buffer))))
+        (unless (buffer-live-p dired-buffer)
+          (require 'dired)
+          (setq dired-buffer
+                (dired-noselect
+                 (if (file-directory-p book-path)
+                     book-path
+                   (file-name-directory book-path))))))
+      (unless (buffer-live-p kindle-buffer)
+        (setq kindle-buffer
+              (my/read--prepare-center-tab-placeholder frame 'kindle)))
+      (unless (buffer-live-p pdf-buffer)
+        (setq pdf-buffer
+              (my/read--prepare-center-tab-placeholder frame 'pdf)))
+      (unless (buffer-live-p epub-buffer)
+        (setq epub-buffer
+              (my/read--prepare-center-tab-placeholder frame 'epub)))
+      (set-frame-parameter frame 'my-reading-kindle-buffer kindle-buffer)
       (set-frame-parameter frame 'my-reading-epub-buffer epub-buffer)
-      (my/read--configure-center-tab-buffer epub-buffer frame)
+      (set-frame-parameter frame 'my-reading-pdf-buffer pdf-buffer)
+      (set-frame-parameter frame 'my-reading-dired-buffer dired-buffer)
+      (dolist (buffer (list kindle-buffer pdf-buffer epub-buffer dired-buffer))
+        (my/read--configure-center-tab-buffer buffer frame))
 
       ;; Keep an EWW buffer ready for arXiv without fetching the network until
       ;; the user opens the tab and presses `G'.
       (setq eww-buffer (my/read--prepare-eww-buffer frame))
       (my/read--configure-center-tab-buffer eww-buffer frame)
 
-      ;; Kindle is the initially selected center tab when it is available.
-      (when (buffer-live-p kindle-buffer)
-        (my/read--configure-center-tab-buffer kindle-buffer frame)
-        (set-window-buffer center-window kindle-buffer))
+      ;; DIRED is the leftmost and initially selected center tab.
+      (when (buffer-live-p dired-buffer)
+        (set-window-buffer center-window dired-buffer))
 
-      ;; Start in Kindle when present; otherwise use the normal book.
+      ;; Start with the book directory visible.
       (select-window center-window)
 
       ;; Self-contained Lookup follower from this file.
@@ -2279,7 +2573,10 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as left-side tabs."
 
     (dolist (parameter '(my-reading-translate-buffer
                          my-reading-lookup-ready-buffer
-                         my-reading-note-ready-buffer))
+                         my-reading-note-ready-buffer
+                         my-reading-kindle-placeholder-buffer
+                         my-reading-pdf-placeholder-buffer
+                         my-reading-epub-placeholder-buffer))
       (when-let ((buffer (frame-parameter frame parameter)))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))

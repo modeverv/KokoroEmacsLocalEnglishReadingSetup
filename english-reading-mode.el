@@ -6,6 +6,7 @@
 (require 'cl-lib)
 (require 'dom)
 (require 'kokoro-reader)
+(require 'seq)
 (require 'thingatpt)
 (require 'subr-x)
 
@@ -28,13 +29,27 @@
   :type 'number
   :group 'english-reading-mode)
 
-(defcustom english-reading-mode-macos-continuous-gap 0.05
-  "Seconds to wait between continuous macOS speech utterances.
+(defcustom english-reading-mode-pdf-highlight-delay 0.5
+  "Seconds to wait after PDF scrolling before drawing the speech highlight.
 
-macOS speech is rendered to an AIFF file and the next sentence is prefetched,
-so only a small `afplay' handoff margin is needed.  This applies only when the
-speech buffer uses the `macos' backend; Kokoro keeps its zero-gap behavior."
+The short delay lets PDF Tools or DocView finish redisplaying the new scroll
+position.  Speech playback is started independently and is never made to wait
+for the PDF image and SVG highlight rendering path."
   :type 'number
+  :group 'english-reading-mode)
+
+(defcustom english-reading-mode-macos-continuous-sentence-count 6
+  "Maximum number of sentences in one continuous macOS speech utterance.
+
+Larger chunks make `/usr/bin/say' take longer before the first playback, but
+avoid a synthesis/player handoff between every sentence.  One-shot commands
+such as `english-reading-mode-speak-current-sentence' still speak one sentence."
+  :type '(integer :tag "Sentences" 1)
+  :group 'english-reading-mode)
+
+(defcustom english-reading-mode-macos-prefetch-chunk-count 2
+  "Number of future macOS speech chunks prepared during continuous reading."
+  :type '(integer :tag "Chunks" 1)
   :group 'english-reading-mode)
 
 (defvar english-reading-mode-pdf-text-buffer-hook nil
@@ -58,6 +73,9 @@ This also runs on synthesis failure or explicit stop.")
 
 (defvar english-reading-mode--speech-sequence 0)
 (defvar english-reading-mode--active-speech nil)
+(defvar english-reading-mode--pdf-highlight-timer nil)
+(defvar english-reading-mode--pdf-highlight-pending-context nil)
+(defvar english-reading-mode--pdf-highlight-pending-scroll-state nil)
 (defvar english-reading-mode nil)
 
 (defvar-local english-reading-mode--saved-sentence-end-double-space nil)
@@ -248,6 +266,12 @@ breaks are deliberately excluded so page ranges remain intact."
         (skip-chars-forward " \t\n\r")
         (point)))))
 
+(defun english-reading-mode--pdf-continuous-source-p ()
+  "Return non-nil when continuous narration owns the current PDF buffer."
+  (and (bound-and-true-p english-reading-mode--continuous-state)
+       (eq (plist-get english-reading-mode--continuous-state :buffer)
+           (current-buffer))))
+
 (defun english-reading-mode--pdf-sync ()
   "Ensure PDF text exists and synchronize it with the displayed page."
   (unless (buffer-live-p english-reading-mode--pdf-text-buffer)
@@ -256,8 +280,16 @@ breaks are deliberately excluded so page ranges remain intact."
          (page (min (english-reading-mode--pdf-current-page) count)))
     (when (zerop count)
       (user-error "This PDF has no extractable text"))
-    (unless (and english-reading-mode--pdf-page
-                 (= page english-reading-mode--pdf-page))
+    ;; In PDF roll mode the topmost visible page can remain N while speech has
+    ;; already advanced into page N+1.  Treating that visual page as the text
+    ;; cursor would reset the virtual position and repeat the boundary chunk.
+    ;; Manual PDF movement clears continuous state in `pre-command-hook', so
+    ;; the displayed page remains authoritative outside continuous narration.
+    (unless (or (and (english-reading-mode--pdf-continuous-source-p)
+                     english-reading-mode--pdf-page
+                     english-reading-mode--pdf-text-point)
+                (and english-reading-mode--pdf-page
+                     (= page english-reading-mode--pdf-page)))
       (setq english-reading-mode--pdf-page page
             english-reading-mode--pdf-text-point
             (english-reading-mode--pdf-page-start page)))
@@ -429,12 +461,17 @@ This currently exposes the text layer used behind a DocView PDF."
   (let ((count (english-reading-mode--pdf-page-count)))
     (unless (<= 1 page count)
       (user-error "No more PDF pages"))
-    (cond
-     ((and (eq major-mode 'pdf-view-mode)
-           (fboundp 'pdf-view-goto-page))
-      (pdf-view-goto-page page))
-     ((fboundp 'doc-view-goto-page)
-      (doc-view-goto-page page)))
+    ;; In a PDF roll, continuous narration advances the visible document by a
+    ;; relative pixel distance in the centering step.  An absolute goto here
+    ;; would snap back to a page boundary before every cross-page utterance.
+    (unless (and (english-reading-mode--pdf-continuous-source-p)
+                 (bound-and-true-p pdf-view-roll-minor-mode))
+      (cond
+       ((and (eq major-mode 'pdf-view-mode)
+             (fboundp 'pdf-view-goto-page))
+        (pdf-view-goto-page page))
+       ((fboundp 'doc-view-goto-page)
+        (doc-view-goto-page page))))
     (setq english-reading-mode--pdf-page page
           english-reading-mode--pdf-text-point
           (english-reading-mode--pdf-page-start page))))
@@ -453,9 +490,14 @@ This currently exposes the text layer used behind a DocView PDF."
   (let* ((location (english-reading-mode--pdf-next-location))
          (text-buffer (nth 1 location))
          (beg (nth 2 location))
-         (end (nth 3 location)))
+         (end (nth 3 location))
+         (page-end (cdr (english-reading-mode--pdf-page-range
+                         english-reading-mode--pdf-page))))
     (with-current-buffer text-buffer
-      (kokoro-reader--speak-bounds beg end))))
+      (pcase-let ((`(,chunk-beg . ,chunk-end)
+                   (english-reading-mode--macos-continuous-bounds
+                    beg end page-end)))
+        (kokoro-reader--speak-bounds chunk-beg chunk-end)))))
 
 (defun english-reading-mode--pdf-next-sentence ()
   "Move the PDF virtual cursor to the next sentence without reading it."
@@ -663,6 +705,54 @@ one positioned word."
       (push current rectangles))
     (nreverse rectangles)))
 
+(defun english-reading-mode--pdf-compact-anchor-ranges
+    (text words &optional from-end)
+  "Return bbox ranges matching a compact boundary anchor from TEXT.
+
+Use the beginning of TEXT unless FROM-END is non-nil.  The anchor shrinks when
+PDF flow ordering inserts a heading or sidebar next to the boundary; this is
+more tolerant than requiring a whole multi-sentence speech chunk to occur as
+one contiguous bbox string."
+  (let* ((compact (english-reading-mode--pdf-compact-text text))
+         (maximum (min 24 (length compact)))
+         (minimum (min 6 maximum))
+         ranges)
+    (cl-loop for length downfrom maximum to minimum
+             until ranges
+             do (setq ranges
+                      (english-reading-mode--pdf-compact-match-ranges
+                       (if from-end
+                           (substring compact (- length))
+                         (substring compact 0 length))
+                       words)))
+    ranges))
+
+(defun english-reading-mode--pdf-anchored-match-range
+    (context words page-range)
+  "Return a bbox range spanning speech CONTEXT's boundary anchors.
+
+This is a fallback for PDFs whose plain-text and bbox extractors put an
+intermediate heading or sidebar in a different order."
+  (let* ((text (plist-get context :text))
+         (start-ranges
+          (english-reading-mode--pdf-compact-anchor-ranges text words))
+         (end-ranges
+          (english-reading-mode--pdf-compact-anchor-ranges text words t))
+         (start
+          (and start-ranges
+               (english-reading-mode--pdf-nearest-match
+                (mapcar #'car start-ranges) (length words)
+                (plist-get context :beg) page-range)))
+         (end-start
+          (and end-ranges
+               (english-reading-mode--pdf-nearest-match
+                (mapcar #'car end-ranges) (length words)
+                (plist-get context :end) page-range)))
+         (end-count (and end-start (cdr (assq end-start end-ranges))))
+         (end (and end-start end-count (+ end-start end-count))))
+    (when (and start end (> end start))
+      (cons start (- end start)))))
+
 (defun english-reading-mode--pdf-context-rectangles (context)
   "Return PDF-space highlight rectangles for speech CONTEXT."
   (let* ((page english-reading-mode--pdf-page)
@@ -681,11 +771,14 @@ one positioned word."
                      (english-reading-mode--pdf-nearest-match
                       (mapcar #'car candidates) (length words)
                       (plist-get context :beg) page-range)))
-         (count (and start (cdr (assq start candidates)))))
-    (when start
+         (count (and start (cdr (assq start candidates))))
+         (range (or (and start count (cons start count))
+                    (english-reading-mode--pdf-anchored-match-range
+                     context words page-range))))
+    (when range
       (list geometry
             (english-reading-mode--pdf-word-rectangles
-             words start count)))))
+             words (car range) (cdr range))))))
 
 (defun english-reading-mode--pdf-image-data-uri (image)
   "Return PDF page IMAGE as a cached data URI.
@@ -825,8 +918,67 @@ the same image that is actually displayed."
            (message "PDF sentence highlight unavailable: %s"
                     (error-message-string err))))))))
 
+(defun english-reading-mode--cancel-pdf-highlight (&optional context)
+  "Cancel a pending PDF highlight for CONTEXT.
+
+When CONTEXT is nil, cancel any pending highlight.  A context check prevents a
+late finish notification for an older utterance from cancelling the new one."
+  (when (or (null context)
+            (eq context english-reading-mode--pdf-highlight-pending-context))
+    (when (timerp english-reading-mode--pdf-highlight-timer)
+      (cancel-timer english-reading-mode--pdf-highlight-timer))
+    (setq english-reading-mode--pdf-highlight-timer nil
+          english-reading-mode--pdf-highlight-pending-context nil
+          english-reading-mode--pdf-highlight-pending-scroll-state nil)))
+
+(defun english-reading-mode--pdf-highlight-scroll-state (context)
+  "Return the visible scroll state associated with speech CONTEXT."
+  (let ((window (plist-get context :window)))
+    (when (window-live-p window)
+      (list (window-start window)
+            (window-vscroll window t)
+            (with-current-buffer (window-buffer window)
+              (and (eq major-mode 'pdf-view-mode)
+                   (fboundp 'pdf-view-current-page)
+                   (pdf-view-current-page window)))))))
+
+(defun english-reading-mode--run-deferred-pdf-highlight (context)
+  "Draw CONTEXT's PDF highlight if it is still the active utterance."
+  (when (eq context english-reading-mode--pdf-highlight-pending-context)
+    (setq english-reading-mode--pdf-highlight-timer nil)
+    (if (not (eq context english-reading-mode--active-speech))
+        (english-reading-mode--cancel-pdf-highlight context)
+      (let ((scroll-state
+             (english-reading-mode--pdf-highlight-scroll-state context)))
+        (if (equal scroll-state
+                   english-reading-mode--pdf-highlight-pending-scroll-state)
+            (progn
+              (setq english-reading-mode--pdf-highlight-pending-context nil
+                    english-reading-mode--pdf-highlight-pending-scroll-state nil)
+              (english-reading-mode--pdf-highlight-start context))
+          ;; PDF roll redisplay is still changing the page position.  Restart
+          ;; the full delay from the latest state instead of drawing midway.
+          (setq english-reading-mode--pdf-highlight-pending-scroll-state
+                scroll-state
+                english-reading-mode--pdf-highlight-timer
+                (run-at-time english-reading-mode-pdf-highlight-delay nil
+                             #'english-reading-mode--run-deferred-pdf-highlight
+                             context)))))))
+
+(defun english-reading-mode--schedule-pdf-highlight (context)
+  "Schedule CONTEXT's PDF highlight after PDF redisplay has settled."
+  (english-reading-mode--cancel-pdf-highlight)
+  (setq english-reading-mode--pdf-highlight-pending-context context
+        english-reading-mode--pdf-highlight-pending-scroll-state
+        (english-reading-mode--pdf-highlight-scroll-state context)
+        english-reading-mode--pdf-highlight-timer
+        (run-at-time english-reading-mode-pdf-highlight-delay nil
+                     #'english-reading-mode--run-deferred-pdf-highlight
+                     context)))
+
 (defun english-reading-mode--pdf-highlight-finish (context)
   "Remove the PDF highlight associated with speech CONTEXT."
+  (english-reading-mode--cancel-pdf-highlight context)
   (let ((window (plist-get context :window)))
     (when (window-live-p window)
       (english-reading-mode--pdf-restore-image
@@ -873,8 +1025,28 @@ relative source-text position so zoom correction never keeps a stale scroll."
                  (y (* ratio (plist-get geometry :height))))
             (list geometry (list 0.0 y 0.0 y)))))))
 
+(defun english-reading-mode--pdf-roll-forward-distance
+    (from-page from-pixel to-page to-pixel window)
+  "Return forward roll pixels from FROM-PAGE/FROM-PIXEL to TO-PAGE/TO-PIXEL."
+  (cond
+   ((and (= from-page to-page) (>= to-pixel from-pixel))
+    (- to-pixel from-pixel))
+   ((> to-page from-page)
+    (let* ((margin (if (boundp 'pdf-roll-vertical-margin)
+                       pdf-roll-vertical-margin
+                     0))
+           (distance
+            (+ (- (pdf-roll-display-page from-page window) from-pixel)
+               margin
+               to-pixel)))
+      (cl-loop for page from (1+ from-page) below to-page
+               do (cl-incf distance
+                            (+ (pdf-roll-display-page page window) margin)))
+      distance))
+   (t 0)))
+
 (defun english-reading-mode--pdf-center-continuous-speech (context)
-  "Center PDF speech CONTEXT vertically while continuous reading is active."
+  "Center PDF speech CONTEXT while preserving continuous-page scrolling."
   (let* ((window (plist-get context :window))
          (pdf-buffer (and (window-live-p window) (window-buffer window))))
     (when (and (buffer-live-p pdf-buffer)
@@ -891,24 +1063,81 @@ relative source-text position so zoom correction never keeps a stale scroll."
                 (with-selected-window window
                   (let* ((geometry (car position))
                          (rectangle (cadr position))
-                         (full-image-height
-                          (cdr (pdf-view-image-size nil window)))
-                         (displayed-image-height
-                          (cdr (pdf-view-image-size t window)))
-                         (image-top-offset
-                          (cdr (pdf-view-image-offset window)))
                          (inside (window-inside-pixel-edges window))
                          (viewport-height (- (nth 3 inside) (nth 1 inside))))
                     (when (and rectangle
                                (> (plist-get geometry :height) 0)
-                               (> full-image-height 0)
-                               (> displayed-image-height 0)
                                (> viewport-height 0))
-                      (image-set-window-vscroll
-                       (english-reading-mode--pdf-continuous-vscroll
-                        rectangle (plist-get geometry :height)
-                        full-image-height displayed-image-height
-                        viewport-height image-top-offset))))))
+                      (if (and (bound-and-true-p pdf-view-roll-minor-mode)
+                               (fboundp 'pdf-roll-goto-page)
+                               (fboundp 'pdf-roll-display-page)
+                               (fboundp 'pdf-roll-scroll-forward)
+                               (fboundp 'pdf-roll-scroll-backward))
+                          ;; Keep a document-relative speech anchor.  After the
+                          ;; first utterance, move only by the forward distance
+                          ;; between successive sentence positions; repeatedly
+                          ;; calling `pdf-roll-goto-page' makes the visible pages
+                          ;; jump backward even though speech itself advances.
+                          (let* ((page english-reading-mode--pdf-page)
+                                 (page-height
+                                  (pdf-roll-display-page page window))
+                                 (spoken-y
+                                  (/ (+ (nth 1 rectangle) (nth 3 rectangle))
+                                     2.0))
+                                 (spoken-pixel
+                                  (round (* (/ spoken-y
+                                               (plist-get geometry :height))
+                                            page-height)))
+                                 (previous-page
+                                  (plist-get
+                                   english-reading-mode--continuous-state
+                                   :pdf-roll-page))
+                                 (previous-pixel
+                                  (plist-get
+                                   english-reading-mode--continuous-state
+                                   :pdf-roll-pixel)))
+                            (if (and (integerp previous-page)
+                                     (numberp previous-pixel))
+                                (let ((distance
+                                       (english-reading-mode--pdf-roll-forward-distance
+                                        previous-page previous-pixel
+                                        page spoken-pixel window)))
+                                  (when (> distance 0)
+                                    (pdf-roll-scroll-forward distance window t)))
+                              ;; Only the first utterance establishes an
+                              ;; absolute visual anchor.  Later chunks never do.
+                              (pdf-roll-goto-page page window)
+                              (let ((delta
+                                     (round (- spoken-pixel
+                                               (/ viewport-height 2.0)))))
+                                (if (>= delta 0)
+                                    (pdf-roll-scroll-forward delta window t)
+                                  (pdf-roll-scroll-backward
+                                   (- delta) window t))))
+                            (when (or (not (and (integerp previous-page)
+                                                (numberp previous-pixel)))
+                                      (> page previous-page)
+                                      (and (= page previous-page)
+                                           (>= spoken-pixel previous-pixel)))
+                              (setq english-reading-mode--continuous-state
+                                    (plist-put
+                                     (plist-put
+                                      english-reading-mode--continuous-state
+                                      :pdf-roll-page page)
+                                     :pdf-roll-pixel spoken-pixel))))
+                        (let ((full-image-height
+                               (cdr (pdf-view-image-size nil window)))
+                              (displayed-image-height
+                               (cdr (pdf-view-image-size t window)))
+                              (image-top-offset
+                               (cdr (pdf-view-image-offset window))))
+                          (when (and (> full-image-height 0)
+                                     (> displayed-image-height 0))
+                            (image-set-window-vscroll
+                             (english-reading-mode--pdf-continuous-vscroll
+                              rectangle (plist-get geometry :height)
+                              full-image-height displayed-image-height
+                              viewport-height image-top-offset)))))))))
             (error
              (message "PDF speech centering unavailable: %s"
                       (error-message-string err)))))))))
@@ -927,17 +1156,21 @@ relative source-text position so zoom correction never keeps a stale scroll."
   (when (and (memq this-command english-reading-mode--pdf-zoom-commands)
              english-reading-mode--continuous-state
              english-reading-mode--active-speech)
-    ;; pdf-tools has just rendered the normal page at the new zoom.  Rebuild
-    ;; the foreground speech layer at that exact size before centering it.
-    (english-reading-mode--pdf-highlight-start
-     english-reading-mode--active-speech)
+    ;; pdf-tools has just rendered the page at the new zoom.  Recenter first,
+    ;; then rebuild the foreground highlight after redisplay settles.
+    (setq english-reading-mode--continuous-state
+          (plist-put
+           (plist-put english-reading-mode--continuous-state
+                      :pdf-roll-page nil)
+           :pdf-roll-pixel nil))
     (english-reading-mode--pdf-center-continuous-speech
+     english-reading-mode--active-speech)
+    (english-reading-mode--schedule-pdf-highlight
      english-reading-mode--active-speech)))
 
-;; PDF visuals are prepared by the speech advice before a prefetched macOS
-;; player can start.  Remove the former start-hook registrations as well so a
-;; live `load-file' upgrades an already running reader without doing the slow
-;; work a second time after playback begins.
+;; PDF visuals are managed by the speech advice.  Remove former start-hook
+;; registrations as well so a live `load-file' upgrades an already running
+;; reader without doing the work twice.
 (remove-hook 'english-reading-mode-speech-start-hook
              #'english-reading-mode--pdf-highlight-start)
 (remove-hook 'english-reading-mode-speech-start-hook
@@ -949,6 +1182,67 @@ relative source-text position so zoom correction never keeps a stale scroll."
   "Return the sentence at point, or signal a user error."
   (or (bounds-of-thing-at-point 'sentence)
       (user-error "Place point in an English sentence")))
+
+(defun english-reading-mode--continuous-speech-buffer-owned-p (speech-buffer)
+  "Return non-nil when SPEECH-BUFFER belongs to the continuous source."
+  (let ((source-buffer
+         (plist-get english-reading-mode--continuous-state :buffer)))
+    (and (buffer-live-p source-buffer)
+         (or (eq speech-buffer source-buffer)
+             (with-current-buffer source-buffer
+               (and (english-reading-mode--pdf-buffer-p)
+                    (buffer-live-p english-reading-mode--pdf-text-buffer)
+                    (eq speech-buffer
+                        english-reading-mode--pdf-text-buffer)))))))
+
+(defun english-reading-mode--continuous-speech-page-range
+    (speech-buffer position)
+  "Return the PDF page range containing POSITION in SPEECH-BUFFER, or nil."
+  (let ((source-buffer
+         (plist-get english-reading-mode--continuous-state :buffer)))
+    (when (and (buffer-live-p source-buffer)
+               (with-current-buffer source-buffer
+                 (and (english-reading-mode--pdf-buffer-p)
+                      (eq speech-buffer english-reading-mode--pdf-text-buffer))))
+      (with-current-buffer source-buffer
+        (cl-loop for range across english-reading-mode--pdf-page-ranges
+                 when (and (<= (car range) position)
+                           (<= position (cdr range)))
+                 return range)))))
+
+(defun english-reading-mode--continuous-speech-page-end
+    (speech-buffer position)
+  "Return the PDF page end containing POSITION in SPEECH-BUFFER, or nil."
+  (cdr (english-reading-mode--continuous-speech-page-range
+        speech-buffer position)))
+
+(defun english-reading-mode--macos-continuous-bounds (beg end &optional limit)
+  "Extend BEG..END to a continuous macOS speech chunk.
+
+At most `english-reading-mode-macos-continuous-sentence-count' sentences are
+included.  LIMIT, when non-nil, prevents a PDF chunk from crossing its page."
+  (if (or (not (english-reading-mode--continuous-speech-buffer-owned-p
+                (current-buffer)))
+          (not (eq kokoro-reader-backend 'macos))
+          (<= english-reading-mode-macos-continuous-sentence-count 1))
+      (cons beg end)
+    (save-excursion
+      (let ((chunk-end end)
+            (remaining (1- english-reading-mode-macos-continuous-sentence-count))
+            (boundary (or limit (point-max))))
+        (goto-char (min end boundary))
+        (while (and (> remaining 0) (< (point) boundary))
+          (skip-chars-forward " \t\n\r" boundary)
+          (if-let ((bounds (and (< (point) boundary)
+                               (bounds-of-thing-at-point 'sentence))))
+              (let ((next-end (min (cdr bounds) boundary)))
+                (if (> next-end chunk-end)
+                    (setq chunk-end next-end
+                          remaining (1- remaining))
+                  (setq remaining 0))
+                (goto-char next-end))
+            (setq remaining 0)))
+        (cons beg chunk-end)))))
 
 (defun english-reading-mode--make-context (beg end)
   "Create a speech context for BEG..END in the current buffer."
@@ -1035,6 +1329,12 @@ relative source-text position so zoom correction never keeps a stale scroll."
 (defvar-local english-reading-mode-continuous-next-function nil
   "Optional source-specific function that advances and speaks the next sentence.")
 
+(defvar-local english-reading-mode-continuous-prefetch-text-function nil
+  "Optional function returning future page text chunks for speech prefetch.
+
+The function receives the active speech CONTEXT and a maximum COUNT.  It is
+used after readable chunks in the current speech buffer have been exhausted.")
+
 (defun english-reading-mode--finish (context)
   "Finish CONTEXT once and notify listeners."
   (when (eq context english-reading-mode--active-speech)
@@ -1103,17 +1403,7 @@ period proves that synthesis failed before playback started."
   "Track Kokoro ORIGINAL-FUNCTION for BEG..END when this mode is active."
   (if (not english-reading-mode)
       (apply original-function beg end arguments)
-    (let* ((context (english-reading-mode--make-context beg end))
-           ;; A prefetched macOS utterance starts playing inside
-           ;; ORIGINAL-FUNCTION.  Building the PDF SVG afterwards can therefore
-           ;; leave a short sentence unhighlighted for most of its playback.
-           ;; Prepare the visible PDF first whenever no older utterance still
-           ;; owns the lifecycle.  The active-speech case retains the old order
-           ;; so stopping that utterance cannot restore over the new layer.
-           (prepare-pdf-first (null english-reading-mode--active-speech)))
-      (when prepare-pdf-first
-        (english-reading-mode--pdf-center-continuous-speech context)
-        (english-reading-mode--pdf-highlight-start context))
+    (let ((context (english-reading-mode--make-context beg end)))
       ;; ORIGINAL-FUNCTION creates Kokoro's request process.  Only after that
       ;; succeeds do we publish the new speech context.  `j' moves point after
       ;; this wrapper returns, so listeners lock to the old/current sentence
@@ -1121,20 +1411,19 @@ period proves that synthesis failed before playback started."
       (condition-case err
           (prog1
               (apply original-function beg end arguments)
-            (unless prepare-pdf-first
-              (english-reading-mode--pdf-center-continuous-speech context)
-              (english-reading-mode--pdf-highlight-start context))
+            ;; Playback, scrolling and highlight rendering are deliberately
+            ;; separate.  In particular, SVG generation must not delay audio.
+            (english-reading-mode--pdf-center-continuous-speech context)
             (setq english-reading-mode--active-speech context
                   english-reading-mode--speech-start-time (current-time)
                   english-reading-mode--speech-player-seen-p nil)
+            (english-reading-mode--schedule-pdf-highlight context)
             (run-hook-with-args 'english-reading-mode-speech-start-hook context)
             ;; Do not infer completion from a request sentinel: Kokoro switches
             ;; from curl -> afplay at that boundary.  Poll the actual request/player
             ;; process variables and finish only when BOTH are no longer alive.
             (english-reading-mode--start-watch context))
         (error
-         (when prepare-pdf-first
-           (english-reading-mode--pdf-highlight-finish context))
          (signal (car err) (cdr err)))))))
 
 (defun english-reading-mode--after-kokoro-stop (&rest _)
@@ -1202,6 +1491,37 @@ state and timer prevents its completion hook from moving the PDF again."
       (english-reading-mode-speak-current-sentence))
      (t (user-error "Reached the end of the document"))))))
 
+(defun english-reading-mode--continuous-resume-next-chunk ()
+  "Speak the chunk following the last completed continuous utterance.
+
+Return non-nil when speech was started.  Source-specific continuation remains
+responsible for page/chapter boundaries when no sentence follows locally."
+  (let* ((state english-reading-mode--continuous-state)
+         (source-buffer (plist-get state :buffer))
+         (speech-buffer (plist-get state :next-speech-buffer))
+         (next-position (plist-get state :next-speech-position)))
+    (when (and (buffer-live-p source-buffer)
+               (buffer-live-p speech-buffer)
+               (integer-or-marker-p next-position))
+      (setq english-reading-mode--continuous-state
+            (plist-put
+             (plist-put state :next-speech-buffer nil)
+             :next-speech-position nil))
+      (cond
+       ((eq source-buffer speech-buffer)
+        (goto-char (min next-position (point-max)))
+        (skip-chars-forward " \t\n\r")
+        (when (bounds-of-thing-at-point 'sentence)
+          (english-reading-mode-speak-current-sentence)
+          t))
+       ((and (english-reading-mode--pdf-buffer-p source-buffer)
+             (with-current-buffer source-buffer
+               (eq speech-buffer english-reading-mode--pdf-text-buffer)))
+        (with-current-buffer source-buffer
+          (setq english-reading-mode--pdf-text-point next-position)
+          (english-reading-mode-speak-current-sentence))
+        t)))))
+
 (defun english-reading-mode--continuous-next ()
   "Advance and speak once for the active continuous-reading source."
   (setq english-reading-mode--continuous-timer nil)
@@ -1214,9 +1534,10 @@ state and timer prevents its completion hook from moving the PDF again."
           (with-selected-frame frame
             (with-selected-window window
               (with-current-buffer buffer
-                (if (functionp english-reading-mode-continuous-next-function)
-                    (funcall english-reading-mode-continuous-next-function)
-                  (english-reading-mode--continuous-default-next)))))
+                (unless (english-reading-mode--continuous-resume-next-chunk)
+                  (if (functionp english-reading-mode-continuous-next-function)
+                      (funcall english-reading-mode-continuous-next-function)
+                    (english-reading-mode--continuous-default-next))))))
         (error
          (english-reading-mode-stop-continuous t)
          (message "Continuous reading finished: %s" (error-message-string err)))))))
@@ -1227,75 +1548,139 @@ state and timer prevents its completion hook from moving the PDF again."
 Normal text speaks directly from the displayed buffer.  A DocView PDF speaks
 from its hidden `pdftotext' helper, so that helper must be treated as speech
 originating from the displayed PDF buffer."
-  (let ((speech-buffer (plist-get context :buffer))
-        (source-buffer
-         (plist-get english-reading-mode--continuous-state :buffer)))
-    (and (buffer-live-p source-buffer)
-         (or (eq speech-buffer source-buffer)
-             (with-current-buffer source-buffer
-               (and (english-reading-mode--pdf-buffer-p)
-                    (buffer-live-p english-reading-mode--pdf-text-buffer)
-                    (eq speech-buffer
-                        english-reading-mode--pdf-text-buffer)))))))
+  (english-reading-mode--continuous-speech-buffer-owned-p
+   (plist-get context :buffer)))
 
-(defun english-reading-mode--next-speech-text (context)
-  "Return the readable sentence following CONTEXT without moving point."
-  (let ((buffer (plist-get context :buffer))
-        (end (plist-get context :end))
-        text)
-    (when (and (buffer-live-p buffer) (integer-or-marker-p end))
+(defun english-reading-mode--speech-texts-after-position
+    (buffer position count)
+  "Return up to COUNT macOS speech chunks in BUFFER after POSITION.
+
+PDF form-feed boundaries are crossed while each individual chunk remains
+limited to one page so its cache key matches normal playback."
+  (let (texts)
+    (when (and (buffer-live-p buffer)
+               (integer-or-marker-p position)
+               (> count 0))
       (with-current-buffer buffer
         (save-excursion
-          (goto-char (min end (point-max)))
-          (skip-chars-forward " \t\n\r")
-          (while (and (not text) (< (point) (point-max)))
-            (if-let ((bounds (bounds-of-thing-at-point 'sentence)))
-                (let* ((beg (car bounds))
-                       (finish (cdr bounds))
-                       (candidate (kokoro-reader--text beg finish)))
-                  (if (string-match-p "[[:alpha:]].*[[:alpha:]]" candidate)
-                      (setq text candidate)
-                    (goto-char (min (1+ finish) (point-max)))
-                    (skip-chars-forward " \t\n\r")))
-              (goto-char (point-max)))))))
-    text))
+          (goto-char (min position (point-max)))
+          (while (and (< (length texts) count) (< (point) (point-max)))
+            (skip-chars-forward " \t\n\r\f")
+            (let* ((scan-position (point))
+                   (page-range
+                    (english-reading-mode--continuous-speech-page-range
+                     buffer scan-position))
+                   bounds beg finish chunk candidate)
+              ;; Narrow exactly like normal PDF playback.  Without this, Emacs
+              ;; can treat a page number before a form feed as part of the next
+              ;; page's first sentence, producing a prefetch cache-key mismatch.
+              (save-restriction
+                (when page-range
+                  (narrow-to-region (car page-range) (cdr page-range)))
+                (goto-char (min (max scan-position (point-min)) (point-max)))
+                (skip-chars-forward " \t\n\r")
+                (setq bounds (and (< (point) (point-max))
+                                  (bounds-of-thing-at-point 'sentence)))
+                (if (not bounds)
+                    (goto-char (point-max))
+                  (goto-char (car bounds))
+                  (skip-chars-forward " \t\n\r" (cdr bounds))
+                  (setq beg (point))
+                  (goto-char (cdr bounds))
+                  (skip-chars-backward " \t\n\r" beg)
+                  (setq finish (point)
+                        chunk
+                        (english-reading-mode--macos-continuous-bounds
+                         beg finish (cdr page-range))
+                        candidate
+                        (kokoro-reader--text (car chunk) (cdr chunk)))
+                  ;; `pdftotext' often emits the printed page number directly
+                  ;; before the first sentence.  Normal PDF navigation skips
+                  ;; that label, so remove it from lookahead as well or the
+                  ;; synthesized cache key will differ at the page boundary.
+                  (when (and page-range
+                             (= beg
+                                (save-excursion
+                                  (goto-char (car page-range))
+                                  (skip-chars-forward " \t\n\r")
+                                  (point))))
+                    (setq candidate
+                          (replace-regexp-in-string
+                           "\\`[[:digit:]０-９]+[.．]?[ \t\n\r]+"
+                           "" candidate)))
+                  (goto-char (cdr chunk))
+                  (if (string-match-p
+                       "[[:alpha:]].*[[:alpha:]]" candidate)
+                      (push candidate texts)
+                    (goto-char (min (1+ finish) (point-max)))))))))))
+    (nreverse texts)))
+
+(defun english-reading-mode--next-speech-texts (context &optional count)
+  "Return ordered macOS speech chunks following CONTEXT.
+
+Use the current speech buffer first, crossing PDF pages when present.  A
+source-specific provider may then contribute cached future pages, as Kindle
+does without changing the displayed page."
+  (let ((buffer (plist-get context :buffer))
+        (end (plist-get context :end))
+        (maximum (or count english-reading-mode-macos-prefetch-chunk-count))
+        texts)
+    (setq texts
+          (english-reading-mode--speech-texts-after-position
+           buffer end maximum))
+    (let* ((source-buffer
+            (plist-get english-reading-mode--continuous-state :buffer))
+           (remaining (- maximum (length texts)))
+           (more
+            (when (and (> remaining 0) (buffer-live-p source-buffer))
+              (with-current-buffer source-buffer
+                (when (functionp
+                       english-reading-mode-continuous-prefetch-text-function)
+                  (funcall
+                   english-reading-mode-continuous-prefetch-text-function
+                   context remaining))))))
+      (append texts (seq-take more remaining)))))
+
+(defun english-reading-mode--next-speech-text (context)
+  "Return the first macOS speech chunk following CONTEXT."
+  (car (english-reading-mode--next-speech-texts context 1)))
 
 (defun english-reading-mode--prefetch-next-macos-sentence (context)
-  "Render the sentence following CONTEXT while the current one is active."
+  "Render future speech chunks following CONTEXT while the current one plays."
   (let ((speech-buffer (plist-get context :buffer)))
     (when (and english-reading-mode--continuous-state
                (english-reading-mode--continuous-context-owned-p context)
                (buffer-live-p speech-buffer))
       (with-current-buffer speech-buffer
         (when (and (eq kokoro-reader-backend 'macos)
-                   (fboundp 'kokoro-reader-prefetch-macos-text))
-          (when-let ((text (english-reading-mode--next-speech-text context)))
-            (kokoro-reader-prefetch-macos-text text)))))))
+                   (fboundp 'kokoro-reader-prefetch-macos-texts))
+          (kokoro-reader-prefetch-macos-texts
+           (english-reading-mode--next-speech-texts context)))))))
 
 (add-hook 'english-reading-mode-speech-start-hook
           #'english-reading-mode--prefetch-next-macos-sentence)
 
 (defun english-reading-mode--continuous-speech-finished (context)
-  "Continue after the sentence represented by CONTEXT has finished."
+  "Continue immediately after the speech chunk represented by CONTEXT."
   (when (and english-reading-mode--continuous-state
              (english-reading-mode--continuous-context-owned-p context))
     (when (timerp english-reading-mode--continuous-timer)
       (cancel-timer english-reading-mode--continuous-timer))
-    (let* ((speech-buffer (plist-get context :buffer))
-           (gap
-            (if (and (buffer-live-p speech-buffer)
-                     (with-current-buffer speech-buffer
-                       (eq kokoro-reader-backend 'macos)))
-                (max 0 english-reading-mode-macos-continuous-gap)
-              0)))
-      (setq english-reading-mode--continuous-timer
-            (run-at-time gap nil #'english-reading-mode--continuous-next)))))
+    (setq english-reading-mode--continuous-state
+          (plist-put
+           (plist-put english-reading-mode--continuous-state
+                      :next-speech-buffer (plist-get context :buffer))
+           :next-speech-position (plist-get context :end)))
+    ;; A zero-delay timer leaves the process sentinel before starting the next
+    ;; chunk, without inserting an intentional silent interval.
+    (setq english-reading-mode--continuous-timer
+          (run-at-time 0 nil #'english-reading-mode--continuous-next))))
 
 (add-hook 'english-reading-mode-speech-finish-hook
           #'english-reading-mode--continuous-speech-finished)
 
 (defun english-reading-mode-continuous-read ()
-  "Read continuously, synthesizing and playing exactly one sentence at a time.
+  "Read continuously in speech chunks.
 Press `s' again to stop."
   (interactive)
   (if english-reading-mode--continuous-state
@@ -1303,6 +1688,10 @@ Press `s' again to stop."
     ;; Stop any unrelated one-shot utterance while STATE is still nil, so its
     ;; completion cannot schedule a spurious first advance.
     (kokoro-reader-stop)
+    ;; Capture the manually displayed PDF page before continuous roll mode can
+    ;; leave the previous page at the top during a boundary scroll.
+    (when (english-reading-mode--pdf-buffer-p)
+      (english-reading-mode--pdf-sync))
     (setq english-reading-mode--continuous-state
           (list :buffer (current-buffer)
                 :window (selected-window)
@@ -1330,7 +1719,9 @@ Press `s' again to stop."
 (defun english-reading-mode--speak-at-point ()
   "Speak the sentence at point with Kokoro."
   (pcase-let ((`(,beg . ,end) (english-reading-mode--sentence-bounds)))
-    (kokoro-reader--speak-bounds beg end)))
+    (pcase-let ((`(,chunk-beg . ,chunk-end)
+                 (english-reading-mode--macos-continuous-bounds beg end)))
+      (kokoro-reader--speak-bounds chunk-beg chunk-end))))
 
 (defun english-reading-mode-speak-current-sentence ()
   "Read the current sentence without moving the text cursor."
@@ -1457,13 +1848,13 @@ leave point at the current sentence and report that there is nowhere to go."
 
 ;;;###autoload
 (define-minor-mode english-reading-mode
-  "Read English text or a DocView PDF one sentence at a time with Kokoro.
+  "Read English text or a DocView PDF with Kokoro or macOS speech.
 
 `j' and `k' move to the next and previous sentences, `SPC' reads the sentence
-at point, and `s' reads continuously one sentence at a time.  `i' is reserved
-for Org-noter.  The buffer is
-read-only while this mode is active.  Speech lifecycle
-is exposed through `english-reading-mode-speech-start-hook' and
+at point, and `s' reads continuously.  The macOS backend groups continuous
+speech into short multi-sentence chunks.  `i' is reserved for Org-noter.  The
+buffer is read-only while this mode is active.  Speech lifecycle is exposed
+through `english-reading-mode-speech-start-hook' and
 `english-reading-mode-speech-finish-hook'."
   :lighter " EnglishRead"
   :keymap english-reading-mode-map

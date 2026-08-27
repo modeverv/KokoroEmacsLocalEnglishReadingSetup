@@ -45,6 +45,15 @@
   :type 'number
   :group 'my-read-eww-math)
 
+(defcustom my/read-eww-math-max-processes 4
+  "Maximum number of formulas converted concurrently per EWW buffer.
+
+Each formula uses a LaTeX process followed by a dvisvgm process.  Keeping this
+small avoids making Emacs and the rest of the machine unresponsive on papers
+with hundreds of formulas."
+  :type '(integer :tag "Concurrent formulas")
+  :group 'my-read-eww-math)
+
 (defcustom my/read-eww-math-max-tex-length 4000
   "Maximum accepted length of one TeX annotation."
   :type 'integer
@@ -117,7 +126,7 @@ clipped at any edge."
   "TeX commands that are never accepted from webpage annotations.")
 
 (defvar-local my/read-eww-math--queue nil)
-(defvar-local my/read-eww-math--active-process nil)
+(defvar-local my/read-eww-math--active-processes nil)
 (defvar-local my/read-eww-math--generation 0)
 (defvar-local my/read-eww-math--job-counter 0)
 (defvar-local my/read-eww-math--installed-p nil)
@@ -229,16 +238,20 @@ that pass, so placeholders are tracked by a private text property instead."
   (and (my/read-eww-math--job-region job) t))
 
 (defun my/read-eww-math--cancel-active-process ()
-  "Cancel the current buffer's formula process and remove its temporary files."
-  (when (processp my/read-eww-math--active-process)
-    (let* ((process my/read-eww-math--active-process)
-           (directory (process-get process 'my/read-eww-math-temp-directory)))
-      (process-put process 'my/read-eww-math-cancelled t)
-      (when (process-live-p process)
-        (delete-process process))
-      (when (and directory (file-directory-p directory))
-        (delete-directory directory t))))
-  (setq my/read-eww-math--active-process nil))
+  "Cancel this buffer's formula processes and remove their temporary files."
+  (let ((processes my/read-eww-math--active-processes))
+    ;; Clear the registry first: deleting a process may invoke its sentinel.
+    (setq my/read-eww-math--active-processes nil)
+    (dolist (process processes)
+      (when (processp process)
+        (let ((directory
+               (process-get process 'my/read-eww-math-temp-directory)))
+          (my/read-eww-math--cancel-timeout process)
+          (process-put process 'my/read-eww-math-cancelled t)
+          (when (process-live-p process)
+            (delete-process process))
+          (when (and directory (file-directory-p directory))
+            (delete-directory directory t)))))))
 
 (defun my/read-eww-math--begin-render (&rest _)
   "Reset formula work before EWW replaces the current document."
@@ -431,6 +444,10 @@ on Ghostscript or PostScript color specials."
     (process-put process 'my/read-eww-math-timeout-timer
                  (run-at-time my/read-eww-math-process-timeout nil
                               #'my/read-eww-math--process-timeout process))
+    (when-let* ((buffer (plist-get job :buffer))
+                ((buffer-live-p buffer)))
+      (with-current-buffer buffer
+        (push process my/read-eww-math--active-processes)))
     process))
 
 (defun my/read-eww-math--cancel-timeout (process)
@@ -454,8 +471,8 @@ on Ghostscript or PostScript color specials."
       (delete-directory directory t))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (when (eq process my/read-eww-math--active-process)
-          (setq my/read-eww-math--active-process nil))))
+        (setq my/read-eww-math--active-processes
+              (delq process my/read-eww-math--active-processes))))
     (when schedule-next
       (my/read-eww-math--schedule-next buffer))))
 
@@ -466,21 +483,22 @@ on Ghostscript or PostScript color specials."
           (tex (plist-get job :tex)))
       (with-current-buffer buffer
         (condition-case err
-            (let ((inhibit-read-only t)
-                  (inhibit-modification-hooks t)
-                  (begin (car region)))
-              (delete-region begin (cdr region))
-              (goto-char begin)
-              (let ((image-begin (point)))
-                (insert-image
-                 (create-image svg-file 'svg nil
-                               :ascent my/read-eww-math-image-ascent
-                               :scale (my/read-eww-math--image-scale
-                                       (plist-get job :display))
-                               :margin
-                               (cons 0 my/read-eww-math-image-vertical-margin))
-                 tex)
-                (put-text-property image-begin (point) 'help-echo tex)))
+            (save-excursion
+              (let ((inhibit-read-only t)
+                    (inhibit-modification-hooks t)
+                    (begin (car region)))
+                (goto-char begin)
+                (delete-region begin (cdr region))
+                (let ((image-begin (point)))
+                  (insert-image
+                   (create-image svg-file 'svg nil
+                                 :ascent my/read-eww-math-image-ascent
+                                 :scale (my/read-eww-math--image-scale
+                                         (plist-get job :display))
+                                 :margin
+                                 (cons 0 my/read-eww-math-image-vertical-margin))
+                   tex)
+                  (put-text-property image-begin (point) 'help-echo tex))))
           (error
            (message "my-read EWW math display failed: %s"
                     (error-message-string err))))))))
@@ -489,6 +507,12 @@ on Ghostscript or PostScript color specials."
   "Handle completion of a dvisvgm PROCESS."
   (when (memq (process-status process) '(exit signal))
     (my/read-eww-math--cancel-timeout process)
+    (when-let* ((job (process-get process 'my/read-eww-math-job))
+                (buffer (plist-get job :buffer))
+                ((buffer-live-p buffer)))
+      (with-current-buffer buffer
+        (setq my/read-eww-math--active-processes
+              (delq process my/read-eww-math--active-processes))))
     (unless (process-get process 'my/read-eww-math-cancelled)
       (let* ((job (process-get process 'my/read-eww-math-job))
              (directory
@@ -515,19 +539,16 @@ on Ghostscript or PostScript color specials."
   "Start SVG conversion for JOB in DIRECTORY."
   (let* ((dvi (expand-file-name "formula.dvi" directory))
          (output (expand-file-name "formula.svg" directory))
-         (process
-          (my/read-eww-math--start-process
-           "my-read-eww-dvisvgm"
-           (list my/read-eww-math-dvisvgm-program
-                 "--no-fonts"
-                 "--currentcolor=#000000"
-                 "--exact-bbox"
-                 (concat "--output=" output)
-                 dvi)
-           #'my/read-eww-math--dvisvgm-sentinel
-           job directory)))
-    (with-current-buffer (plist-get job :buffer)
-      (setq my/read-eww-math--active-process process))))
+         (command
+          (list my/read-eww-math-dvisvgm-program
+                "--no-fonts"
+                "--currentcolor=#000000"
+                "--exact-bbox"
+                (concat "--output=" output)
+                dvi)))
+    (my/read-eww-math--start-process
+     "my-read-eww-dvisvgm" command #'my/read-eww-math--dvisvgm-sentinel
+     job directory)))
 
 (defun my/read-eww-math--latex-sentinel (process _event)
   "Handle completion of a LaTeX PROCESS."
@@ -540,8 +561,8 @@ on Ghostscript or PostScript color specials."
             (process-get process 'my/read-eww-math-temp-directory)))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
-          (when (eq process my/read-eww-math--active-process)
-            (setq my/read-eww-math--active-process nil))))
+          (setq my/read-eww-math--active-processes
+                (delq process my/read-eww-math--active-processes))))
       (cond
        (cancelled
         (my/read-eww-math--cleanup-job process nil))
@@ -578,9 +599,7 @@ on Ghostscript or PostScript color specials."
                       source)
                 #'my/read-eww-math--latex-sentinel
                 job directory)))
-          (process-put process 'my/read-eww-math-cache cache)
-          (with-current-buffer (plist-get job :buffer)
-            (setq my/read-eww-math--active-process process)))
+          (process-put process 'my/read-eww-math-cache cache))
       (error
        (when (file-directory-p directory)
          (delete-directory directory t))
@@ -588,27 +607,29 @@ on Ghostscript or PostScript color specials."
        (my/read-eww-math--schedule-next (plist-get job :buffer))))))
 
 (defun my/read-eww-math--next (buffer)
-  "Render the next queued formula for BUFFER."
+  "Fill the concurrent formula conversion slots for BUFFER."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (unless (process-live-p my/read-eww-math--active-process)
-        (setq my/read-eww-math--active-process nil)
-        (when-let* ((job (pop my/read-eww-math--queue)))
-          (if (not (my/read-eww-math--job-valid-p job))
-              (my/read-eww-math--schedule-next buffer)
-            (let ((cache (my/read-eww-math--cache-file job)))
-              (cond
-               ((file-exists-p cache)
-                (my/read-eww-math--replace-placeholder job cache)
-                (my/read-eww-math--schedule-next buffer))
-               ((not (and (executable-find my/read-eww-math-latex-program)
-                          (executable-find my/read-eww-math-dvisvgm-program)))
-                (unless my/read-eww-math--missing-program-warning-shown
-                  (setq my/read-eww-math--missing-program-warning-shown t)
-                  (message "EWW math needs latex and dvisvgm; showing TeX text"))
-                (setq my/read-eww-math--queue nil))
-               (t
-                (my/read-eww-math--compile job cache))))))))))
+      (let ((limit (max 1 my/read-eww-math-max-processes))
+            stop)
+        (while (and (not stop)
+                    my/read-eww-math--queue
+                    (< (length my/read-eww-math--active-processes) limit))
+          (let ((job (pop my/read-eww-math--queue)))
+            (when (my/read-eww-math--job-valid-p job)
+              (let ((cache (my/read-eww-math--cache-file job)))
+                (cond
+                 ((file-exists-p cache)
+                  (my/read-eww-math--replace-placeholder job cache))
+                 ((not (and (executable-find my/read-eww-math-latex-program)
+                            (executable-find my/read-eww-math-dvisvgm-program)))
+                  (unless my/read-eww-math--missing-program-warning-shown
+                    (setq my/read-eww-math--missing-program-warning-shown t)
+                    (message "EWW math needs latex and dvisvgm; showing TeX text"))
+                  (setq my/read-eww-math--queue nil
+                        stop t))
+                 (t
+                  (my/read-eww-math--compile job cache)))))))))))
 
 (defun my/read-eww-math--after-render ()
   "Start the formula queue after EWW finishes inserting a document."
