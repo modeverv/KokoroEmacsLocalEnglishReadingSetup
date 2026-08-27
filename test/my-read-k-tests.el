@@ -1141,6 +1141,33 @@
      (should (eq my-read-k--state 'detached))
      (should (equal (plist-get my-read-k--last-error :code) "BRIDGE_EXIT")))))
 
+(ert-deftest my-read-registers-pdf-tools-as-the-pdf-viewer ()
+  (should (eq (cdr (assoc "\\.pdf\\'" auto-mode-alist))
+              #'pdf-view-mode)))
+
+(ert-deftest my-read-repairs-a-dead-pdf-view-window-overlay ()
+  (save-window-excursion
+    (let ((buffer (generate-new-buffer " *my-read-pdf-overlay-test*"))
+          (frame (selected-frame))
+          repaired-page)
+      (unwind-protect
+          (progn
+            (switch-to-buffer buffer)
+            (with-current-buffer buffer
+              (setq-local major-mode 'pdf-view-mode)
+              (setq-local image-mode-winprops-alist
+                          `((,(selected-window) (page . 7) (overlay . nil)))))
+            (cl-letf (((symbol-function 'my/read-center-window)
+                       (lambda (&optional _frame) (selected-window)))
+                      ((symbol-function 'pdf-view-mode)
+                       (lambda () (setq major-mode 'pdf-view-mode)))
+                      ((symbol-function 'pdf-view-goto-page)
+                       (lambda (page) (setq repaired-page page))))
+              (my/read--repair-pdf-view-window buffer frame))
+            (should (= repaired-page 7)))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest my-read-k-keeps-current-reader-bindings ()
   (should (commandp 'my-read))
   (should (equal (help-function-arglist #'my/read--setup-frame t)

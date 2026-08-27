@@ -24,6 +24,12 @@
 (require 'kokoro-reader)
 (require 'english-reading-mode)
 
+;; `my-read' treats PDF Tools as the canonical PDF viewer.  Keep this here as
+;; well as in init.el so a PDF never falls back to a raw binary buffer when
+;; this module is loaded independently.
+(autoload 'pdf-view-mode "pdf-view" nil t)
+(add-to-list 'auto-mode-alist '("\\.pdf\\'" . pdf-view-mode))
+
 (defgroup my-read nil
   "Dedicated English reading workspace."
   :group 'convenience)
@@ -456,9 +462,45 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
 (add-hook 'english-reading-mode-pdf-text-buffer-hook
           #'my/read--configure-speech-language)
 
+(defun my/read--pdf-view-window-overlay-valid-p (window)
+  "Return non-nil when WINDOW has a live PDF Tools image overlay."
+  (and (window-live-p window)
+       (eq (window-buffer window) (current-buffer))
+       (boundp 'image-mode-winprops-alist)
+       (listp image-mode-winprops-alist)
+       (let* ((winprops (assq window image-mode-winprops-alist))
+              (overlay (cdr (assq 'overlay (cdr winprops)))))
+         (and (overlayp overlay)
+              (eq (overlay-buffer overlay) (current-buffer))
+              (eq (overlay-get overlay 'window) window)))))
+
+(defun my/read--repair-pdf-view-window (buffer frame)
+  "Repair BUFFER's PDF Tools image state in FRAME's center window.
+
+Moving a PDF buffer between my-read tabs can leave `image-mode' with a dead
+window overlay.  In that state the mode line still says PDFView while the raw
+%PDF data is visible.  Reinitializing `pdf-view-mode' rebuilds the per-window
+overlay; preserve the current page across that repair."
+  (when (and (buffer-live-p buffer) (frame-live-p frame))
+    (when-let ((window (my/read-center-window frame)))
+      (when (and (eq (window-buffer window) buffer)
+                 (with-current-buffer buffer
+                   (derived-mode-p 'pdf-view-mode))
+                 (with-current-buffer buffer
+                   (not (my/read--pdf-view-window-overlay-valid-p window))))
+        (with-selected-window window
+          (with-current-buffer buffer
+            (let* ((winprops (and (listp image-mode-winprops-alist)
+                                  (or (assq window image-mode-winprops-alist)
+                                      (assq t image-mode-winprops-alist))))
+                   (page (or (cdr (assq 'page (cdr winprops))) 1)))
+              (pdf-view-mode)
+              (pdf-view-goto-page page))))))))
+
 (defun my/read--configure-center-tab-buffer (buffer frame)
   "Configure BUFFER as one of FRAME's center reading tabs."
   (when (buffer-live-p buffer)
+    (my/read--repair-pdf-view-window buffer frame)
     (with-current-buffer buffer
       (setq-local my/read-center-tab-frame frame)
       (setq-local english-reading-mode-key-active-predicate
@@ -488,6 +530,7 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
       (user-error "切り替えられる読書タブがありません"))
     (set-window-buffer window target)
     (select-window window)
+    (my/read--repair-pdf-view-window target frame)
     (if (my/read--center-automatic-lookup-p window)
         (my/read-lookup-follow-post-command)
       ;; Do not let a Lookup queued by the previous EPUB/Kindle tab run after

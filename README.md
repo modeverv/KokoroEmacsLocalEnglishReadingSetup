@@ -1,22 +1,55 @@
 # Emacs 多言語Reader
 
-Emacsで書籍を読みながら、ローカルKokoroによる読み上げ、ローカル翻訳、Lookup辞書、読書メモを一つの専用フレームにまとめるプロジェクトです。
+EmacsでPDF、EPUB、EWW、Kindle.appの本を読みながら、文単位の読み上げ、翻訳、
+Lookup辞書、org-noterの読書メモを一つの専用フレームにまとめるプロジェクトです。
 
-`my-read` は、通常のEPUB・テキスト、DocViewで読むPDF、EWWで読むarXiv、Kindle.appで表示中の英語本文を一つのフレームに統合します。Kindle本文はmacOS Accessibilityから現在表示中のページだけを取得します。スクリーンショット取得、OCR、Kindleファイルの復号は行いません。
+PDFはPDF Tools、EPUBはnov.el、WebページはEWWを使います。Kindle本文はmacOS
+Accessibilityから現在表示中のページだけを取得します。スクリーンショット取得、
+OCR、Kindleファイルの復号は行いません。
 
-専用フレームは次の4領域で構成されます。
+専用フレームは、左の読書領域と右側の3段ペインで構成されます。
 
-- 左: カーソル位置の単語を自動検索するLookup
-- 中央: タブで切り替えるKindle本文、EPUB・テキスト・PDF、EWW
-- 右上: カーソル位置、または読み上げ中の1文のローカル翻訳
-- 右下: 読書メモ
+- 左: タブで切り替えるKindle、PDF／EPUB、EWW
+- 右上: 現在の資料に対応するorg-noterノート
+- 右中央: カーソル位置、または読み上げ中の1文の翻訳
+- 右下: カーソル位置の単語を自動検索するLookup
+
+## 動作画面
+
+いずれも実際のmy-readフレームです。左側の読書タブを切り替えても、右側は上から
+org-noter、文単位の翻訳、Lookupの3段構成を保ちます。
+
+### Kindle.app
+
+Kindle.appへAccessibilityで接続し、取得した現在ページの本文を文単位で扱っている
+状態です。org-noterにはKindleの書名と位置情報を記録できます。
+
+![Kindle.appの本文、org-noter、翻訳、Lookupを表示したmy-read画面](docs/screenshots/my-read-kindle.png)
+
+### PDF Tools
+
+現在開いている`jsicp.pdf`をPDF Toolsで表示しています。日本語本文に合わせて
+翻訳方向を自動判定し、PDF上の文位置と翻訳・Lookupを連動させています。
+
+![PDF Toolsでjsicp.pdfを開き、org-noter、翻訳、Lookupを連動させたmy-read画面](docs/screenshots/my-read-pdf.png)
+
+### EPUB
+
+nov.elでEPUBを開き、選択中の1文をハイライトしながらorg-noter、翻訳、Lookupを
+連動させている状態です。
+
+![nov.elのEPUB本文、org-noter、翻訳、Lookupを表示したmy-read画面](docs/screenshots/my-read-epub.png)
 
 ## 主な機能
 
-- `j` / `k` で1文ずつKokoro読み上げ
-- 読み上げ中の文を本文上でハイライト
+- `j` / `k` で次／前の1文へ移動
+- `SPC` で現在の1文を読み上げ、`s` で文単位の連続読み上げ
+- 読み上げ中の文を対応する本文バッファ上でハイライト
 - 読み上げ中は翻訳対象を読み上げ中の1文へ固定
-- `l` / `;` でLookupの次・前の項目へ移動
+- `l` / `;` で前／次の単語へ移動し、Lookupを追従
+- PDF Toolsで選択した文を新しい読み上げ開始位置として自動採用
+- PDF／EPUB／Kindleをorg-noterで統一して記録
+- PDFの選択範囲を永続ハイライトとして保存
 - Kindleでは前後2ページをメモリ上だけにキャッシュ
 - Kindle本文をファイルへ保存しない
 - Google翻訳を既定とし、必要に応じてローカル翻訳へ切り替え可能
@@ -33,12 +66,18 @@ Emacsで書籍を読みながら、ローカルKokoroによる読み上げ、ロ
 - Swift 6以降
 - macOSの `/usr/bin/curl` と `/usr/bin/afplay`
 - ローカル翻訳を使う場合はOllamaと `translategemma:4b`
-- Emacsパッケージ `google-translate` と `lookup`
+- Emacsパッケージ `google-translate`、`lookup`、`org-noter`、`pdf-tools`
 - EPUBを読む場合は `nov.el`
-- PDFを読む場合はPopplerの `pdftotext`
+- PDFを読む場合はPopplerの `pdftotext` とPDF Toolsの `epdfinfo`
 - EWWでarXiv数式を画像表示する場合はTeX Liveの `latex` と `dvisvgm`
 
 Kindle.appの本文取得にはmacOSのアクセシビリティ権限が必要です。Lookup本体、辞書エージェント、EPWING辞書などは別途設定してください。
+
+PDF関連の依存パッケージはHomebrewで導入できます。
+
+```sh
+brew install poppler automake glib pkgconf
+```
 
 ## 1. Python環境とKokoroの導入
 
@@ -65,8 +104,9 @@ curl --fail http://127.0.0.1:8000/health
 (require 'my-read)
 
 (setq my/read-book-path "/path/to/books"
-      my/read-note-file "~/Documents/english-reading.org"
       my/read-vocabulary-file "~/my-read/vocabulary.org"
+      my/read-org-noter-directory
+      "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read"
       my/read-eww-url "https://arxiv.org/"
       my/read-eww-line-spacing 0.5
       my/read-eww-math-enabled t
@@ -102,6 +142,23 @@ curl --fail http://127.0.0.1:8000/health
 
 `my/read-lookup-dictionary-ids` は通常のLookup設定を変更しません。空リストにすると専用フレーム内のLookupを無効にします。
 
+PDFとorg-noterをまだ導入していない環境では、次の設定も追加してください。
+
+```elisp
+(use-package org-noter
+  :ensure t
+  :after org
+  :defer t
+  :custom
+  (org-noter-highlight-selected-text t))
+
+(use-package pdf-tools
+  :ensure t
+  :mode ("\\.pdf\\'" . pdf-view-mode)
+  :config
+  (pdf-tools-install :no-query))
+```
+
 ## 3. Kindle.appの準備
 
 1. Kindle.appで英語の本を開きます。
@@ -131,31 +188,101 @@ Kindleの正式な書名は、Kindle自身のローカル `BookData.sqlite` か�
 M-x my-read
 ```
 
-中央は同じ1ペインの `Kindle` / `EPUB` / `EWW` タブで切り替えます。EWWタブでは `g` で初期URL（既定はarXiv）、`G` で任意のURLを開けます。EWW全体の行間は `my/read-eww-line-spacing` の既定値 `0.5` により通常のおよそ1.5倍です。追加分は行の下側へ置かれます。arXiv HTMLのTeX注釈はバックグラウンドでSVGへ変換され、変換中もEmacsの操作を妨げません。SVGは式・表示形式・文字色・輪郭幅・内部余白ごとにキャッシュされます。表示倍率は既定フォントへ合わせた値のさらに1.5倍が既定で、インライン数式だけはそこから1.25倍します。それぞれ `my/read-eww-math-image-scale-multiplier` と `my/read-eww-math-inline-scale-multiplier` から調整できます。数式の太さは `my/read-eww-math-svg-stroke-width`、SVG端の余白は `my/read-eww-math-svg-padding` で調整できます。既定では四辺に1ptを加え、字形や輪郭線が `viewBox` で切れないようにします。`j` / `k` の文単位読み上げと `l` / `;` のLookup項目移動もEPUB・Kindleと同様に使えます。EWWのページ読み込み中に表示される `Loading` などを同期型辞書へ送るとEmacs全体を止めることがあるため、EWWタブでは自動Lookupだけを既定で停止します。自動翻訳と通常のEWW表示は有効です。必要なら `my/read-eww-enable-automatic-lookup` を `t` にしてください。接続し直す場合はKindleタブで `r` を押します。
+左側は同じ1ペインの `Kindle` / `PDF・EPUB` / `EWW` タブで切り替えます。
+`C-c t`で次のタブへ移動します。EWWタブでは`g`で初期URL（既定はarXiv）、
+`G`で任意のURLを開けます。Kindleへ接続し直す場合はKindleタブで`r`を押します。
 
-中央でPDFを開くと `doc-view-mode` と `english-reading-mode` が連携し、PDF画像を表示したまま `pdftotext` の抽出本文を裏側で文単位に移動します。`j` / `k` はページ境界でDocViewの表示ページも自動的に進めたり戻したりし、翻訳とLookupも同じ抽出本文を参照します。読み上げ中は `pdftotext -bbox-layout` の単語座標を使って該当箇所をPDF画像上へ半透明表示し、読み上げ終了時に通常画像へ戻します。色と透明度は `english-reading-mode-pdf-highlight-color` と `english-reading-mode-pdf-highlight-opacity` で変更できます。ページ番号など英字を実質的に含まない断片は読み飛ばします。テキストレイヤーを持たないスキャンPDFはOCR対象外です。
+EWW全体の行間は`my/read-eww-line-spacing`の既定値`0.5`により通常のおよそ
+1.5倍です。arXiv HTMLのTeX注釈はバックグラウンドでSVGへ変換されます。
+EWWのロード中表示を同期型辞書へ送るとEmacs全体を止めることがあるため、
+EWWタブでは自動Lookupだけを既定で停止しています。必要なら
+`my/read-eww-enable-automatic-lookup`を`t`にしてください。
+
+### PDF Tools
+
+PDFを開くと`pdf-view-mode`と`english-reading-mode`が連携します。PDF表示は
+PDF Toolsに任せ、`pdftotext`で抽出した本文を裏側の仮想カーソルで文単位に
+移動します。`j` / `k`は次／前の文へ移動し、ページ境界では表示ページも
+切り替わります。`C-v` / `M-v`は文位置に関係なく次／前のPDFページへ移動します。
+
+PDF Toolsで本文をマウス選択すると、選択文字列とページ上の縦位置から対応する文を
+特定し、読み上げ位置をその文へ自動的に移します。続けて`SPC`を押すとその文だけ、
+`s`を押すとその位置から連続して読み上げます。同じ文がページ内に複数ある場合は、
+選択位置に最も近いものを使います。
+
+英語はローカルKokoro、日本語を多く含むPDFは自動判定してmacOSの日本語音声
+（既定は`Kyoko`）を使います。PDFのテキストレイヤーがないスキャンPDFは、現在の
+実装ではOCR対象外です。
+
+### org-noter
+
+my-read開始時に現在のPDF／EPUB／Kindleに対応するorg-noterセッションを開き、
+右上へノートを表示します。保存先の既定値は次のディレクトリです。
+
+```text
+/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read
+```
+
+資料ごとのサブディレクトリに`org-noter.org`を作成します。Kindleノートには
+`NOTER_PAGE`に加えて`KINDLE_LOCATION`と`KINDLE_FINGERPRINT`を記録します。
+
+PDFへ永続ハイライト付きのノートを作る手順は次のとおりです。
+
+1. PDF本文をマウスで選択します。
+2. 選択を残したまま`i`を押してorg-noterノートを作ります。
+3. `C-x C-s`でPDFを保存し、ハイライトをPDFファイルへ書き込みます。
+
+`C-u i`を使うと、その1回だけハイライト設定を反転できます。
+
+### キーバインド
 
 | キー | 動作 |
 | --- | --- |
-| `j` | 次の文に移動 |
-| `k` | 現在の1文を読み上げ |
+| `j` | 次の1文へ移動 |
+| `k` | 前の1文へ移動 |
+| `SPC` | 現在の1文を読み上げ |
+| `s` | 現在位置から1文ずつ連続読み上げ。もう一度押すと停止 |
 | `l` | 前の単語に移動 |
 | `;` | 次の単語に移動 |
-| `i` | 前の1文へ戻って読み上げる |
+| `p` | 次のLookup辞書エントリへ切り替え |
+| `o` | 前のLookup辞書エントリへ切り替え |
+| `i` | org-noterで現在位置へノートを挿入 |
 | `↓` / `C-n` | 1表示行下へ。末尾では次のKindleページへ |
 | `↑` / `C-p` | 1表示行上へ。先頭では前のKindleページへ |
-| `C-v` / `C-c ]` | 次のKindleページ |
-| `M-v` / `C-c [` | 前のKindleページ |
+| `C-v` | 次のPDF／Kindleページ |
+| `M-v` | 前のPDF／Kindleページ |
+| `C-c ]` / `C-c [` | 次／前のKindleページ |
 | `C-c g` | 現在ページを再取得 |
-| `C-c C-k` | 合成または再生を停止 |
-| `p` / `o` | Lookupの次／前の項目 |
+| `C-c C-k` / `C-c k` | 合成または再生を停止 |
 | `u` | 単語、または選択中のフレーズを語彙Orgファイルへ保存 |
-| `C-c t` | Kindle／EPUB／EWWタブを順に切り替える |
+| `C-c o` | 現在資料のorg-noterノートを表示 |
+| `C-c t` | Kindle／PDF・EPUB／EWWタブを順に切り替える |
 | `r` | Kindle.appへ再接続 |
+
+my-read固有キーは、my-readフレームの左側読書ペインにカーソルがある場合だけ
+有効です。右側のOrgバッファや通常のEmacsバッファには影響しません。org-noterの
+詳細な標準キーと競合方針は[key.md](key.md)を参照してください。`o` / `p`は
+右下のLookupペインで前／次の辞書エントリを選びますが、入力フォーカスは左側の
+読書ペインに維持されます。
+
+### PDFの表示倍率
+
+| キー | 動作 |
+| --- | --- |
+| `+` / `=` | PDFを拡大 |
+| `-` | PDFを縮小 |
+| `0` | 表示倍率をリセット |
+| `W` | PDFの横幅をウィンドウへ合わせる |
+| `H` | PDFの高さをウィンドウへ合わせる |
+| `P` | ページ全体をウィンドウへ合わせる |
+| `C-マウスホイール` | マウス操作で拡大／縮小 |
+
+`C-+` / `C--`は現在のEmacs設定では文字サイズ変更に使われるため、PDFの拡大・
+縮小には修飾なしの`+` / `-`を使います。
 
 ## 単語・フレーズの保存
 
-中央のKindle／EPUB／PDF／EWW読書ペインで `u` を押すと、覚えておきたい
+左側のKindle／EPUB／PDF／EWW読書ペインで `u` を押すと、覚えておきたい
 単語やフレーズを `my/read-vocabulary-file` のOrgファイルへ保存します。このキーは
 `my-read` の読書ペイン内だけで有効で、通常のEmacsバッファの `u` には影響しません。
 同じ操作は `M-x my/read-vocab-capture` でも実行できます。
@@ -298,11 +425,13 @@ make my-read-k-check
 | --- | --- |
 | `kokoro_server.py` | ローカルKokoro HTTPサーバー |
 | `kokoro-reader.el` | 非同期音声生成・再生・ハイライト |
-| `english-reading-mode.el` | 1文単位の移動と読み上げ状態通知 |
-| `my-read.el` | 専用フレーム、Lookup、翻訳、語彙Orgファイルへの保存 |
+| `english-reading-mode.el` | 文単位の移動・連続読み上げ・PDF Tools連携 |
+| `my-read.el` | 専用フレーム、右3段ペイン、Lookup、翻訳、語彙保存 |
+| `my-read-org-noter.el` | PDF／EPUB／Kindleのorg-noter統合と保存先管理 |
 | `my-read-k.el` | Kindle本文バッファ、ページ移動、メモリキャッシュ |
 | `my-read-k2.el` | Kindle.app Accessibilityバックエンド |
 | `my-read-k2/bridge/` | macOS Accessibilityを読むSwiftブリッジ |
+| `key.md` | my-readとorg-noterのキーバインド・競合方針 |
 | `test/my-read-k-tests.el` | 共有Reader UIのERTテスト |
 | `test/my-read-k2-tests.el` | Kindle.appバックエンドのERTテスト |
 
