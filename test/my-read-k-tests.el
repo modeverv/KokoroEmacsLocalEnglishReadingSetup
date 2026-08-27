@@ -580,6 +580,48 @@
           (funcall scheduled-function)
           (should (eq refreshed context)))))))
 
+(ert-deftest english-reading-mode-continuous-waits-for-full-macos-warmup ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (insert "一番です。二番です。三番です。")
+      (setq-local sentence-end-double-space nil)
+      (setq-local kokoro-reader-backend 'macos)
+      (let* ((source-buffer (current-buffer))
+             (window (selected-window))
+             (frame (selected-frame))
+             (spec (list :buffer source-buffer :beg 1 :end 6
+                         :text "一番です。"))
+             (english-reading-mode--continuous-state
+              (list :buffer source-buffer :window window :frame frame
+                    :warmup-spec spec
+                    :warmup-texts '("一番です。" "二番です。")))
+             (english-reading-mode--continuous-warmup-timer nil)
+             (ready nil)
+             scheduled spoken monitor-started)
+        (cl-letf (((symbol-function 'kokoro-reader-prefetch-macos-texts)
+                   #'ignore)
+                  ((symbol-function 'kokoro-reader-macos-prefetch-ready-p)
+                   (lambda (_text) ready))
+                  ((symbol-function 'run-at-time)
+                   (lambda (delay _repeat function &rest _args)
+                     (setq scheduled (list delay function))
+                     'warmup-timer))
+                  ((symbol-function 'kokoro-reader--speak-bounds)
+                   (lambda (beg end) (setq spoken (cons beg end))))
+                  ((symbol-function
+                    'english-reading-mode--start-macos-prefetch-monitor)
+                   (lambda () (setq monitor-started t))))
+          (english-reading-mode--continuous-warmup-check)
+          (should-not spoken)
+          (should (= (car scheduled) 0.05))
+          (setq ready t)
+          (funcall (cadr scheduled))
+          (should (equal spoken '(1 . 6)))
+          (should monitor-started)
+          (should-not (plist-get english-reading-mode--continuous-state
+                                 :warmup-texts)))))))
+
 (ert-deftest english-reading-mode-quiet-stop-clears-prefetch-monitor-and-queue ()
   (let ((english-reading-mode--continuous-state '(active))
         (english-reading-mode--continuous-timer nil)
@@ -620,6 +662,69 @@
                                  :process)
                       'new)))
       (when (file-exists-p bad-file) (delete-file bad-file)))))
+
+(ert-deftest kokoro-reader-staggers-macos-prefetch-launches ()
+  (let ((kokoro-reader-backend 'macos)
+        (kokoro-reader-macos-prefetch-enabled t)
+        (kokoro-reader-macos-prefetch-count 2)
+        (kokoro-reader-macos-prefetch-launch-interval 0.2)
+        (kokoro-reader--macos-prefetch-queue nil)
+        (kokoro-reader--macos-prefetch-launch-timer nil)
+        scheduled launched (timer-sequence 0))
+    (cl-letf (((symbol-function 'timerp)
+               (lambda (object) (and (consp object)
+                                     (eq (car object) 'fake-timer))))
+              ((symbol-function 'run-at-time)
+               (lambda (delay _repeat function &rest _args)
+                 (let ((timer (list 'fake-timer (cl-incf timer-sequence))))
+                   (setq scheduled
+                         (append scheduled (list (list delay function timer))))
+                   timer)))
+              ((symbol-function 'cancel-timer) #'ignore)
+              ((symbol-function 'kokoro-reader--launch-macos-prefetch)
+               (lambda (entry)
+                 (setq launched
+                       (append launched
+                               (list (car (plist-get entry :key)))))
+                 entry)))
+      (unwind-protect
+          (progn
+            (kokoro-reader-prefetch-macos-texts '("一番。" "二番。"))
+            (should-not launched)
+            (should (plist-member (car kokoro-reader--macos-prefetch-queue)
+                                  :launched-at))
+            (should (= (caar scheduled) 0.2))
+            (funcall (cadar scheduled))
+            (should (equal launched '("一番。")))
+            (should (= (car (nth 1 scheduled)) 0.2))
+            (funcall (cadr (nth 1 scheduled)))
+            (should (equal launched '("一番。" "二番。")))
+            (should (= (length scheduled) 2)))
+        (kokoro-reader--clear-macos-prefetch)))))
+
+(ert-deftest kokoro-reader-staggered-launch-preserves-buffer-local-rate ()
+  (let (entry command)
+    (with-temp-buffer
+      (setq-local kokoro-reader-macos-program "/usr/bin/say")
+      (setq-local kokoro-reader-macos-voice "Kyoko")
+      (setq-local kokoro-reader-macos-rate 600)
+      (setq entry (kokoro-reader--start-macos-prefetch "速度確認。")))
+    (unwind-protect
+        (let ((kokoro-reader-macos-rate 180)
+              (kokoro-reader-macos-voice nil))
+          (cl-letf (((symbol-function 'make-process)
+                     (lambda (&rest arguments)
+                       (setq command (plist-get arguments :command))
+                       'fake-process))
+                    ((symbol-function 'process-send-string) #'ignore)
+                    ((symbol-function 'process-send-eof) #'ignore))
+            (kokoro-reader--launch-macos-prefetch entry))
+          (should (equal (seq-take command 4)
+                         '("/usr/bin/say" "-r" "600" "-o")))
+          (should (equal (seq-drop command 5) '("-v" "Kyoko")))
+          ;; The temporary output path between -o and -v is variable.
+          (should (stringp (nth 4 command))))
+      (kokoro-reader--discard-macos-prefetch-entry entry))))
 
 (ert-deftest english-reading-mode-macos-continuous-speaks-six-sentence-chunks ()
   (with-temp-buffer
@@ -709,6 +814,38 @@
                                   0))))
                2)
               '("Page two first." "Page two second.")))))
+      (kill-buffer pdf-buffer)
+      (kill-buffer text-buffer))))
+
+(ert-deftest english-reading-mode-pdf-prefetch-skips-label-before-chunking ()
+  (let ((pdf-buffer (generate-new-buffer " *prefetch-pdf-table*"))
+        (text-buffer (generate-new-buffer " *prefetch-pdf-table-text*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer text-buffer
+            (insert "前文です。\n\n○\n\n共有ロック\n\n×\n\n○\n\nロックなし。")
+            (setq-local sentence-end-double-space nil)
+            (setq-local kokoro-reader-backend 'macos))
+          (with-current-buffer pdf-buffer
+            (setq-local major-mode 'doc-view-mode)
+            (setq-local buffer-file-name "/tmp/prefetch-table.pdf")
+            (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+            (setq-local english-reading-mode--pdf-page-ranges
+                        (with-current-buffer text-buffer
+                          (english-reading-mode--pdf-page-ranges))))
+          (let ((english-reading-mode--continuous-state
+                 (list :buffer pdf-buffer))
+                (english-reading-mode-macos-continuous-sentence-count 2))
+            (should
+             (equal
+              (english-reading-mode--speech-texts-after-position
+               text-buffer
+               (with-current-buffer text-buffer
+                 (goto-char (point-min))
+                 (forward-sentence 1)
+                 (point))
+               2)
+              '("共有ロック ×" "ロックなし。")))))
       (kill-buffer pdf-buffer)
       (kill-buffer text-buffer))))
 

@@ -57,7 +57,7 @@ spoken text about one quarter of the way down from the top."
   :type 'number
   :group 'english-reading-mode)
 
-(defcustom english-reading-mode-macos-continuous-sentence-count 3
+(defcustom english-reading-mode-macos-continuous-sentence-count 2
   "Maximum number of sentences in one continuous macOS speech utterance.
 
 Larger chunks make `/usr/bin/say' take longer before the first playback, but
@@ -66,7 +66,7 @@ such as `english-reading-mode-speak-current-sentence' still speak one sentence."
   :type '(integer :tag "Sentences" 1)
   :group 'english-reading-mode)
 
-(defcustom english-reading-mode-macos-prefetch-chunk-count 4
+(defcustom english-reading-mode-macos-prefetch-chunk-count 6
   "Number of future macOS speech chunks prepared during continuous reading."
   :type '(integer :tag "Chunks" 1)
   :group 'english-reading-mode)
@@ -1568,6 +1568,9 @@ included.  LIMIT, when non-nil, prevents a PDF chunk from crossing its page."
 (defvar english-reading-mode--macos-prefetch-monitor-timer nil
   "Timer that keeps continuous macOS speech prefetch filled.")
 
+(defvar english-reading-mode--continuous-warmup-timer nil
+  "Timer waiting for the initial continuous macOS speech buffer to fill.")
+
 (defconst english-reading-mode--pdf-manual-interaction-commands
   '(mwheel-scroll
     pixel-scroll-precision
@@ -1721,8 +1724,11 @@ When QUIET is non-nil, do not stop an already active audio process."
     (cancel-timer english-reading-mode--continuous-timer))
   (when (timerp english-reading-mode--macos-prefetch-monitor-timer)
     (cancel-timer english-reading-mode--macos-prefetch-monitor-timer))
+  (when (timerp english-reading-mode--continuous-warmup-timer)
+    (cancel-timer english-reading-mode--continuous-warmup-timer))
   (setq english-reading-mode--continuous-timer nil
-        english-reading-mode--macos-prefetch-monitor-timer nil)
+        english-reading-mode--macos-prefetch-monitor-timer nil
+        english-reading-mode--continuous-warmup-timer nil)
   ;; QUIET leaves the current utterance playing, but future audio no longer
   ;; belongs to an active continuous-reading session.
   (when (and quiet (fboundp 'kokoro-reader--clear-macos-prefetch))
@@ -1848,7 +1854,7 @@ limited to one page so its cache key matches normal playback."
                    (page-range
                     (english-reading-mode--continuous-speech-page-range
                      buffer scan-position))
-                   bounds beg finish chunk candidate)
+                   bounds beg finish sentence-text chunk candidate)
               ;; Narrow exactly like normal PDF playback.  Without this, Emacs
               ;; can treat a page number before a form feed as part of the next
               ;; page's first sentence, producing a prefetch cache-key mismatch.
@@ -1867,30 +1873,37 @@ limited to one page so its cache key matches normal playback."
                   (goto-char (cdr bounds))
                   (skip-chars-backward " \t\n\r" beg)
                   (setq finish (point)
-                        chunk
-                        (english-reading-mode--macos-continuous-bounds
-                         beg finish (cdr page-range))
-                        candidate
-                        (kokoro-reader--text (car chunk) (cdr chunk)))
-                  ;; `pdftotext' often emits the printed page number directly
-                  ;; before the first sentence.  Normal PDF navigation skips
-                  ;; that label, so remove it from lookahead as well or the
-                  ;; synthesized cache key will differ at the page boundary.
-                  (when (and page-range
-                             (= beg
-                                (save-excursion
-                                  (goto-char (car page-range))
-                                  (skip-chars-forward " \t\n\r")
-                                  (point))))
-                    (setq candidate
-                          (replace-regexp-in-string
-                           "\\`[[:digit:]０-９]+[.．]?[ \t\n\r]+"
-                           "" candidate)))
-                  (goto-char (cdr chunk))
-                  (if (string-match-p
-                       "[[:alpha:]].*[[:alpha:]]" candidate)
-                      (push candidate texts)
-                    (goto-char (min (1+ finish) (point-max)))))))))))
+                        sentence-text
+                        (buffer-substring-no-properties beg finish))
+                  ;; Match `english-reading-mode--pdf-location': reject an
+                  ;; isolated label before extending it into a multi-sentence
+                  ;; chunk.  Testing the combined chunk first incorrectly turns
+                  ;; table cells such as "○" into "○ 共有ロック" and shifts
+                  ;; every prefetched key away from actual playback.
+                  (if (not (string-match-p
+                            "[[:alpha:]].*[[:alpha:]]" sentence-text))
+                      (goto-char (min (1+ finish) (point-max)))
+                    (setq chunk
+                          (english-reading-mode--macos-continuous-bounds
+                           beg finish (cdr page-range))
+                          candidate
+                          (kokoro-reader--text (car chunk) (cdr chunk)))
+                    ;; `pdftotext' often emits the printed page number directly
+                    ;; before the first sentence.  Normal PDF navigation skips
+                    ;; that label, so remove it from lookahead as well or the
+                    ;; synthesized cache key will differ at the page boundary.
+                    (when (and page-range
+                               (= beg
+                                  (save-excursion
+                                    (goto-char (car page-range))
+                                    (skip-chars-forward " \t\n\r")
+                                    (point))))
+                      (setq candidate
+                            (replace-regexp-in-string
+                             "\\`[[:digit:]０-９]+[.．]?[ \t\n\r]+"
+                             "" candidate)))
+                    (goto-char (cdr chunk))
+                    (push candidate texts)))))))))
     (nreverse texts)))
 
 (defun english-reading-mode--next-speech-texts (context &optional count)
@@ -1991,6 +2004,90 @@ does without changing the displayed page."
 (add-hook 'english-reading-mode-speech-finish-hook
           #'english-reading-mode--continuous-speech-finished)
 
+(defun english-reading-mode--current-continuous-speech-spec ()
+  "Return the current continuous speech chunk as a plist."
+  (if (english-reading-mode--pdf-buffer-p)
+      (let* ((location (english-reading-mode--pdf-next-location))
+             (text-buffer (nth 1 location))
+             (beg (nth 2 location))
+             (end (nth 3 location))
+             (page-end (cdr (english-reading-mode--pdf-page-range
+                             english-reading-mode--pdf-page))))
+        (with-current-buffer text-buffer
+          (pcase-let ((`(,chunk-beg . ,chunk-end)
+                       (english-reading-mode--macos-continuous-bounds
+                        beg end page-end)))
+            (list :buffer text-buffer :beg chunk-beg :end chunk-end
+                  :text (kokoro-reader--text chunk-beg chunk-end)))))
+    (pcase-let ((`(,beg . ,end) (english-reading-mode--sentence-bounds)))
+      (pcase-let ((`(,chunk-beg . ,chunk-end)
+                   (english-reading-mode--macos-continuous-bounds beg end)))
+        (list :buffer (current-buffer) :beg chunk-beg :end chunk-end
+              :text (kokoro-reader--text chunk-beg chunk-end))))))
+
+(defun english-reading-mode--continuous-warmup-check ()
+  "Start playback after the initial macOS prefetch inventory is ready."
+  (setq english-reading-mode--continuous-warmup-timer nil)
+  (if (not (and english-reading-mode--continuous-state
+                (english-reading-mode--continuous-live-p)))
+      (english-reading-mode-stop-continuous t)
+    (let* ((state english-reading-mode--continuous-state)
+           (spec (plist-get state :warmup-spec))
+           (texts (plist-get state :warmup-texts))
+           (speech-buffer (plist-get spec :buffer)))
+      (if (not (buffer-live-p speech-buffer))
+          (english-reading-mode-stop-continuous t)
+        (with-current-buffer speech-buffer
+          (let ((kokoro-reader-macos-prefetch-count (length texts)))
+            ;; Reconcile on every check so a failed `say' request is retried
+            ;; before playback begins instead of becoming a mid-reading miss.
+            (kokoro-reader-prefetch-macos-texts texts))
+          (if (cl-every #'kokoro-reader-macos-prefetch-ready-p texts)
+              (let ((source-buffer (plist-get state :buffer))
+                    (window (plist-get state :window))
+                    (frame (plist-get state :frame)))
+                (setq english-reading-mode--continuous-state
+                      (plist-put
+                       (plist-put state :warmup-spec nil)
+                       :warmup-texts nil))
+                (with-selected-frame frame
+                  (with-selected-window window
+                    (with-current-buffer source-buffer
+                      (with-current-buffer speech-buffer
+                        (kokoro-reader--speak-bounds
+                         (plist-get spec :beg) (plist-get spec :end))))))
+                (english-reading-mode--start-macos-prefetch-monitor)
+                (message "Continuous reading started"))
+            (setq english-reading-mode--continuous-warmup-timer
+                  (run-at-time 0.05 nil
+                               #'english-reading-mode--continuous-warmup-check))))))))
+
+(defun english-reading-mode--start-continuous-speech ()
+  "Start continuous speech, prebuffering macOS audio before playback."
+  (let* ((spec (english-reading-mode--current-continuous-speech-spec))
+         (speech-buffer (plist-get spec :buffer)))
+    (if (and (buffer-live-p speech-buffer)
+             (with-current-buffer speech-buffer
+               (eq kokoro-reader-backend 'macos))
+             (fboundp 'kokoro-reader-macos-prefetch-ready-p))
+        (let* ((context (list :buffer speech-buffer
+                              :beg (plist-get spec :beg)
+                              :end (plist-get spec :end)
+                              :text (plist-get spec :text)))
+               (future (english-reading-mode--next-speech-texts
+                        context english-reading-mode-macos-prefetch-chunk-count))
+               (texts (cons (plist-get spec :text) future)))
+          (setq english-reading-mode--continuous-state
+                (plist-put
+                 (plist-put english-reading-mode--continuous-state
+                            :warmup-spec spec)
+                 :warmup-texts texts))
+          (message "Preparing %d continuous speech chunks…" (length texts))
+          (english-reading-mode--continuous-warmup-check))
+      (english-reading-mode-speak-current-sentence)
+      (english-reading-mode--start-macos-prefetch-monitor)
+      (message "Continuous reading started"))))
+
 (defun english-reading-mode-continuous-read ()
   "Read continuously in speech chunks.
 Press `s' again to stop."
@@ -2009,10 +2106,7 @@ Press `s' again to stop."
                 :window (selected-window)
                 :frame (selected-frame)))
     (condition-case err
-        (progn
-          (english-reading-mode-speak-current-sentence)
-          (english-reading-mode--start-macos-prefetch-monitor)
-          (message "Continuous reading started"))
+        (english-reading-mode--start-continuous-speech)
       (error
        (english-reading-mode-stop-continuous t)
        (signal (car err) (cdr err))))))

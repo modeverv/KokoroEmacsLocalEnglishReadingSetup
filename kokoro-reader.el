@@ -95,6 +95,10 @@ automatic fallback for languages unsupported by Kokoro."
   "Maximum number of future macOS utterances synthesized ahead of playback."
   :type '(integer :tag "Utterances" 1))
 
+(defcustom kokoro-reader-macos-prefetch-launch-interval 0.2
+  "Seconds between successive background `say' synthesis launches."
+  :type '(number :tag "Seconds"))
+
 (defvar kokoro-reader--request-process nil)
 (defvar kokoro-reader--player-process nil)
 (defvar kokoro-reader--server-process nil)
@@ -103,6 +107,7 @@ automatic fallback for languages unsupported by Kokoro."
 (defvar kokoro-reader--audio-file nil)
 (defvar kokoro-reader--overlay nil)
 (defvar kokoro-reader--macos-prefetch-queue nil)
+(defvar kokoro-reader--macos-prefetch-launch-timer nil)
 
 (defun kokoro-reader--server-ready-p ()
   (and (process-live-p kokoro-reader--server-process)
@@ -209,6 +214,9 @@ Call ON-ERROR with a diagnostic string when startup cannot be completed."
 
 (defun kokoro-reader--clear-macos-prefetch ()
   "Cancel and delete all queued macOS speech files."
+  (when (timerp kokoro-reader--macos-prefetch-launch-timer)
+    (cancel-timer kokoro-reader--macos-prefetch-launch-timer))
+  (setq kokoro-reader--macos-prefetch-launch-timer nil)
   (let ((entries kokoro-reader--macos-prefetch-queue))
     (setq kokoro-reader--macos-prefetch-queue nil)
     (dolist (entry entries)
@@ -397,11 +405,26 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain future synthesized audio."
        (> (file-attribute-size (file-attributes file)) 4096)))
 
 (defun kokoro-reader--start-macos-prefetch (text)
-  "Start asynchronous macOS synthesis for TEXT and return its queue entry."
+  "Create a pending macOS synthesis entry for TEXT."
   (let* ((key (kokoro-reader--macos-key text))
          (file (make-temp-file "kokoro-macos-next-" nil ".aiff"))
-         (entry (list :key key :file file :process nil :ready nil))
+         (entry (list :key key :file file :process nil
+                      :ready nil :pending t :launched-at nil)))
+    entry))
+
+(defun kokoro-reader--launch-macos-prefetch (entry)
+  "Launch the pending background `say' process represented by ENTRY."
+  (let* ((key (plist-get entry :key))
+         (text (nth 0 key))
+         ;; Timer callbacks run in whichever buffer is current at firing time.
+         ;; Rebind every buffer-local synthesis setting captured in KEY rather
+         ;; than accidentally using that unrelated buffer's defaults.
+         (kokoro-reader-macos-program (nth 1 key))
+         (kokoro-reader-macos-voice (nth 2 key))
+         (kokoro-reader-macos-rate (nth 3 key))
+         (file (plist-get entry :file))
          process)
+    (setf (plist-get entry :launched-at) (float-time))
     (setq process
           (make-process
            :name "kokoro-macos-prefetch"
@@ -426,6 +449,39 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain future synthesized audio."
     (process-send-eof process)
     entry))
 
+(defun kokoro-reader--run-next-macos-prefetch-launch ()
+  "Launch one pending macOS prefetch and schedule the following one."
+  (setq kokoro-reader--macos-prefetch-launch-timer nil)
+  (when-let* ((entry
+               (seq-find (lambda (candidate)
+                           (plist-get candidate :pending))
+                         kokoro-reader--macos-prefetch-queue)))
+    (setf (plist-get entry :pending) nil)
+    (condition-case nil
+        (kokoro-reader--launch-macos-prefetch entry)
+      (error
+       (setq kokoro-reader--macos-prefetch-queue
+             (delq entry kokoro-reader--macos-prefetch-queue))
+       (kokoro-reader--discard-macos-prefetch-entry entry)))
+    (when (seq-find (lambda (candidate)
+                      (plist-get candidate :pending))
+                    kokoro-reader--macos-prefetch-queue)
+      (setq kokoro-reader--macos-prefetch-launch-timer
+            (run-at-time kokoro-reader-macos-prefetch-launch-interval nil
+                         #'kokoro-reader--run-next-macos-prefetch-launch)))))
+
+(defun kokoro-reader--ensure-macos-prefetch-launch ()
+  "Ensure pending macOS prefetch work starts at the staggered interval."
+  (when (and (not (timerp kokoro-reader--macos-prefetch-launch-timer))
+             (seq-find (lambda (candidate)
+                         (plist-get candidate :pending))
+                       kokoro-reader--macos-prefetch-queue))
+    ;; Delay the first background command too, so it is not launched together
+    ;; with the foreground utterance that caused this prefetch request.
+    (setq kokoro-reader--macos-prefetch-launch-timer
+          (run-at-time kokoro-reader-macos-prefetch-launch-interval nil
+                       #'kokoro-reader--run-next-macos-prefetch-launch))))
+
 (defun kokoro-reader-prefetch-macos-texts (texts)
   "Asynchronously synthesize ordered future macOS utterance TEXTS.
 
@@ -444,6 +500,7 @@ than `kokoro-reader-macos-prefetch-count' entries are kept."
                              (or (and (plist-get candidate :ready)
                                       (kokoro-reader--valid-audio-file-p
                                        (plist-get candidate :file)))
+                                 (plist-get candidate :pending)
                                  (process-live-p
                                   (plist-get candidate :process)))))
                       available)))
@@ -454,11 +511,22 @@ than `kokoro-reader-macos-prefetch-count' entries are kept."
             (push (kokoro-reader--start-macos-prefetch (car key)) retained))))
       (dolist (entry available)
         (kokoro-reader--discard-macos-prefetch-entry entry))
-      (setq kokoro-reader--macos-prefetch-queue (nreverse retained)))))
+      (setq kokoro-reader--macos-prefetch-queue (nreverse retained))
+      (kokoro-reader--ensure-macos-prefetch-launch))))
 
 (defun kokoro-reader-prefetch-macos-text (text)
   "Asynchronously synthesize macOS speech for one future TEXT."
   (kokoro-reader-prefetch-macos-texts (list text)))
+
+(defun kokoro-reader-macos-prefetch-ready-p (text)
+  "Return non-nil when ready prefetched audio matches TEXT and settings."
+  (let ((key (kokoro-reader--macos-key text)))
+    (seq-some
+     (lambda (entry)
+       (and (plist-get entry :ready)
+            (equal key (plist-get entry :key))
+            (kokoro-reader--valid-audio-file-p (plist-get entry :file))))
+     kokoro-reader--macos-prefetch-queue)))
 
 (defun kokoro-reader--take-macos-prefetch (key)
   "Return and detach the ready prefetched file matching KEY."
