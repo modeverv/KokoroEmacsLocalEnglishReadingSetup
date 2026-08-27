@@ -806,7 +806,7 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
     (cond
      ((and (frame-live-p frame)
            (eq buffer (frame-parameter frame 'my-reading-kindle-buffer)))
-      " Kindle ")
+      " KINDLE ")
      ((and (frame-live-p frame)
            (eq buffer (frame-parameter frame 'my-reading-epub-buffer)))
       " EPUB ")

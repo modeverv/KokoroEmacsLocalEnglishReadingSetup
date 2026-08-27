@@ -1125,7 +1125,13 @@
                   (english-reading-mode--pdf-highlight-start context)
                   (should (eq (overlay-get page-overlay 'display)
                               'highlight-image))
-                  (english-reading-mode--pdf-highlight-finish context)
+                  ;; A real DocView state read now returns the installed SVG,
+                  ;; not PAGE-IMAGE.  Restoration must use the captured value.
+                  (cl-letf (((symbol-function
+                              'english-reading-mode--pdf-display-state)
+                             (lambda (&optional _window)
+                               (list page-overlay 'highlight-image nil))))
+                    (english-reading-mode--pdf-highlight-finish context))
                   (should (equal (overlay-get page-overlay 'display)
                                  page-image))))))
         (when (buffer-live-p pdf-buffer) (kill-buffer pdf-buffer))
@@ -1135,36 +1141,135 @@
   (with-temp-buffer
     (setq-local major-mode 'pdf-view-mode)
     (setq-local english-reading-mode--pdf-page 3)
-    (let (created svg-arguments displayed restored)
+    (let (created render-arguments image-arguments displayed restored)
       (cl-letf (((symbol-function 'pdf-view-create-page)
                  (lambda (page &optional window)
                    (setq created (list page window))
-                   'normal-page-image))
-                ((symbol-function 'english-reading-mode--pdf-svg-highlight)
-                 (lambda (image geometry rectangles)
-                   (setq svg-arguments (list image geometry rectangles))
-                   'fill-only-highlight-image))
+                   '(image :type png :width 500)))
+                ((symbol-function 'pdf-cache-renderpage-highlight)
+                 (lambda (page width &rest regions)
+                   (setq render-arguments (list page width regions))
+                   "highlight-png-data"))
+                ((symbol-function 'create-image)
+                 (lambda (data type data-p &rest properties)
+                   (setq image-arguments
+                         (list data type data-p properties))
+                   'native-highlight-image))
                 ((symbol-function 'pdf-view-display-image)
                  (lambda (image page &optional window _inhibit-slice)
                    (setq displayed (list image page window))))
                 ((symbol-function 'pdf-view-display-page)
                  (lambda (page &optional window)
                    (setq restored (list page window)))))
-        (english-reading-mode--pdf-view-highlight
-         'test-window
-         '(:width 500.0 :height 1000.0)
-         '((50.0 200.0 250.0 240.0)))
+        (cl-letf (((symbol-function 'window-live-p) (lambda (_window) t))
+                  ((symbol-function 'window-buffer)
+                   (lambda (_window) (current-buffer))))
+          (english-reading-mode--pdf-view-highlight
+           'test-window
+           '(:width 500.0 :height 1000.0)
+           '((50.0 200.0 250.0 240.0))
+           'speech-context))
         (should (equal created '(3 test-window)))
-        (should (equal svg-arguments
-                       '(normal-page-image
-                         (:width 500.0 :height 1000.0)
-                         ((50.0 200.0 250.0 240.0)))))
+        (should
+         (equal render-arguments
+                '(3 500
+                  (("#FFD54F" "#FFD54F" 0.35
+                    (0.1 0.2 0.5 0.24))))))
+        (should (equal image-arguments
+                       '("highlight-png-data" png t
+                         (:width 500 :pointer arrow))))
         (should (equal displayed
-                       '(fill-only-highlight-image 3 test-window)))
+                       '(native-highlight-image 3 test-window)))
         (should (= english-reading-mode--pdf-highlight-page 3))
-        (english-reading-mode--pdf-restore-image (current-buffer) 'test-window)
+        (should (eq (plist-get english-reading-mode--pdf-highlight-state
+                               :context)
+                    'speech-context))
+        (cl-letf (((symbol-function 'window-live-p) (lambda (_window) t))
+                  ((symbol-function 'window-buffer)
+                   (lambda (_window) (current-buffer))))
+          (english-reading-mode--pdf-restore-image
+           (current-buffer) 'test-window 'speech-context))
         (should (equal restored '(3 test-window)))
-        (should-not english-reading-mode--pdf-highlight-page)))))
+        (should-not english-reading-mode--pdf-highlight-page)
+        (should-not english-reading-mode--pdf-highlight-state)))))
+
+(ert-deftest english-reading-mode-pdf-roll-highlight-targets-page-overlay ()
+  (save-window-excursion
+    (with-temp-buffer
+      (insert (make-string 80 ?\s))
+      (let* ((window (selected-window))
+             (page 16)
+             (position (- (* 4 page) 3))
+             (selection-overlay (make-overlay 47 63))
+             (page-overlay (make-overlay position (1+ position)))
+             (pdf-view-roll-minor-mode t))
+        (set-window-buffer window (current-buffer))
+        ;; This overlapping selection is returned first by pdf-tools'
+        ;; `pdf-roll-page-overlay' on the affected live layout.
+        (overlay-put selection-overlay 'window window)
+        (overlay-put selection-overlay 'face 'region)
+        (overlay-put selection-overlay 'display 'selection-image)
+        (overlay-put page-overlay 'window window)
+        (overlay-put page-overlay 'category 'pdf-roll)
+        (overlay-put page-overlay 'display 'normal-page-image)
+        (cl-letf (((symbol-function 'pdf-roll-page-to-pos)
+                   (lambda (_page) position))
+                  ((symbol-function 'pdf-roll-maybe-slice-image)
+                   (lambda (image _window &optional _inhibit) image))
+                  ((symbol-function 'force-window-update) #'ignore))
+          (english-reading-mode--pdf-view-display-image
+           'highlight-image page window))
+        (should (eq (overlay-get page-overlay 'display) 'highlight-image))
+        (should (eq (overlay-get selection-overlay 'display)
+                    'selection-image))))))
+
+(ert-deftest english-reading-mode-pdf-highlight-finish-does-not-restore-newer-context ()
+  (save-window-excursion
+    (with-temp-buffer
+      (setq-local major-mode 'pdf-view-mode)
+      (setq-local buffer-file-name "/tmp/highlight-owner.pdf")
+      (set-window-buffer (selected-window) (current-buffer))
+      (let* ((old-context (list :id 1 :window (selected-window)))
+             (new-context (list :id 2 :window (selected-window)))
+             (english-reading-mode--pdf-highlight-page 4)
+             (english-reading-mode--pdf-highlight-state
+              (list :context new-context :mode 'pdf-view-mode
+                    :page 4 :window (selected-window)))
+             restored)
+        (cl-letf (((symbol-function 'pdf-view-display-page)
+                   (lambda (&rest arguments) (setq restored arguments))))
+          (english-reading-mode--pdf-highlight-finish old-context))
+        (should-not restored)
+        (should english-reading-mode--pdf-highlight-state)
+        (should (= english-reading-mode--pdf-highlight-page 4))))))
+
+(ert-deftest english-reading-mode-pdf-new-highlight-restores-stale-image-first ()
+  (save-window-excursion
+    (let ((pdf-buffer (generate-new-buffer " *stale-pdf-highlight*"))
+          (text-buffer (generate-new-buffer " *stale-pdf-highlight-text*"))
+          events)
+      (unwind-protect
+          (progn
+            (switch-to-buffer pdf-buffer)
+            (setq-local major-mode 'pdf-view-mode)
+            (setq-local buffer-file-name "/tmp/stale-highlight.pdf")
+            (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+            (setq-local english-reading-mode--pdf-highlight-page 2)
+            (setq-local english-reading-mode--pdf-highlight-state
+                        (list :context 'old :mode 'pdf-view-mode
+                              :page 2 :window (selected-window)))
+            (cl-letf (((symbol-function 'pdf-view-display-page)
+                       (lambda (&rest _) (push 'restore events)))
+                      ((symbol-function
+                        'english-reading-mode--pdf-context-rectangles)
+                       (lambda (_context) nil)))
+              (english-reading-mode--pdf-highlight-start
+               (list :window (selected-window) :buffer text-buffer)))
+            (should (equal events '(restore)))
+            (should-not english-reading-mode--pdf-highlight-state)
+            (should-not english-reading-mode--pdf-highlight-page))
+        (when (buffer-live-p pdf-buffer) (kill-buffer pdf-buffer))
+        (when (buffer-live-p text-buffer) (kill-buffer text-buffer))))))
 
 (ert-deftest english-reading-mode-pdf-highlight-is-deferred-after-scroll ()
   (with-temp-buffer
@@ -1289,7 +1394,7 @@
                        :buffer text-buffer
                        :text "Spoken sentence."
                        :beg 1 :end 17))))
-            (should (= centered-at 620)))
+            (should (= centered-at 820)))
         (when (buffer-live-p pdf-buffer)
           (kill-buffer pdf-buffer))
         (when (buffer-live-p text-buffer)
@@ -1301,6 +1406,7 @@
           (text-buffer (generate-new-buffer " *continuous-pdf-roll-text*"))
           goto-page
           (goto-count 0)
+          (simulated-vscroll 0)
           forward-scrolls
           single-page-scroll)
       (unwind-protect
@@ -1324,15 +1430,23 @@
                         ((symbol-function 'pdf-roll-goto-page)
                          (lambda (page window)
                            (cl-incf goto-count)
-                           (setq goto-page (list page window))))
+                           (setq goto-page (list page window)
+                                 simulated-vscroll 0)))
+                        ((symbol-function 'pdf-view-current-page)
+                         (lambda (&optional _window) 3))
                         ((symbol-function 'pdf-roll-display-page)
                          (lambda (&rest _) 2000))
                         ((symbol-function 'pdf-roll-scroll-forward)
                          (lambda (pixels window pixelwise)
+                           (cl-incf simulated-vscroll pixels)
                            (push (list pixels window pixelwise)
                                  forward-scrolls)))
                         ((symbol-function 'pdf-roll-scroll-backward)
-                         #'ignore)
+                         (lambda (pixels _window _pixelwise)
+                           (cl-decf simulated-vscroll pixels)))
+                        ((symbol-function 'window-vscroll)
+                         (lambda (&optional _window _pixels)
+                           simulated-vscroll))
                         ((symbol-function 'pdf-view-image-size)
                          (lambda (&optional _displayed _window)
                            '(1000 . 2000)))
@@ -1352,10 +1466,12 @@
                        :buffer text-buffer
                        :text "Following sentence."
                        :beg 18 :end 37))))
-            (should (equal (car goto-page) 3))
-            (should (= goto-count 1))
+            ;; The already-visible page is measured in place; advancing to the
+            ;; next utterance must not force a page jump.
+            (should-not goto-page)
+            (should (= goto-count 0))
             (should (equal (mapcar #'car (reverse forward-scrolls))
-                           '(620 200)))
+                           '(820 200)))
             (should (cl-every (lambda (scroll) (eq (nth 2 scroll) t))
                               forward-scrolls))
             (should-not single-page-scroll))
@@ -1370,6 +1486,14 @@
        '(10.0 600.0 100.0 620.0)
        1000.0 2000 1000 800 500)
       200)))
+
+(ert-deftest english-reading-mode-pdf-positions-speech-at-top-quarter ()
+  (let ((english-reading-mode-pdf-speech-screen-position 0.25))
+    (should
+     (= (english-reading-mode--pdf-continuous-vscroll
+         '(10.0 500.0 100.0 520.0)
+         1000.0 2000 2000 800)
+        820))))
 
 (ert-deftest english-reading-mode-pdf-centering-falls-back-to-text-position ()
   (let ((english-reading-mode--pdf-page 2)
@@ -2482,7 +2606,7 @@
                                      epub-buffer eww-buffer)))
                 (should (equal (mapcar #'my/read-center-tab-name
                                        (my/read-center-tab-buffers))
-                               '(" DIRED " " Kindle " " PDF " " EPUB "
+                               '(" DIRED " " KINDLE " " PDF " " EPUB "
                                  " EWW ")))
                 (with-current-buffer pdf-buffer
                   (should (eq my/read-center-tab-placeholder-type 'pdf))))

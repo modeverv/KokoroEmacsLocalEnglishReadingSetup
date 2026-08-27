@@ -24,7 +24,7 @@
   :type 'color
   :group 'english-reading-mode)
 
-(defcustom english-reading-mode-pdf-highlight-opacity 0.15
+(defcustom english-reading-mode-pdf-highlight-opacity 0.35
   "Opacity of the spoken-sentence highlight on a PDF page."
   :type 'number
   :group 'english-reading-mode)
@@ -35,6 +35,15 @@
 The short delay lets PDF Tools or DocView finish redisplaying the new scroll
 position.  Speech playback is started independently and is never made to wait
 for the PDF image and SVG highlight rendering path."
+  :type 'number
+  :group 'english-reading-mode)
+
+(defcustom english-reading-mode-pdf-speech-screen-position 0.25
+  "Vertical screen position used for continuous PDF speech.
+
+The value is a ratio of the PDF viewport height: 0.0 is the top edge, 0.5 is
+the center, and 1.0 is the bottom edge.  The default keeps the beginning of the
+spoken text about one quarter of the way down from the top."
   :type 'number
   :group 'english-reading-mode)
 
@@ -90,6 +99,7 @@ This also runs on synthesis failure or explicit stop.")
 (defvar-local english-reading-mode--pdf-bbox-cache nil)
 (defvar-local english-reading-mode--pdf-image-data-cache nil)
 (defvar-local english-reading-mode--pdf-highlight-page nil)
+(defvar-local english-reading-mode--pdf-highlight-state nil)
 
 (defvar-local english-reading-mode-key-active-predicate nil
   "Optional function deciding whether this mode's keys are active.
@@ -851,42 +861,121 @@ the same image that is actually displayed."
           (image-mode-window-get 'image window)
           (image-mode-window-get 'slice window))))
 
-(defun english-reading-mode--pdf-view-highlight
-    (window geometry rectangles)
-  "Display RECTANGLES as a fill-only highlight in pdf-tools WINDOW."
-  (let* ((page english-reading-mode--pdf-page)
-         ;; `pdf-info-renderpage-highlight' always strokes every region.  Even
-         ;; when its stroke matches the fill, the doubly painted edge remains
-         ;; visibly darker.  Compose the normal page with our fill-only SVG
-         ;; layer instead.
-         (page-image (pdf-view-create-page page window))
-         (highlight-image
-          (english-reading-mode--pdf-svg-highlight
-           page-image geometry rectangles)))
-    (setq english-reading-mode--pdf-highlight-page page)
-    ;; `pdf-view-display-image' updates pdf-tools' canonical page image, so its
-    ;; normal redisplay does not immediately cover the speech highlight.
-    (pdf-view-display-image highlight-image page window)))
+(defun english-reading-mode--pdf-roll-page-overlay (page window)
+  "Return PAGE's actual pdf-roll overlay for WINDOW.
 
-(defun english-reading-mode--pdf-restore-image (pdf-buffer &optional window)
-  "Restore PDF-BUFFER's normal page image in WINDOW."
+`pdf-roll-page-overlay' selects the first overlay at the page position whose
+`window' property matches.  A PDF selection or other window-local overlay can
+span that same position and be returned instead, leaving the visible page
+image unchanged.  Match pdf-roll's own category and exact page slot here."
+  (when (and (fboundp 'pdf-roll-page-to-pos) (window-live-p window))
+    (let ((position (pdf-roll-page-to-pos page)))
+      (seq-find
+       (lambda (overlay)
+         (and (eq (overlay-get overlay 'window) window)
+              (eq (overlay-get overlay 'category) 'pdf-roll)
+              (= (overlay-start overlay) position)
+              (= (overlay-end overlay) (1+ position))))
+       (overlays-at position)))))
+
+(defun english-reading-mode--pdf-view-display-image (image page window)
+  "Display IMAGE for PAGE in pdf-tools WINDOW without overlay ambiguity."
+  (if (bound-and-true-p pdf-view-roll-minor-mode)
+      (if-let ((overlay
+                (english-reading-mode--pdf-roll-page-overlay page window)))
+          (progn
+            (overlay-put
+             overlay 'display
+             (if (fboundp 'pdf-roll-maybe-slice-image)
+                 (pdf-roll-maybe-slice-image image window)
+               image))
+            (force-window-update window))
+        (error "No pdf-roll page overlay for page %s" page))
+    (pdf-view-display-image image page window)))
+
+(defun english-reading-mode--pdf-view-highlight
+    (window geometry rectangles &optional context)
+  "Display RECTANGLES as a native raster highlight in pdf-tools WINDOW."
+  (let* ((page english-reading-mode--pdf-page)
+         (page-image (pdf-view-create-page page window))
+         (width (plist-get (cdr page-image) :width))
+         (page-width (float (plist-get geometry :width)))
+         (page-height (float (plist-get geometry :height)))
+         ;; pdf-info takes page-relative edges.  Keep the positioned-text
+         ;; matcher in PDF coordinates and convert only at this API boundary.
+         (relative-rectangles
+          (mapcar
+           (lambda (rectangle)
+             (pcase-let ((`(,xmin ,ymin ,xmax ,ymax) rectangle))
+               (list (/ xmin page-width) (/ ymin page-height)
+                     (/ xmax page-width) (/ ymax page-height))))
+           rectangles))
+         ;; A raster rendered by pdf-tools is materially more reliable than
+         ;; embedding the full page PNG in a giant SVG.  The latter can turn a
+         ;; live PDF window black on macOS even though Emacs accepts the image.
+         (highlight-data
+          (pdf-cache-renderpage-highlight
+           page width
+           (append (list english-reading-mode-pdf-highlight-color
+                         english-reading-mode-pdf-highlight-color
+                         english-reading-mode-pdf-highlight-opacity)
+                   relative-rectangles)))
+         (highlight-image
+          (create-image highlight-data 'png t
+                        :width width :pointer 'arrow)))
+    ;; Update the page image itself so normal redisplay does not immediately
+    ;; cover the speech highlight.
+    (english-reading-mode--pdf-view-display-image
+     highlight-image page window)
+    (setq english-reading-mode--pdf-highlight-page page
+          english-reading-mode--pdf-highlight-state
+          (list :context context :mode 'pdf-view-mode
+                :page page :window window))))
+
+(defun english-reading-mode--pdf-restore-image
+    (pdf-buffer &optional window context)
+  "Restore PDF-BUFFER's normal page image in WINDOW.
+
+When CONTEXT is non-nil, restore only the image installed for that exact
+speech context.  This prevents a late finish event from removing a newer
+sentence's highlight."
   (when (buffer-live-p pdf-buffer)
     (with-current-buffer pdf-buffer
-      (cond
-       ((and (eq major-mode 'pdf-view-mode)
-             english-reading-mode--pdf-highlight-page)
-        ;; Re-render the normal page at the *current* display size.  Restoring
-        ;; a saved pre-highlight image would undo any zoom made during speech.
-        (pdf-view-display-page english-reading-mode--pdf-highlight-page window)
-        (setq english-reading-mode--pdf-highlight-page nil))
-       ((english-reading-mode--pdf-buffer-p)
-        (pcase-let ((`(,overlay ,image ,slice)
-                     (english-reading-mode--pdf-display-state window)))
-          (when (overlayp overlay)
-            (overlay-put overlay 'display
-                         (if slice
-                             (list (cons 'slice slice) image)
-                           image)))))))))
+      (let ((state english-reading-mode--pdf-highlight-state))
+        (when (and state
+                   (or (null context)
+                       (eq context (plist-get state :context))))
+          (let ((saved-window (plist-get state :window)))
+            ;; Clear ownership before redisplay.  If pdf-tools signals while a
+            ;; window is disappearing, a later utterance must still be able to
+            ;; establish fresh state instead of inheriting a stuck owner.
+            (setq english-reading-mode--pdf-highlight-state nil
+                  english-reading-mode--pdf-highlight-page nil)
+            (pcase (plist-get state :mode)
+              ('pdf-view-mode
+               (when (and (window-live-p saved-window)
+                          (eq (window-buffer saved-window) pdf-buffer))
+                 ;; Re-render at the current zoom.  In continuous roll mode
+                 ;; this restores the exact page overlay, even if another page
+                 ;; has meanwhile become the topmost visible page.
+                 (let ((page (plist-get state :page)))
+                   (if (bound-and-true-p pdf-view-roll-minor-mode)
+                       (english-reading-mode--pdf-view-display-image
+                        (pdf-view-create-page page saved-window)
+                        page saved-window)
+                     (pdf-view-display-page page saved-window)))))
+              ('doc-view-mode
+               (let ((overlay (plist-get state :overlay))
+                     (image (plist-get state :image))
+                     (slice (plist-get state :slice)))
+                 ;; DocView cannot recreate the original image via pdf-tools.
+                 ;; Restore the display value captured before SVG replacement;
+                 ;; reading it here would only return the highlight itself.
+                 (when (overlayp overlay)
+                   (overlay-put overlay 'display
+                                (if slice
+                                    (list (cons 'slice slice) image)
+                                  image))))))))))))
 
 (defun english-reading-mode--pdf-highlight-start (context)
   "Highlight the PDF words belonging to speech CONTEXT."
@@ -898,12 +987,16 @@ the same image that is actually displayed."
                       (eq (plist-get context :buffer)
                           english-reading-mode--pdf-text-buffer))))
       (with-current-buffer pdf-buffer
+        ;; A replacement utterance may arrive before the old watcher reports
+        ;; completion.  Never leave its old raster/SVG visible while preparing
+        ;; the next sentence, including the no-bbox/error paths below.
+        (english-reading-mode--pdf-restore-image pdf-buffer window)
         (condition-case err
             (when-let ((match
                         (english-reading-mode--pdf-context-rectangles context)))
               (if (eq major-mode 'pdf-view-mode)
                   (english-reading-mode--pdf-view-highlight
-                   window (car match) (cadr match))
+                   window (car match) (cadr match) context)
                 (pcase-let* ((`(,overlay ,image ,slice)
                               (english-reading-mode--pdf-display-state window))
                              (highlight
@@ -913,7 +1006,11 @@ the same image that is actually displayed."
                     (overlay-put overlay 'display
                                  (if slice
                                      (list (cons 'slice slice) highlight)
-                                   highlight))))))
+                                   highlight))
+                    (setq english-reading-mode--pdf-highlight-state
+                          (list :context context :mode 'doc-view-mode
+                                :window window :overlay overlay
+                                :image image :slice slice))))))
           (error
            (message "PDF sentence highlight unavailable: %s"
                     (error-message-string err))))))))
@@ -982,22 +1079,33 @@ late finish notification for an older utterance from cancelling the new one."
   (let ((window (plist-get context :window)))
     (when (window-live-p window)
       (english-reading-mode--pdf-restore-image
-       (window-buffer window) window))))
+       (window-buffer window) window context))))
 
 (defun english-reading-mode--pdf-continuous-vscroll
     (rectangle page-height full-image-height displayed-image-height
                viewport-height &optional image-top-offset)
-  "Return pixel vscroll centering RECTANGLE in a rendered PDF page.
+  "Return pixel vscroll positioning RECTANGLE in a rendered PDF page.
 
 PAGE-HEIGHT is the PDF-space page height.  FULL-IMAGE-HEIGHT is the rendered
 height before slicing; DISPLAYED-IMAGE-HEIGHT is the visible slice height;
-VIEWPORT-HEIGHT and IMAGE-TOP-OFFSET are pixels.  Clamp at displayed edges."
+VIEWPORT-HEIGHT and IMAGE-TOP-OFFSET are pixels.  Position the spoken text at
+`english-reading-mode-pdf-speech-screen-position' and clamp at displayed
+edges."
   (let* ((spoken-y (/ (+ (nth 1 rectangle) (nth 3 rectangle)) 2.0))
          (spoken-pixel (* (/ spoken-y page-height) full-image-height))
          (displayed-pixel (- spoken-pixel (or image-top-offset 0)))
+         (anchor-pixel
+          (english-reading-mode--pdf-speech-anchor-pixel viewport-height))
          (maximum (max 0 (- displayed-image-height viewport-height))))
     (round (max 0 (min maximum
-                       (- displayed-pixel (/ viewport-height 2.0)))))))
+                       (- displayed-pixel anchor-pixel))))))
+
+(defun english-reading-mode--pdf-speech-anchor-pixel (viewport-height)
+  "Return the desired speech anchor in pixels for VIEWPORT-HEIGHT."
+  (* viewport-height
+     (max 0.0
+          (min 1.0
+               (float english-reading-mode-pdf-speech-screen-position)))))
 
 (defun english-reading-mode--pdf-continuous-position (context)
   "Return page geometry and a vertical position for speech CONTEXT.
@@ -1025,28 +1133,27 @@ relative source-text position so zoom correction never keeps a stale scroll."
                  (y (* ratio (plist-get geometry :height))))
             (list geometry (list 0.0 y 0.0 y)))))))
 
-(defun english-reading-mode--pdf-roll-forward-distance
-    (from-page from-pixel to-page to-pixel window)
-  "Return forward roll pixels from FROM-PAGE/FROM-PIXEL to TO-PAGE/TO-PIXEL."
-  (cond
-   ((and (= from-page to-page) (>= to-pixel from-pixel))
-    (- to-pixel from-pixel))
-   ((> to-page from-page)
-    (let* ((margin (if (boundp 'pdf-roll-vertical-margin)
-                       pdf-roll-vertical-margin
-                     0))
-           (distance
-            (+ (- (pdf-roll-display-page from-page window) from-pixel)
-               margin
-               to-pixel)))
-      (cl-loop for page from (1+ from-page) below to-page
-               do (cl-incf distance
-                            (+ (pdf-roll-display-page page window) margin)))
-      distance))
-   (t 0)))
+(defun english-reading-mode--pdf-roll-spoken-window-pixel
+    (page spoken-pixel window)
+  "Return PAGE's SPOKEN-PIXEL position inside roll-mode WINDOW.
+
+The result is measured from the top of the visible viewport.  Return nil when
+PAGE precedes the topmost visible page, so the caller can re-establish an
+absolute page position before measuring again."
+  (let ((top-page (and (fboundp 'pdf-view-current-page)
+                       (pdf-view-current-page window))))
+    (when (and (integerp top-page) (<= top-page page))
+      (let ((margin (if (boundp 'pdf-roll-vertical-margin)
+                        pdf-roll-vertical-margin
+                      0)))
+        (- (+ spoken-pixel
+              (cl-loop for visible-page from top-page below page
+                       sum (+ (pdf-roll-display-page visible-page window)
+                              margin)))
+           (window-vscroll window t))))))
 
 (defun english-reading-mode--pdf-center-continuous-speech (context)
-  "Center PDF speech CONTEXT while preserving continuous-page scrolling."
+  "Position PDF speech CONTEXT while preserving continuous-page scrolling."
   (let* ((window (plist-get context :window))
          (pdf-buffer (and (window-live-p window) (window-buffer window))))
     (when (and (buffer-live-p pdf-buffer)
@@ -1073,11 +1180,10 @@ relative source-text position so zoom correction never keeps a stale scroll."
                                (fboundp 'pdf-roll-display-page)
                                (fboundp 'pdf-roll-scroll-forward)
                                (fboundp 'pdf-roll-scroll-backward))
-                          ;; Keep a document-relative speech anchor.  After the
-                          ;; first utterance, move only by the forward distance
-                          ;; between successive sentence positions; repeatedly
-                          ;; calling `pdf-roll-goto-page' makes the visible pages
-                          ;; jump backward even though speech itself advances.
+                          ;; Re-measure the spoken line against the live roll
+                          ;; viewport for every utterance.  Relative-only motion
+                          ;; accumulates page-margin and vscroll errors and lets
+                          ;; the anchor drift away from its configured position.
                           (let* ((page english-reading-mode--pdf-page)
                                  (page-height
                                   (pdf-roll-display-page page window))
@@ -1088,43 +1194,30 @@ relative source-text position so zoom correction never keeps a stale scroll."
                                   (round (* (/ spoken-y
                                                (plist-get geometry :height))
                                             page-height)))
-                                 (previous-page
-                                  (plist-get
-                                   english-reading-mode--continuous-state
-                                   :pdf-roll-page))
-                                 (previous-pixel
-                                  (plist-get
-                                   english-reading-mode--continuous-state
-                                   :pdf-roll-pixel)))
-                            (if (and (integerp previous-page)
-                                     (numberp previous-pixel))
-                                (let ((distance
-                                       (english-reading-mode--pdf-roll-forward-distance
-                                        previous-page previous-pixel
-                                        page spoken-pixel window)))
-                                  (when (> distance 0)
-                                    (pdf-roll-scroll-forward distance window t)))
-                              ;; Only the first utterance establishes an
-                              ;; absolute visual anchor.  Later chunks never do.
+                                 (actual-pixel
+                                  (english-reading-mode--pdf-roll-spoken-window-pixel
+                                   page spoken-pixel window)))
+                            (unless (numberp actual-pixel)
                               (pdf-roll-goto-page page window)
+                              (setq actual-pixel
+                                    (english-reading-mode--pdf-roll-spoken-window-pixel
+                                     page spoken-pixel window)))
+                            (when (numberp actual-pixel)
                               (let ((delta
-                                     (round (- spoken-pixel
-                                               (/ viewport-height 2.0)))))
+                                     (round
+                                      (- actual-pixel
+                                         (english-reading-mode--pdf-speech-anchor-pixel
+                                          viewport-height)))))
                                 (if (>= delta 0)
                                     (pdf-roll-scroll-forward delta window t)
                                   (pdf-roll-scroll-backward
                                    (- delta) window t))))
-                            (when (or (not (and (integerp previous-page)
-                                                (numberp previous-pixel)))
-                                      (> page previous-page)
-                                      (and (= page previous-page)
-                                           (>= spoken-pixel previous-pixel)))
-                              (setq english-reading-mode--continuous-state
-                                    (plist-put
-                                     (plist-put
-                                      english-reading-mode--continuous-state
-                                      :pdf-roll-page page)
-                                     :pdf-roll-pixel spoken-pixel))))
+                            (setq english-reading-mode--continuous-state
+                                  (plist-put
+                                   (plist-put
+                                    english-reading-mode--continuous-state
+                                    :pdf-roll-page page)
+                                   :pdf-roll-pixel spoken-pixel)))
                         (let ((full-image-height
                                (cdr (pdf-view-image-size nil window)))
                               (displayed-image-height
