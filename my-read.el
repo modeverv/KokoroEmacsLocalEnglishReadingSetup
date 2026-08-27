@@ -456,6 +456,8 @@ styling remains unchanged while the target overlay moves through the book."
 
 While this is non-nil, point may already be on the next sentence, but
 translation remains pinned to CONTEXT's :text until the matching finish event.")
+(defvar my/read-speech-translation-suppressed-context nil
+  "Non-English speech context currently suppressing automatic translation.")
 
 (defvar-local my/read-source-language nil
   "Detected source language for the current reading buffer, or nil.")
@@ -865,6 +867,52 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
   (when (my/read--center-window-active-p)
     binding))
 
+(defun my/read--filter-pdf-close-key-binding (binding)
+  "Return BINDING only for a PDF in my-read's active reading window."
+  (when (and (my/read--center-window-active-p)
+             (english-reading-mode--pdf-buffer-p))
+    binding))
+
+(defun my/read-close-pdf ()
+  "Close the active my-read PDF while keeping the workspace frame open."
+  (interactive)
+  (let* ((frame (selected-frame))
+         (center (my/read-center-window frame))
+         (pdf-buffer (current-buffer))
+         (dired-buffer (frame-parameter frame 'my-reading-dired-buffer))
+         (notes-window (my/read-note-window frame)))
+    (unless (and (my/read--center-window-active-p)
+                 (english-reading-mode--pdf-buffer-p pdf-buffer))
+      (user-error "my-readのPDFペインで実行してください"))
+    (unless (buffer-live-p dired-buffer)
+      (user-error "my-readのDIREDタブが見つかりません"))
+
+    (my/read-position-save-buffer pdf-buffer center)
+    (when (fboundp 'kokoro-reader-stop)
+      (kokoro-reader-stop))
+
+    ;; Move both Org-noter-owned windows away before ending the session.  Its
+    ;; stock kill hook otherwise deletes the my-read frame with the session.
+    (when (window-live-p notes-window)
+      (set-window-buffer notes-window (my/read--prepare-notes-buffer frame)))
+    (set-window-buffer center dired-buffer)
+    (select-window center)
+
+    (when (fboundp 'my/read-org-noter-close-source)
+      (my/read-org-noter-close-source pdf-buffer))
+    ;; Org-noter normally kills its document itself.  Its cleanup can fail on
+    ;; a malformed notes root, so make PDF closure an explicit final step.
+    (when (buffer-live-p pdf-buffer)
+      (kill-buffer pdf-buffer))
+
+    (let ((placeholder
+           (my/read--prepare-center-tab-placeholder frame 'pdf)))
+      (set-frame-parameter frame 'my-reading-pdf-buffer placeholder)
+      (my/read--configure-center-tab-buffer placeholder frame))
+    (my/read-lookup-follow-post-command)
+    (my/read-translate-follow-post-command)
+    (message "PDFを閉じました")))
+
 (defun my/read-next-word ()
   "Move point to the beginning of the next word in the reading pane."
   (interactive)
@@ -907,6 +955,9 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
     (define-key map (kbd "C-c o")
                 '(menu-item "Open Org-noter notes" my/read-org-noter-follow-source
                             :filter my/read--filter-center-key-binding))
+    (define-key map (kbd "C-x k")
+                '(menu-item "Close my-read PDF" my/read-close-pdf
+                            :filter my/read--filter-pdf-close-key-binding))
     (define-key map (kbd "u")
                 '(menu-item "Save vocabulary" my/read-vocab-capture
                             :filter my/read--filter-center-key-binding))
@@ -936,6 +987,9 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
 (keymap-set my-read-center-tab-mode-map "C-c o"
             '(menu-item "Open Org-noter notes" my/read-org-noter-follow-source
                         :filter my/read--filter-center-key-binding))
+(keymap-set my-read-center-tab-mode-map "C-x k"
+            '(menu-item "Close my-read PDF" my/read-close-pdf
+                        :filter my/read--filter-pdf-close-key-binding))
 (keymap-set my-read-center-tab-mode-map "u"
             '(menu-item "Save vocabulary" my/read-vocab-capture
                         :filter my/read--filter-center-key-binding))
@@ -2204,6 +2258,11 @@ FRAME, CENTER and TARGET identify the request; MODE describes its source."
 
   ;; Drop an idle-timer request if the reading target changed meanwhile.
   (when (and my-read-translate-follow-mode
+             (not (and (listp my/read-speech-translation-suppressed-context)
+                       (eq frame
+                           (plist-get
+                            my/read-speech-translation-suppressed-context
+                            :frame))))
              (frame-live-p frame)
              (window-live-p center)
              (equal target my/read-translate-last-target))
@@ -2218,6 +2277,11 @@ While Kokoro is active in FRAME, keep translation locked to the exact spoken
 sentence.  Otherwise translate the sentence containing CENTER's point.  This
 function is also safe to call asynchronously from the speech-finish hook."
   (when (and my-read-translate-follow-mode
+             (not (and (listp my/read-speech-translation-suppressed-context)
+                       (eq frame
+                           (plist-get
+                            my/read-speech-translation-suppressed-context
+                            :frame))))
              (frame-live-p frame)
              (my/read-frame-p frame)
              (window-live-p center))
@@ -2290,8 +2354,14 @@ Otherwise, translate the sentence containing point."
 ;;; English-reading speech -> translation lock
 ;;; ---------------------------------------------------------------------------
 
+(defun my/read--english-speech-context-p (context)
+  "Return non-nil when spoken CONTEXT has an English source language."
+  (let ((frame (plist-get context :frame))
+        (source-buffer (plist-get context :buffer)))
+    (equal (car (my/read--translation-languages frame source-buffer)) "en")))
+
 (defun my/read--english-speech-start (context)
-  "Lock translation to the spoken English-reading CONTEXT."
+  "Translate English CONTEXT, or suppress translation for other languages."
   (let* ((frame (plist-get context :frame))
          (window (plist-get context :window))
          (center (and (frame-live-p frame)
@@ -2301,13 +2371,26 @@ Otherwise, translate the sentence containing point."
                (my/read-frame-p frame)
                (window-live-p center)
                (eq window center))
-      ;; This runs before `j' advances point.  CONTEXT remains the translation
-      ;; source even after point has moved to the next sentence.
-      (setq my/read-kokoro-context context)
-      (my/read-translate-update-for-frame frame center))))
+      (if (my/read--english-speech-context-p context)
+          (progn
+            ;; This runs before point advances.  CONTEXT remains the
+            ;; translation source even after point has moved onward.
+            (setq my/read-speech-translation-suppressed-context nil
+                  my/read-kokoro-context context)
+            (my/read-translate-update-for-frame frame center))
+        (setq my/read-kokoro-context nil
+              my/read-speech-translation-suppressed-context context
+              my/read-translate-last-target nil)
+        (when (timerp my/read-translate-timer)
+          (cancel-timer my/read-translate-timer)
+          (setq my/read-translate-timer nil))
+        (my/read-translate-stop-process)
+        (my/read-translate-delete-overlay frame)))))
 
 (defun my/read--english-speech-finish (context)
   "Unlock translation when the matching English-reading CONTEXT finishes."
+  (when (eq context my/read-speech-translation-suppressed-context)
+    (setq my/read-speech-translation-suppressed-context nil))
   ;; Ignore stale completion from an utterance replaced by a newer one.
   (when (eq context my/read-kokoro-context)
     (let ((frame (plist-get context :frame)))

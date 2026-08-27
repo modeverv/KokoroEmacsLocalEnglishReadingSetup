@@ -24,7 +24,7 @@
   :type 'color
   :group 'english-reading-mode)
 
-(defcustom english-reading-mode-pdf-highlight-opacity 0.35
+(defcustom english-reading-mode-pdf-highlight-opacity 0.15
   "Opacity of the spoken-sentence highlight on a PDF page."
   :type 'number
   :group 'english-reading-mode)
@@ -34,7 +34,7 @@
   :type 'string
   :group 'english-reading-mode)
 
-(defcustom english-reading-mode-pdf-highlight-delay 0.01
+(defcustom english-reading-mode-pdf-highlight-delay 0.001
   "Seconds to wait after PDF scrolling before drawing the speech highlight.
 
 The short delay yields once to PDF Tools or DocView redisplay.  If scrolling is
@@ -43,12 +43,12 @@ before drawing.  Speech playback is independent of highlight rendering."
   :type 'number
   :group 'english-reading-mode)
 
-(defcustom english-reading-mode-pdf-highlight-watch-duration 0.5
+(defcustom english-reading-mode-pdf-highlight-watch-duration 0.25
   "Seconds to protect a fresh PDF highlight from delayed redisplay."
   :type 'number
   :group 'english-reading-mode)
 
-(defcustom english-reading-mode-pdf-speech-screen-position 0.25
+(defcustom english-reading-mode-pdf-speech-screen-position 0.2
   "Vertical screen position used for continuous PDF speech.
 
 The value is a ratio of the PDF viewport height: 0.0 is the top edge, 0.5 is
@@ -57,7 +57,7 @@ spoken text about one quarter of the way down from the top."
   :type 'number
   :group 'english-reading-mode)
 
-(defcustom english-reading-mode-macos-continuous-sentence-count 6
+(defcustom english-reading-mode-macos-continuous-sentence-count 3
   "Maximum number of sentences in one continuous macOS speech utterance.
 
 Larger chunks make `/usr/bin/say' take longer before the first playback, but
@@ -66,9 +66,14 @@ such as `english-reading-mode-speak-current-sentence' still speak one sentence."
   :type '(integer :tag "Sentences" 1)
   :group 'english-reading-mode)
 
-(defcustom english-reading-mode-macos-prefetch-chunk-count 2
+(defcustom english-reading-mode-macos-prefetch-chunk-count 4
   "Number of future macOS speech chunks prepared during continuous reading."
   :type '(integer :tag "Chunks" 1)
+  :group 'english-reading-mode)
+
+(defcustom english-reading-mode-macos-prefetch-check-interval 0.5
+  "Seconds between checks that replenish continuous macOS speech prefetch."
+  :type '(number :tag "Seconds")
   :group 'english-reading-mode)
 
 (defvar english-reading-mode-pdf-text-buffer-hook nil
@@ -1560,6 +1565,9 @@ included.  LIMIT, when non-nil, prevents a PDF chunk from crossing its page."
 (defvar english-reading-mode--continuous-timer nil
   "Timer that starts the next continuous-reading sentence.")
 
+(defvar english-reading-mode--macos-prefetch-monitor-timer nil
+  "Timer that keeps continuous macOS speech prefetch filled.")
+
 (defconst english-reading-mode--pdf-manual-interaction-commands
   '(mwheel-scroll
     pixel-scroll-precision
@@ -1711,7 +1719,14 @@ When QUIET is non-nil, do not stop an already active audio process."
   (setq english-reading-mode--continuous-state nil)
   (when (timerp english-reading-mode--continuous-timer)
     (cancel-timer english-reading-mode--continuous-timer))
-  (setq english-reading-mode--continuous-timer nil)
+  (when (timerp english-reading-mode--macos-prefetch-monitor-timer)
+    (cancel-timer english-reading-mode--macos-prefetch-monitor-timer))
+  (setq english-reading-mode--continuous-timer nil
+        english-reading-mode--macos-prefetch-monitor-timer nil)
+  ;; QUIET leaves the current utterance playing, but future audio no longer
+  ;; belongs to an active continuous-reading session.
+  (when (and quiet (fboundp 'kokoro-reader--clear-macos-prefetch))
+    (kokoro-reader--clear-macos-prefetch))
   (unless quiet (kokoro-reader-stop))
   (unless quiet (message "Continuous reading stopped")))
 
@@ -1917,8 +1932,42 @@ does without changing the displayed page."
       (with-current-buffer speech-buffer
         (when (and (eq kokoro-reader-backend 'macos)
                    (fboundp 'kokoro-reader-prefetch-macos-texts))
-          (kokoro-reader-prefetch-macos-texts
-           (english-reading-mode--next-speech-texts context)))))))
+          ;; This is the user-facing queue size for continuous reading.  Bind
+          ;; the lower-level safety limit to the same value so it cannot
+          ;; silently truncate a larger requested queue.
+          (let ((kokoro-reader-macos-prefetch-count
+                 english-reading-mode-macos-prefetch-chunk-count))
+            (kokoro-reader-prefetch-macos-texts
+             (english-reading-mode--next-speech-texts context))))))))
+
+(defun english-reading-mode--monitor-macos-prefetch ()
+  "Replenish future macOS audio for the latest active speech context."
+  (if (not (and english-reading-mode--continuous-state
+                (english-reading-mode--continuous-live-p)))
+      (progn
+        (when (timerp english-reading-mode--macos-prefetch-monitor-timer)
+          (cancel-timer english-reading-mode--macos-prefetch-monitor-timer))
+        (setq english-reading-mode--macos-prefetch-monitor-timer nil))
+    (when (and english-reading-mode--active-speech
+               (english-reading-mode--continuous-context-owned-p
+                english-reading-mode--active-speech))
+      (english-reading-mode--prefetch-next-macos-sentence
+       english-reading-mode--active-speech))))
+
+(defun english-reading-mode--start-macos-prefetch-monitor ()
+  "Start periodic replenishment for continuous macOS speech audio."
+  (when (timerp english-reading-mode--macos-prefetch-monitor-timer)
+    (cancel-timer english-reading-mode--macos-prefetch-monitor-timer))
+  (setq english-reading-mode--macos-prefetch-monitor-timer nil)
+  (let ((speech-buffer
+         (plist-get english-reading-mode--active-speech :buffer)))
+    (when (and (buffer-live-p speech-buffer)
+               (with-current-buffer speech-buffer
+                 (eq kokoro-reader-backend 'macos)))
+      (setq english-reading-mode--macos-prefetch-monitor-timer
+            (run-with-timer english-reading-mode-macos-prefetch-check-interval
+                            english-reading-mode-macos-prefetch-check-interval
+                            #'english-reading-mode--monitor-macos-prefetch)))))
 
 (add-hook 'english-reading-mode-speech-start-hook
           #'english-reading-mode--prefetch-next-macos-sentence)
@@ -1962,6 +2011,7 @@ Press `s' again to stop."
     (condition-case err
         (progn
           (english-reading-mode-speak-current-sentence)
+          (english-reading-mode--start-macos-prefetch-monitor)
           (message "Continuous reading started"))
       (error
        (english-reading-mode-stop-continuous t)

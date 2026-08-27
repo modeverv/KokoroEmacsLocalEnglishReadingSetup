@@ -139,6 +139,41 @@
           (eq (org-noter--session-doc-buffer session) buffer)))
    org-noter--sessions))
 
+(defun my/read-org-noter-close-source (buffer)
+  "Close BUFFER's Org-noter session without deleting its my-read frame.
+
+Return non-nil when an active session was found.  The caller must first move
+the document and notes windows to other buffers; this prevents Org-noter's
+normal session teardown from deleting those windows."
+  (when-let ((session (my/read-org-noter--session-for-buffer buffer)))
+    (let ((frame (org-noter--session-frame session))
+          (notes-buffer (org-noter--session-notes-buffer session))
+          completed)
+      (unwind-protect
+          (condition-case err
+              (progn
+                ;; `org-noter-kill-session' normally treats the session frame
+                ;; as disposable.  my-read owns it, so detach it only for the
+                ;; synchronous teardown.
+                (setf (org-noter--session-frame session) nil)
+                (org-noter-kill-session session)
+                (setq completed t))
+            (error
+             ;; Org-noter removes the session before parsing its notes root.
+             ;; If that parsing fails, finish the buffer-local cleanup so the
+             ;; caller can still kill the PDF without re-entering teardown.
+             (setq org-noter--sessions (delq session org-noter--sessions))
+             (dolist (owned-buffer (list buffer notes-buffer))
+               (when (buffer-live-p owned-buffer)
+                 (with-current-buffer owned-buffer
+                   (remove-hook 'kill-buffer-hook
+                                #'org-noter--handle-kill-buffer t))))
+             (message "Org-noter cleanup fallback: %s"
+                      (error-message-string err))))
+        (when (and (not completed) (memq session org-noter--sessions))
+          (setf (org-noter--session-frame session) frame))))
+    t))
+
 (defun my/read-org-noter--reattach-session (session)
   "Restore Org-noter buffer-local state for an existing SESSION.
 

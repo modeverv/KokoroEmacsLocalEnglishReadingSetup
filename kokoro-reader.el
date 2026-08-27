@@ -440,7 +440,12 @@ than `kokoro-reader-macos-prefetch-count' entries are kept."
       (dolist (key wanted)
         (let ((entry (seq-find
                       (lambda (candidate)
-                        (equal key (plist-get candidate :key)))
+                        (and (equal key (plist-get candidate :key))
+                             (or (and (plist-get candidate :ready)
+                                      (kokoro-reader--valid-audio-file-p
+                                       (plist-get candidate :file)))
+                                 (process-live-p
+                                  (plist-get candidate :process)))))
                       available)))
           (if entry
               (progn

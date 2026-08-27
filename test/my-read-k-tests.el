@@ -527,13 +527,17 @@
     (let ((source-buffer (current-buffer))
           (english-reading-mode--continuous-state nil)
           (english-reading-mode-macos-continuous-sentence-count 2)
+          (english-reading-mode-macos-prefetch-chunk-count 3)
+          queue-limit
           prefetched)
       (setq english-reading-mode--continuous-state
             (list :buffer source-buffer
                   :window (selected-window)
                   :frame (selected-frame)))
       (cl-letf (((symbol-function 'kokoro-reader-prefetch-macos-texts)
-                 (lambda (texts) (setq prefetched texts))))
+                 (lambda (texts)
+                   (setq prefetched texts
+                         queue-limit kokoro-reader-macos-prefetch-count))))
         (english-reading-mode--prefetch-next-macos-sentence
          (list :buffer source-buffer
                :beg (point-min)
@@ -543,7 +547,79 @@
                       (point))))
         (should (equal prefetched
                        '("三番です。四番です。"
-                         "五番です。六番です。")))))))
+                         "五番です。六番です。")))
+        (should (= queue-limit 3))))))
+
+(ert-deftest english-reading-mode-macos-prefetch-monitor-refills-periodically ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (setq-local kokoro-reader-backend 'macos)
+      (let* ((source-buffer (current-buffer))
+             (context (list :buffer source-buffer :beg 1 :end 1))
+             (english-reading-mode--continuous-state
+              (list :buffer source-buffer
+                    :window (selected-window)
+                    :frame (selected-frame)))
+             (english-reading-mode--active-speech context)
+             (english-reading-mode--macos-prefetch-monitor-timer nil)
+             scheduled-delay scheduled-repeat scheduled-function refreshed)
+        (cl-letf (((symbol-function 'run-with-timer)
+                   (lambda (delay repeat function &rest _args)
+                     (setq scheduled-delay delay
+                           scheduled-repeat repeat
+                           scheduled-function function)
+                     'prefetch-monitor))
+                  ((symbol-function
+                    'english-reading-mode--prefetch-next-macos-sentence)
+                   (lambda (active-context)
+                     (setq refreshed active-context))))
+          (english-reading-mode--start-macos-prefetch-monitor)
+          (should (= scheduled-delay 0.5))
+          (should (= scheduled-repeat 0.5))
+          (funcall scheduled-function)
+          (should (eq refreshed context)))))))
+
+(ert-deftest english-reading-mode-quiet-stop-clears-prefetch-monitor-and-queue ()
+  (let ((english-reading-mode--continuous-state '(active))
+        (english-reading-mode--continuous-timer nil)
+        (english-reading-mode--macos-prefetch-monitor-timer 'monitor)
+        cancelled cleared)
+    (cl-letf (((symbol-function 'timerp)
+               (lambda (object) (eq object 'monitor)))
+              ((symbol-function 'cancel-timer)
+               (lambda (timer) (setq cancelled timer)))
+              ((symbol-function 'kokoro-reader--clear-macos-prefetch)
+               (lambda () (setq cleared t))))
+      (english-reading-mode-stop-continuous t))
+    (should (eq cancelled 'monitor))
+    (should cleared)
+    (should-not english-reading-mode--macos-prefetch-monitor-timer)))
+
+(ert-deftest kokoro-reader-prefetch-replaces-invalid-ready-entry ()
+  (let* ((bad-file (make-temp-file "kokoro-prefetch-invalid-"))
+         (kokoro-reader-backend 'macos)
+         (kokoro-reader-macos-prefetch-enabled t)
+         (old-entry
+          (list :key (kokoro-reader--macos-key "次です。")
+                :process nil :file bad-file :ready t))
+         (kokoro-reader--macos-prefetch-queue (list old-entry))
+         started discarded)
+    (unwind-protect
+        (cl-letf (((symbol-function 'kokoro-reader--start-macos-prefetch)
+                   (lambda (text)
+                     (setq started text)
+                     (list :key (kokoro-reader--macos-key text)
+                           :process 'new :file "/tmp/new.aiff" :ready nil)))
+                  ((symbol-function 'kokoro-reader--discard-macos-prefetch-entry)
+                   (lambda (entry) (setq discarded entry))))
+          (kokoro-reader-prefetch-macos-texts '("次です。"))
+          (should (equal started "次です。"))
+          (should (eq discarded old-entry))
+          (should (eq (plist-get (car kokoro-reader--macos-prefetch-queue)
+                                 :process)
+                      'new)))
+      (when (file-exists-p bad-file) (delete-file bad-file)))))
 
 (ert-deftest english-reading-mode-macos-continuous-speaks-six-sentence-chunks ()
   (with-temp-buffer
@@ -1653,6 +1729,54 @@
           (equal (my/read--translation-target frame (selected-window))
                  (list 'kokoro "Spoken sentence." (current-buffer) 1 17))))))))
 
+(ert-deftest my-read-non-english-speech-does-not-trigger-translation ()
+  (save-window-excursion
+    (with-temp-buffer
+      (let* ((frame (selected-frame))
+             (center (selected-window))
+             (context (list :frame frame :window center
+                            :buffer (current-buffer) :beg 1 :end 4
+                            :text "日本語。"))
+             (my/read-kokoro-context nil)
+             (my/read-speech-translation-suppressed-context nil)
+             (my/read-translate-follow-mode t)
+             (my/read-translate-timer nil)
+             (my/read-translate-last-target nil)
+             requested)
+        (insert "日本語。")
+        (setq-local my/read-source-language "ja")
+        (set-window-buffer center (current-buffer))
+        (set-frame-parameter frame 'my-reading-frame t)
+        (set-frame-parameter frame 'my-reading-center-window center)
+        (set-frame-parameter frame 'my-reading-center-windows (list center))
+        (unwind-protect
+            (cl-letf (((symbol-function 'my/read--start-translation-request)
+                       (lambda (&rest _) (setq requested t))))
+              (should-not (my/read--english-speech-context-p context))
+              (my/read--english-speech-start context)
+              (should-not my/read-kokoro-context)
+              (should (eq my/read-speech-translation-suppressed-context
+                          context))
+              ;; Both ordinary page updates and post-command following must
+              ;; remain unable to restart Google while speech is active.
+              (my/read-translate-update-for-frame frame center)
+              (my/read-translate-follow-post-command)
+              (should-not requested)
+              (should-not my/read-translate-timer)
+              (my/read--english-speech-finish context)
+              (should-not my/read-speech-translation-suppressed-context))
+          (set-frame-parameter frame 'my-reading-frame nil)
+          (set-frame-parameter frame 'my-reading-center-window nil)
+          (set-frame-parameter frame 'my-reading-center-windows nil))))))
+
+(ert-deftest my-read-english-speech-still-triggers-translation ()
+  (with-temp-buffer
+    (setq-local my/read-source-language "en")
+    (should
+     (my/read--english-speech-context-p
+      (list :frame (selected-frame) :buffer (current-buffer)
+            :text "English sentence.")))))
+
 (ert-deftest my-read-translation-overlay-targets-center-window ()
   (my-read-k-test--isolated
    (save-window-excursion
@@ -2327,6 +2451,75 @@
           (set-frame-parameter frame parameter nil))
         (dolist (buffer (list epub-buffer pdf-buffer dired-buffer))
           (kill-buffer buffer))))))
+
+(ert-deftest my-read-c-x-k-closes-only-the-active-pdf ()
+  (save-window-excursion
+    (let* ((frame (selected-frame))
+           (center (selected-window))
+           (notes (split-window-right))
+           (pdf-buffer (generate-new-buffer " *my-read-close-pdf*"))
+           (dired-buffer (generate-new-buffer " *my-read-close-dired*"))
+           (notes-buffer (generate-new-buffer " *my-read-close-notes*"))
+           saved stopped session-closed)
+      (unwind-protect
+          (progn
+            (with-current-buffer pdf-buffer
+              (setq major-mode 'pdf-view-mode
+                    buffer-file-name "/tmp/my-read-close.pdf"))
+            (with-current-buffer dired-buffer
+              (setq major-mode 'dired-mode))
+            (set-window-buffer center pdf-buffer)
+            (set-window-buffer notes notes-buffer)
+            (set-frame-parameter frame 'my-reading-frame t)
+            (set-frame-parameter frame 'my-reading-center-window center)
+            (set-frame-parameter frame 'my-reading-center-windows (list center))
+            (set-frame-parameter frame 'my-reading-note-window notes)
+            (set-frame-parameter frame 'my-reading-pdf-buffer pdf-buffer)
+            (set-frame-parameter frame 'my-reading-dired-buffer dired-buffer)
+            (with-current-buffer pdf-buffer
+              (setq-local my/read-center-tab-frame frame)
+              (my-read-center-tab-mode 1))
+            (cl-letf (((symbol-function 'my/read-position-save-buffer)
+                       (lambda (buffer window)
+                         (setq saved (list buffer window))))
+                      ((symbol-function 'kokoro-reader-stop)
+                       (lambda () (setq stopped t)))
+                      ((symbol-function 'my/read-org-noter-close-source)
+                       (lambda (buffer)
+                         (setq session-closed buffer)
+                         t))
+                      ((symbol-function 'my/read-lookup-follow-post-command)
+                       #'ignore)
+                      ((symbol-function 'my/read-translate-follow-post-command)
+                       #'ignore))
+              (with-selected-window center
+                (should (eq (key-binding (kbd "C-x k"))
+                            #'my/read-close-pdf))
+                (my/read-close-pdf)))
+            (should (frame-live-p frame))
+            (should-not (buffer-live-p pdf-buffer))
+            (should (eq (window-buffer center) dired-buffer))
+            (should (eq session-closed pdf-buffer))
+            (should (equal saved (list pdf-buffer center)))
+            (should stopped)
+            (let ((placeholder
+                   (frame-parameter frame 'my-reading-pdf-buffer)))
+              (should (buffer-live-p placeholder))
+              (with-current-buffer placeholder
+                (should (eq my/read-center-tab-placeholder-type 'pdf)))))
+        (dolist (buffer (list pdf-buffer dired-buffer notes-buffer
+                              (frame-parameter frame
+                                               'my-reading-pdf-buffer)
+                              (frame-parameter frame
+                                               'my-reading-note-ready-buffer)))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))
+        (dolist (parameter '(my-reading-frame my-reading-center-window
+                             my-reading-center-windows my-reading-note-window
+                             my-reading-pdf-buffer my-reading-dired-buffer
+                             my-reading-pdf-placeholder-buffer
+                             my-reading-note-ready-buffer))
+          (set-frame-parameter frame parameter nil))))))
 
 (ert-deftest my-read-followers-ignore-org-buffer-in-center-window ()
   (save-window-excursion
