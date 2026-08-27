@@ -1230,6 +1230,39 @@
      (equal (cadr (member "-draw" process-arguments))
             "roundrectangle 97.000,398.000 503.000,482.000 3.000,3.000"))))
 
+(ert-deftest english-reading-mode-pdf-highlight-delay-is-ten-milliseconds ()
+  (should (= english-reading-mode-pdf-highlight-delay 0.01)))
+
+(ert-deftest english-reading-mode-pdf-highlight-watch-reapplies-overwritten-image ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (let* ((window (selected-window))
+             (context (list :window window :buffer 'speech-buffer))
+             (english-reading-mode--active-speech context)
+             (english-reading-mode--pdf-highlight-watch-context context)
+             (english-reading-mode--pdf-highlight-watch-remaining 1)
+             reapplied)
+        (setq-local
+         english-reading-mode--pdf-highlight-state
+         (list :context context :mode 'pdf-view-mode :page 3 :window window
+               :highlight-image 'highlight-image
+               :display-image 'installed-highlight))
+        (cl-letf (((symbol-function
+                    'english-reading-mode--pdf-highlight-current-display)
+                   (lambda (_state) 'normal-page-image))
+                  ((symbol-function
+                    'english-reading-mode--pdf-view-display-image)
+                   (lambda (image page target-window)
+                     (setq reapplied (list image page target-window))
+                     'reinstalled-highlight)))
+          (english-reading-mode--run-pdf-highlight-watch context))
+        (should (equal reapplied (list 'highlight-image 3 window)))
+        (should
+         (eq (plist-get english-reading-mode--pdf-highlight-state
+                        :display-image)
+             'reinstalled-highlight))))))
+
 (ert-deftest english-reading-mode-pdf-roll-highlight-targets-page-overlay ()
   (save-window-excursion
     (with-temp-buffer

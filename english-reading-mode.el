@@ -34,12 +34,17 @@
   :type 'string
   :group 'english-reading-mode)
 
-(defcustom english-reading-mode-pdf-highlight-delay 0.5
+(defcustom english-reading-mode-pdf-highlight-delay 0.01
   "Seconds to wait after PDF scrolling before drawing the speech highlight.
 
-The short delay lets PDF Tools or DocView finish redisplaying the new scroll
-position.  Speech playback is started independently and is never made to wait
-for the PDF image and SVG highlight rendering path."
+The short delay yields once to PDF Tools or DocView redisplay.  If scrolling is
+still changing when it expires, the stability check schedules another delay
+before drawing.  Speech playback is independent of highlight rendering."
+  :type 'number
+  :group 'english-reading-mode)
+
+(defcustom english-reading-mode-pdf-highlight-watch-duration 0.5
+  "Seconds to protect a fresh PDF highlight from delayed redisplay."
   :type 'number
   :group 'english-reading-mode)
 
@@ -90,6 +95,9 @@ This also runs on synthesis failure or explicit stop.")
 (defvar english-reading-mode--pdf-highlight-timer nil)
 (defvar english-reading-mode--pdf-highlight-pending-context nil)
 (defvar english-reading-mode--pdf-highlight-pending-scroll-state nil)
+(defvar english-reading-mode--pdf-highlight-watch-timer nil)
+(defvar english-reading-mode--pdf-highlight-watch-context nil)
+(defvar english-reading-mode--pdf-highlight-watch-remaining 0)
 (defvar english-reading-mode nil)
 
 (defvar-local english-reading-mode--saved-sentence-end-double-space nil)
@@ -968,15 +976,16 @@ image unchanged.  Match pdf-roll's own category and exact page slot here."
   (if (bound-and-true-p pdf-view-roll-minor-mode)
       (if-let ((overlay
                 (english-reading-mode--pdf-roll-page-overlay page window)))
-          (progn
-            (overlay-put
-             overlay 'display
-             (if (fboundp 'pdf-roll-maybe-slice-image)
-                 (pdf-roll-maybe-slice-image image window)
-               image))
-            (force-window-update window))
+          (let ((display-image
+                 (if (fboundp 'pdf-roll-maybe-slice-image)
+                     (pdf-roll-maybe-slice-image image window)
+                   image)))
+            (overlay-put overlay 'display display-image)
+            (force-window-update window)
+            display-image)
         (error "No pdf-roll page overlay for page %s" page))
-    (pdf-view-display-image image page window)))
+    (pdf-view-display-image image page window)
+    image))
 
 (defun english-reading-mode--pdf-view-highlight
     (window geometry rectangles &optional context)
@@ -1014,12 +1023,77 @@ image unchanged.  Match pdf-roll's own category and exact page slot here."
                         :width width :pointer 'arrow)))
     ;; Update the page image itself so normal redisplay does not immediately
     ;; cover the speech highlight.
-    (english-reading-mode--pdf-view-display-image
-     highlight-image page window)
-    (setq english-reading-mode--pdf-highlight-page page
-          english-reading-mode--pdf-highlight-state
-          (list :context context :mode 'pdf-view-mode
-                :page page :window window))))
+    (let ((display-image
+           (english-reading-mode--pdf-view-display-image
+            highlight-image page window)))
+      (setq english-reading-mode--pdf-highlight-page page
+            english-reading-mode--pdf-highlight-state
+            (list :context context :mode 'pdf-view-mode
+                  :page page :window window
+                  :highlight-image highlight-image
+                  :display-image display-image)))))
+
+(defun english-reading-mode--pdf-highlight-current-display (state)
+  "Return the image currently displayed for PDF highlight STATE."
+  (let ((window (plist-get state :window))
+        (page (plist-get state :page)))
+    (when (window-live-p window)
+      (if (bound-and-true-p pdf-view-roll-minor-mode)
+          (when-let ((overlay
+                      (english-reading-mode--pdf-roll-page-overlay page window)))
+            (overlay-get overlay 'display))
+        (cadr (english-reading-mode--pdf-display-state window))))))
+
+(defun english-reading-mode--run-pdf-highlight-watch (context)
+  "Reapply CONTEXT's highlight if delayed PDF redisplay replaced it."
+  (setq english-reading-mode--pdf-highlight-watch-timer nil)
+  (let* ((window (plist-get context :window))
+         (pdf-buffer (and (window-live-p window) (window-buffer window)))
+         (state
+          (and (buffer-live-p pdf-buffer)
+               (with-current-buffer pdf-buffer
+                 english-reading-mode--pdf-highlight-state))))
+    (if (not (and (eq context english-reading-mode--active-speech)
+                  (eq context english-reading-mode--pdf-highlight-watch-context)
+                  (eq context (plist-get state :context))))
+        (english-reading-mode--cancel-pdf-highlight context)
+      (with-current-buffer pdf-buffer
+        (unless (equal (english-reading-mode--pdf-highlight-current-display state)
+                       (plist-get state :display-image))
+          (let ((display-image
+                 (english-reading-mode--pdf-view-display-image
+                  (plist-get state :highlight-image)
+                  (plist-get state :page) window)))
+            (setq english-reading-mode--pdf-highlight-state
+                  (plist-put state :display-image display-image)))))
+      (cl-decf english-reading-mode--pdf-highlight-watch-remaining)
+      (if (> english-reading-mode--pdf-highlight-watch-remaining 0)
+          (setq english-reading-mode--pdf-highlight-watch-timer
+                (run-at-time english-reading-mode-pdf-highlight-delay nil
+                             #'english-reading-mode--run-pdf-highlight-watch
+                             context))
+        (setq english-reading-mode--pdf-highlight-watch-context nil)))))
+
+(defun english-reading-mode--start-pdf-highlight-watch (context)
+  "Briefly protect CONTEXT's highlight from delayed PDF redisplay."
+  (let* ((window (plist-get context :window))
+         (pdf-buffer (and (window-live-p window) (window-buffer window)))
+         (state
+          (and (buffer-live-p pdf-buffer)
+               (with-current-buffer pdf-buffer
+                 english-reading-mode--pdf-highlight-state))))
+    (when (eq context (plist-get state :context))
+      (when (timerp english-reading-mode--pdf-highlight-watch-timer)
+        (cancel-timer english-reading-mode--pdf-highlight-watch-timer))
+      (setq english-reading-mode--pdf-highlight-watch-context context
+            english-reading-mode--pdf-highlight-watch-remaining
+            (max 1 (ceiling english-reading-mode-pdf-highlight-watch-duration
+                            (max english-reading-mode-pdf-highlight-delay
+                                 0.001)))
+            english-reading-mode--pdf-highlight-watch-timer
+            (run-at-time english-reading-mode-pdf-highlight-delay nil
+                         #'english-reading-mode--run-pdf-highlight-watch
+                         context)))))
 
 (defun english-reading-mode--pdf-restore-image
     (pdf-buffer &optional window context)
@@ -1110,12 +1184,18 @@ sentence's highlight."
 When CONTEXT is nil, cancel any pending highlight.  A context check prevents a
 late finish notification for an older utterance from cancelling the new one."
   (when (or (null context)
-            (eq context english-reading-mode--pdf-highlight-pending-context))
+            (eq context english-reading-mode--pdf-highlight-pending-context)
+            (eq context english-reading-mode--pdf-highlight-watch-context))
     (when (timerp english-reading-mode--pdf-highlight-timer)
       (cancel-timer english-reading-mode--pdf-highlight-timer))
+    (when (timerp english-reading-mode--pdf-highlight-watch-timer)
+      (cancel-timer english-reading-mode--pdf-highlight-watch-timer))
     (setq english-reading-mode--pdf-highlight-timer nil
           english-reading-mode--pdf-highlight-pending-context nil
-          english-reading-mode--pdf-highlight-pending-scroll-state nil)))
+          english-reading-mode--pdf-highlight-pending-scroll-state nil
+          english-reading-mode--pdf-highlight-watch-timer nil
+          english-reading-mode--pdf-highlight-watch-context nil
+          english-reading-mode--pdf-highlight-watch-remaining 0)))
 
 (defun english-reading-mode--pdf-highlight-scroll-state (context)
   "Return the visible scroll state associated with speech CONTEXT."
@@ -1141,7 +1221,8 @@ late finish notification for an older utterance from cancelling the new one."
             (progn
               (setq english-reading-mode--pdf-highlight-pending-context nil
                     english-reading-mode--pdf-highlight-pending-scroll-state nil)
-              (english-reading-mode--pdf-highlight-start context))
+              (english-reading-mode--pdf-highlight-start context)
+              (english-reading-mode--start-pdf-highlight-watch context))
           ;; PDF roll redisplay is still changing the page position.  Restart
           ;; the full delay from the latest state instead of drawing midway.
           (setq english-reading-mode--pdf-highlight-pending-scroll-state
