@@ -350,6 +350,7 @@ for selected-text notes and persistent highlights."
   (when (and english-reading-mode
              (english-reading-mode--pdf-buffer-p)
              (pdf-view-active-region-p))
+    (english-reading-mode--cancel-continuous-for-pdf-interaction)
     (condition-case error-data
         (let ((location (english-reading-mode-use-pdf-selection)))
           (message "Reading position: %s"
@@ -725,8 +726,108 @@ This currently exposes the text layer used behind a DocView PDF."
     (when (window-live-p window)
       (english-reading-mode--pdf-restore-image (window-buffer window)))))
 
+(defun english-reading-mode--pdf-continuous-vscroll
+    (rectangle page-height full-image-height displayed-image-height
+               viewport-height &optional image-top-offset)
+  "Return pixel vscroll centering RECTANGLE in a rendered PDF page.
+
+PAGE-HEIGHT is the PDF-space page height.  FULL-IMAGE-HEIGHT is the rendered
+height before slicing; DISPLAYED-IMAGE-HEIGHT is the visible slice height;
+VIEWPORT-HEIGHT and IMAGE-TOP-OFFSET are pixels.  Clamp at displayed edges."
+  (let* ((spoken-y (/ (+ (nth 1 rectangle) (nth 3 rectangle)) 2.0))
+         (spoken-pixel (* (/ spoken-y page-height) full-image-height))
+         (displayed-pixel (- spoken-pixel (or image-top-offset 0)))
+         (maximum (max 0 (- displayed-image-height viewport-height))))
+    (round (max 0 (min maximum
+                       (- displayed-pixel (/ viewport-height 2.0)))))))
+
+(defun english-reading-mode--pdf-continuous-position (context)
+  "Return page geometry and a vertical position for speech CONTEXT.
+
+Prefer exact positioned-word matching.  If PDF text extraction represents
+math or punctuation differently, estimate the vertical position from CONTEXT's
+relative source-text position so zoom correction never keeps a stale scroll."
+  (or (when-let ((match
+                  (english-reading-mode--pdf-context-rectangles context)))
+        (list (car match) (car (cadr match))))
+      (let* ((geometry
+              (english-reading-mode--pdf-bbox-page
+               english-reading-mode--pdf-page))
+             (page-range
+              (english-reading-mode--pdf-page-range
+               english-reading-mode--pdf-page))
+             (span (and page-range
+                        (max 1 (- (cdr page-range) (car page-range)))))
+             (source-beg (plist-get context :beg)))
+        (when (and geometry page-range (numberp source-beg))
+          (let* ((ratio
+                  (max 0.0
+                       (min 1.0
+                            (/ (float (- source-beg (car page-range))) span))))
+                 (y (* ratio (plist-get geometry :height))))
+            (list geometry (list 0.0 y 0.0 y)))))))
+
+(defun english-reading-mode--pdf-center-continuous-speech (context)
+  "Center PDF speech CONTEXT vertically while continuous reading is active."
+  (let* ((window (plist-get context :window))
+         (pdf-buffer (and (window-live-p window) (window-buffer window))))
+    (when (and (buffer-live-p pdf-buffer)
+               (eq (plist-get english-reading-mode--continuous-state :buffer)
+                   pdf-buffer))
+      (with-current-buffer pdf-buffer
+        (when (and (eq major-mode 'pdf-view-mode)
+                   (english-reading-mode--pdf-buffer-p)
+                   (eq (plist-get context :buffer)
+                       english-reading-mode--pdf-text-buffer))
+          (condition-case err
+              (when-let ((position
+                          (english-reading-mode--pdf-continuous-position context)))
+                (with-selected-window window
+                  (let* ((geometry (car position))
+                         (rectangle (cadr position))
+                         (full-image-height
+                          (cdr (pdf-view-image-size nil window)))
+                         (displayed-image-height
+                          (cdr (pdf-view-image-size t window)))
+                         (image-top-offset
+                          (cdr (pdf-view-image-offset window)))
+                         (inside (window-inside-pixel-edges window))
+                         (viewport-height (- (nth 3 inside) (nth 1 inside))))
+                    (when (and rectangle
+                               (> (plist-get geometry :height) 0)
+                               (> full-image-height 0)
+                               (> displayed-image-height 0)
+                               (> viewport-height 0))
+                      (image-set-window-vscroll
+                       (english-reading-mode--pdf-continuous-vscroll
+                        rectangle (plist-get geometry :height)
+                        full-image-height displayed-image-height
+                        viewport-height image-top-offset))))))
+            (error
+             (message "PDF speech centering unavailable: %s"
+                      (error-message-string err)))))))))
+
+(defconst english-reading-mode--pdf-zoom-commands
+  '(pdf-view-enlarge
+    pdf-view-shrink
+    pdf-view-scale-reset
+    pdf-view-fit-page-to-window
+    pdf-view-fit-height-to-window
+    pdf-view-fit-width-to-window)
+  "PDF commands after which continuous speech needs position correction.")
+
+(defun english-reading-mode--pdf-post-command ()
+  "Recenter active continuous PDF speech after an interactive zoom change."
+  (when (and (memq this-command english-reading-mode--pdf-zoom-commands)
+             english-reading-mode--continuous-state
+             english-reading-mode--active-speech)
+    (english-reading-mode--pdf-center-continuous-speech
+     english-reading-mode--active-speech)))
+
 (add-hook 'english-reading-mode-speech-start-hook
           #'english-reading-mode--pdf-highlight-start)
+(add-hook 'english-reading-mode-speech-start-hook
+          #'english-reading-mode--pdf-center-continuous-speech)
 (add-hook 'english-reading-mode-speech-finish-hook
           #'english-reading-mode--pdf-highlight-finish)
 
@@ -787,6 +888,35 @@ This currently exposes the text layer used behind a DocView PDF."
 
 (defvar english-reading-mode--continuous-timer nil
   "Timer that starts the next continuous-reading sentence.")
+
+(defconst english-reading-mode--pdf-manual-interaction-commands
+  '(mwheel-scroll
+    pixel-scroll-precision
+    scroll-up-command
+    scroll-down-command
+    image-scroll-up
+    image-scroll-down
+    pdf-view-scroll-up-or-next-page
+    pdf-view-scroll-down-or-previous-page
+    pdf-view-next-line-or-next-page
+    pdf-view-previous-line-or-previous-page
+    pdf-view-next-page
+    pdf-view-previous-page
+    pdf-view-next-page-command
+    pdf-view-previous-page-command
+    pdf-roll-scroll-forward
+    pdf-roll-scroll-backward
+    pdf-roll-next-page
+    pdf-roll-previous-page
+    pdf-roll-goto-page
+    pdf-view-first-page
+    pdf-view-last-page
+    pdf-view-goto-page
+    english-reading-mode-next-page
+    english-reading-mode-previous-page
+    pdf-view-mouse-set-region
+    pdf-view-mouse-set-region-rectangle)
+  "Commands that make a PDF reader's manual position authoritative.")
 
 (defvar-local english-reading-mode-continuous-next-function nil
   "Optional source-specific function that advances and speaks the next sentence.")
@@ -900,6 +1030,24 @@ When QUIET is non-nil, do not stop an already active audio process."
   (setq english-reading-mode--continuous-timer nil)
   (unless quiet (kokoro-reader-stop))
   (unless quiet (message "Continuous reading stopped")))
+
+(defun english-reading-mode--cancel-continuous-for-pdf-interaction ()
+  "Cancel stale continuation when the current PDF is manipulated manually.
+
+The sentence already playing is allowed to finish.  Clearing the continuous
+state and timer prevents its completion hook from moving the PDF again."
+  (when (and english-reading-mode--continuous-state
+             (english-reading-mode--pdf-buffer-p)
+             (eq (plist-get english-reading-mode--continuous-state :buffer)
+                 (current-buffer)))
+    (english-reading-mode-stop-continuous t)
+    t))
+
+(defun english-reading-mode--pdf-pre-command ()
+  "Cancel continuous reading before a manual PDF navigation command."
+  (when (memq this-command
+              english-reading-mode--pdf-manual-interaction-commands)
+    (english-reading-mode--cancel-continuous-for-pdf-interaction)))
 
 (defun english-reading-mode--continuous-default-next ()
   "Advance a PDF/EPUB/text source and speak its next sentence."
@@ -1147,12 +1295,20 @@ is exposed through `english-reading-mode-speech-start-hook' and
       (progn
         (english-reading-mode--enable-single-space-sentences)
         (english-reading-mode--enable-read-only)
+        (add-hook 'pre-command-hook
+                  #'english-reading-mode--pdf-pre-command nil t)
+        (add-hook 'post-command-hook
+                  #'english-reading-mode--pdf-post-command nil t)
         (unless (or (derived-mode-p 'nov-mode 'eww-mode 'doc-view-mode
                                     'pdf-view-mode)
                     (bound-and-true-p my-read-k-mode))
           (message "english-reading-mode is designed for reader buffers")))
     (english-reading-mode--restore-sentence-setting)
     (english-reading-mode--restore-read-only)
+    (remove-hook 'pre-command-hook
+                 #'english-reading-mode--pdf-pre-command t)
+    (remove-hook 'post-command-hook
+                 #'english-reading-mode--pdf-post-command t)
     (english-reading-mode--pdf-cleanup)
     (english-reading-mode-stop)))
 

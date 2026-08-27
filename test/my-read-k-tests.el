@@ -49,6 +49,146 @@
    (equal my/read-org-noter-directory
           "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read")))
 
+(ert-deftest my-read-positions-use-obsidian-read-directory ()
+  (should
+   (equal my/read-position-directory
+          "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read"))
+  (should (equal (file-name-nondirectory (my/read-position-file))
+                 "read-positions.el")))
+
+(ert-deftest my-read-position-persists-a-pdf-snapshot ()
+  (let* ((directory (make-temp-file "my-read-position-" t))
+         (my/read-position-directory directory)
+         (source (make-temp-file "my-read-book-" nil ".pdf"))
+         (buffer (generate-new-buffer " *my-read-position-pdf*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (setq-local major-mode 'pdf-view-mode)
+          (setq-local buffer-file-name source)
+          (setq-local pdf-view-display-size 2.5)
+          (cl-letf (((symbol-function 'pdf-view-current-page)
+                     (lambda () 12)))
+            (my/read-position-save-buffer buffer))
+          (let* ((data (my/read-position--read-data))
+                 (record (cdr (assoc-string
+                               (file-truename source)
+                               (plist-get data :entries) t))))
+            (should (eq (plist-get record :type) 'pdf))
+            (should (= (plist-get record :page) 12))
+            (should (= (plist-get record :zoom) 2.5))
+            (should (numberp (plist-get record :updated)))
+            (should (= (logand (file-modes (my/read-position-file)) #o777)
+                       #o600))))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (when (file-exists-p source) (delete-file source))
+      (delete-directory directory t))))
+
+(ert-deftest my-read-position-restores-pdf-page-zoom-and-scroll ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (setq-local major-mode 'pdf-view-mode)
+      (setq-local pdf-view-display-size 'fit-width)
+      (let (page redisplayed vscroll)
+        (cl-letf (((symbol-function 'pdf-view-goto-page)
+                   (lambda (value) (setq page value)))
+                  ((symbol-function 'pdf-view-redisplay)
+                   (lambda (&optional force) (setq redisplayed force)))
+                  ((symbol-function 'image-set-window-vscroll)
+                   (lambda (value) (setq vscroll value))))
+          (my/read-position--restore-pdf
+           '(:type pdf :page 9 :zoom 3.0 :vscroll 420)
+           (selected-window)))
+        (should (= page 9))
+        (should (= pdf-view-display-size 3.0))
+        (should redisplayed)
+        (should (= vscroll 420))))))
+
+(ert-deftest my-read-position-restores-epub-document-and-point ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (setq-local major-mode 'nov-mode)
+      (setq-local nov-documents [first second third])
+      (setq-local nov-documents-index 0)
+      (let (document)
+        (cl-letf (((symbol-function 'nov-goto-document)
+                   (lambda (index)
+                     (setq document index
+                           nov-documents-index index)
+                     (erase-buffer)
+                     (insert "0123456789abcdefghij"))))
+          (my/read-position--restore-epub
+           '(:type epub :document 2 :point 8 :window-start 3)
+           (selected-window)))
+        (should (= document 2))
+        (should (= nov-documents-index 2))
+        (should (= (window-point (selected-window)) 8))
+        (should (= (window-start (selected-window)) 3))))))
+
+(ert-deftest my-read-enables-continuous-pdf-scroll-in-center-window ()
+  (save-window-excursion
+    (let ((buffer (generate-new-buffer " *my-read-pdf-roll*"))
+          (frame (selected-frame))
+          enabled-in)
+      (unwind-protect
+          (progn
+            (switch-to-buffer buffer)
+            (setq-local major-mode 'pdf-view-mode)
+            (let ((my/read-pdf-continuous-scroll t))
+              (cl-letf (((symbol-function 'my/read-center-window)
+                         (lambda (_frame) (selected-window)))
+                        ((symbol-function 'pdf-view-roll-minor-mode)
+                         (lambda (&optional _arg)
+                           (setq enabled-in
+                                 (list (current-buffer)
+                                       (selected-window))))))
+                (my/read--enable-pdf-continuous-scroll buffer frame)))
+            (should (equal enabled-in
+                           (list buffer (selected-window)))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest my-read-recognizes-pdf-roll-page-overlay ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (let* ((window (selected-window))
+             (overlay (make-overlay (point-min) (point-max))))
+        (overlay-put overlay 'window window)
+        (setq-local pdf-view-roll-minor-mode t)
+        (cl-letf (((symbol-function 'pdf-roll-page-overlay)
+                   (lambda (&optional _page _window) overlay)))
+          (should (my/read--pdf-view-window-overlay-valid-p window)))))))
+
+(ert-deftest english-reading-mode-pdf-roll-scroll-cancels-continuation ()
+  (should (memq 'pdf-roll-scroll-forward
+                english-reading-mode--pdf-manual-interaction-commands))
+  (should (memq 'pdf-roll-scroll-backward
+                english-reading-mode--pdf-manual-interaction-commands)))
+
+(ert-deftest my-read-position-does-not-overwrite-malformed-data ()
+  (let* ((directory (make-temp-file "my-read-position-bad-" t))
+         (my/read-position-directory directory)
+         (file (my/read-position-file))
+         (source (make-temp-file "my-read-book-" nil ".pdf"))
+         (buffer (generate-new-buffer " *my-read-position-bad*")))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "not valid position data"))
+          (with-current-buffer buffer
+            (setq-local major-mode 'pdf-view-mode)
+            (setq-local buffer-file-name source)
+            (cl-letf (((symbol-function 'pdf-view-current-page)
+                       (lambda () 4)))
+              (my/read-position-save-buffer buffer)))
+          (with-temp-buffer
+            (insert-file-contents file)
+            (should (equal (buffer-string) "not valid position data"))))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (when (file-exists-p source) (delete-file source))
+      (delete-directory directory t))))
+
 (ert-deftest my-read-japanese-epub-uses-macos-japanese-speech ()
   (with-temp-buffer
     (insert "あの日、わたしとあいつとの関係が壊れた。")
@@ -521,6 +661,57 @@
       (when (buffer-live-p text-buffer)
         (kill-buffer text-buffer)))))
 
+(ert-deftest english-reading-mode-pdf-manual-scroll-cancels-continuation ()
+  (let ((pdf-buffer (generate-new-buffer " *continuous-pdf-scroll*"))
+        (timer (run-at-time 60 nil #'ignore))
+        stopped-audio)
+    (unwind-protect
+        (with-current-buffer pdf-buffer
+          (setq-local major-mode 'pdf-view-mode)
+          (setq-local buffer-file-name "/tmp/continuous-scroll.pdf")
+          (setq-local english-reading-mode t)
+          (let ((english-reading-mode--continuous-state
+                 (list :buffer pdf-buffer))
+                (english-reading-mode--continuous-timer timer)
+                (this-command 'mwheel-scroll))
+            (cl-letf (((symbol-function 'kokoro-reader-stop)
+                       (lambda () (setq stopped-audio t))))
+              (english-reading-mode--pdf-pre-command))
+            (should-not english-reading-mode--continuous-state)
+            (should-not english-reading-mode--continuous-timer)
+            (should-not stopped-audio)))
+      (when (timerp timer)
+        (cancel-timer timer))
+      (when (buffer-live-p pdf-buffer)
+        (kill-buffer pdf-buffer)))))
+
+(ert-deftest english-reading-mode-pdf-selection-cancels-continuation ()
+  (let ((pdf-buffer (generate-new-buffer " *continuous-pdf-selection*"))
+        (timer (run-at-time 60 nil #'ignore))
+        synchronized)
+    (unwind-protect
+        (with-current-buffer pdf-buffer
+          (setq-local major-mode 'pdf-view-mode)
+          (setq-local buffer-file-name "/tmp/continuous-selection.pdf")
+          (setq-local english-reading-mode t)
+          (let ((english-reading-mode--continuous-state
+                 (list :buffer pdf-buffer))
+                (english-reading-mode--continuous-timer timer))
+            (cl-letf (((symbol-function 'pdf-view-active-region-p)
+                       (lambda () t))
+                      ((symbol-function 'english-reading-mode-use-pdf-selection)
+                       (lambda ()
+                         (setq synchronized t)
+                         '("Selected sentence." nil 1 19))))
+              (english-reading-mode--pdf-selection-finished))
+            (should synchronized)
+            (should-not english-reading-mode--continuous-state)
+            (should-not english-reading-mode--continuous-timer)))
+      (when (timerp timer)
+        (cancel-timer timer))
+      (when (buffer-live-p pdf-buffer)
+        (kill-buffer pdf-buffer)))))
+
 (ert-deftest english-reading-mode-pdf-j-speaks-and-n-moves-across-pages ()
   (let ((pdf-buffer (generate-new-buffer " *english-reading-pdf-test*"))
         (text-buffer (generate-new-buffer " *english-reading-pdf-text-test*"))
@@ -640,6 +831,100 @@
       (should (equal (plist-get (nth 3 captured) :width) 850))
       (should (string-match-p "data:image/png;base64,AAAA" (car captured)))
       (should (string-match-p "<rect x='8\\.500'" (car captured))))))
+
+(ert-deftest english-reading-mode-pdf-continuous-centers-spoken-line ()
+  (save-window-excursion
+    (let ((pdf-buffer (generate-new-buffer " *continuous-pdf-center*"))
+          (text-buffer (generate-new-buffer " *continuous-pdf-center-text*"))
+          centered-at)
+      (unwind-protect
+          (progn
+            (switch-to-buffer pdf-buffer)
+            (setq-local major-mode 'pdf-view-mode)
+            (setq-local buffer-file-name "/tmp/continuous-center.pdf")
+            (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+            (let ((english-reading-mode--continuous-state
+                   (list :buffer pdf-buffer)))
+              (cl-letf (((symbol-function
+                          'english-reading-mode--pdf-context-rectangles)
+                         (lambda (_context)
+                           '((:height 1000.0)
+                             ((10.0 500.0 100.0 520.0)))))
+                        ((symbol-function 'pdf-view-image-size)
+                         (lambda (&optional _displayed _window)
+                           '(1000 . 2000)))
+                        ((symbol-function 'pdf-view-image-offset)
+                         (lambda (&optional _window) '(0 . 0)))
+                        ((symbol-function 'window-inside-pixel-edges)
+                         (lambda (&optional _window) '(0 0 500 800)))
+                        ((symbol-function 'image-set-window-vscroll)
+                         (lambda (value) (setq centered-at value))))
+                (english-reading-mode--pdf-center-continuous-speech
+                 (list :window (selected-window)
+                       :buffer text-buffer
+                       :text "Spoken sentence."
+                       :beg 1 :end 17))))
+            (should (= centered-at 620)))
+        (when (buffer-live-p pdf-buffer)
+          (kill-buffer pdf-buffer))
+        (when (buffer-live-p text-buffer)
+          (kill-buffer text-buffer))))))
+
+(ert-deftest english-reading-mode-pdf-centering-corrects-for-slice-offset ()
+  (should
+   (= (english-reading-mode--pdf-continuous-vscroll
+       '(10.0 600.0 100.0 620.0)
+       1000.0 2000 1000 800 500)
+      200)))
+
+(ert-deftest english-reading-mode-pdf-centering-falls-back-to-text-position ()
+  (let ((english-reading-mode--pdf-page 2)
+        (english-reading-mode--pdf-page-ranges
+         [(1 . 100) (101 . 201)]))
+    (cl-letf (((symbol-function
+                'english-reading-mode--pdf-context-rectangles)
+               (lambda (_context) nil))
+              ((symbol-function 'english-reading-mode--pdf-bbox-page)
+               (lambda (_page) '(:height 1000.0))))
+      (should
+       (equal (english-reading-mode--pdf-continuous-position '(:beg 151))
+              '((:height 1000.0) (0.0 500.0 0.0 500.0)))))))
+
+(ert-deftest english-reading-mode-pdf-zoom-recenters-active-speech ()
+  (let ((english-reading-mode--continuous-state '(:buffer active-pdf))
+        (english-reading-mode--active-speech '(:text "Current sentence."))
+        (this-command 'pdf-view-enlarge)
+        centered)
+    (cl-letf (((symbol-function
+                'english-reading-mode--pdf-center-continuous-speech)
+               (lambda (context) (setq centered context))))
+      (english-reading-mode--pdf-post-command))
+    (should (equal centered english-reading-mode--active-speech))))
+
+(ert-deftest english-reading-mode-pdf-one-shot-does-not-auto-scroll ()
+  (save-window-excursion
+    (let ((pdf-buffer (generate-new-buffer " *one-shot-pdf-center*"))
+          (text-buffer (generate-new-buffer " *one-shot-pdf-center-text*"))
+          scrolled)
+      (unwind-protect
+          (progn
+            (switch-to-buffer pdf-buffer)
+            (setq-local major-mode 'pdf-view-mode)
+            (setq-local buffer-file-name "/tmp/one-shot-center.pdf")
+            (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+            (let ((english-reading-mode--continuous-state nil))
+              (cl-letf (((symbol-function 'image-set-window-vscroll)
+                         (lambda (_value) (setq scrolled t))))
+                (english-reading-mode--pdf-center-continuous-speech
+                 (list :window (selected-window)
+                       :buffer text-buffer
+                       :text "Spoken sentence."
+                       :beg 1 :end 17))))
+            (should-not scrolled))
+        (when (buffer-live-p pdf-buffer)
+          (kill-buffer pdf-buffer))
+        (when (buffer-live-p text-buffer)
+          (kill-buffer text-buffer))))))
 
 (ert-deftest my-read-translation-target-uses-one-sentence-and-exact-bounds ()
   (my-read-k-test--isolated

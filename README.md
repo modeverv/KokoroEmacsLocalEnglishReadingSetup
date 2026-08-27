@@ -204,6 +204,9 @@ PDFを開くと`pdf-view-mode`と`english-reading-mode`が連携します。PDF�
 PDF Toolsに任せ、`pdftotext`で抽出した本文を裏側の仮想カーソルで文単位に
 移動します。`j` / `k`は次／前の文へ移動し、ページ境界では表示ページも
 切り替わります。`C-v` / `M-v`は文位置に関係なく次／前のPDFページへ移動します。
+PDF Tools付属の`pdf-view-roll-minor-mode`も自動で有効になり、Preview.appのように
+ページ境界をまたいで縦へ連続スクロールできます。無効にする場合は
+`my/read-pdf-continuous-scroll`を`nil`にしてください。
 
 PDF Toolsで本文をマウス選択すると、選択文字列とページ上の縦位置から対応する文を
 特定し、読み上げ位置をその文へ自動的に移します。続けて`SPC`を押すとその文だけ、

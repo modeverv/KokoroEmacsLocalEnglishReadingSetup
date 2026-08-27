@@ -28,6 +28,7 @@
 ;; well as in init.el so a PDF never falls back to a raw binary buffer when
 ;; this module is loaded independently.
 (autoload 'pdf-view-mode "pdf-view" nil t)
+(autoload 'pdf-view-roll-minor-mode "pdf-roll" nil t)
 (add-to-list 'auto-mode-alist '("\\.pdf\\'" . pdf-view-mode))
 
 (defgroup my-read nil
@@ -39,6 +40,32 @@
   "File or directory opened in the center reading window."
   :type 'file
   :group 'my-read)
+
+(defcustom my/read-position-directory
+  "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read"
+  "Directory where PDF and EPUB reading positions are stored."
+  :type 'directory
+  :group 'my-read)
+
+(defcustom my/read-position-save-delay 1.0
+  "Idle seconds before saving the current PDF or EPUB position."
+  :type 'number
+  :group 'my-read)
+
+(defcustom my/read-pdf-continuous-scroll t
+  "When non-nil, show my-read PDFs as a vertically continuous page roll.
+
+This uses PDF Tools' `pdf-view-roll-minor-mode', so pages are rendered lazily
+around the visible area instead of loading the entire document at once."
+  :type 'boolean
+  :group 'my-read)
+
+(defconst my/read-position-file-name "read-positions.el"
+  "File name used below `my/read-position-directory'.")
+
+(defvar-local my/read-position--restored-p nil)
+(defvar-local my/read-position--restoring-p nil)
+(defvar-local my/read-position--save-timer nil)
 
 (defcustom my/read-vocabulary-file
   (expand-file-name "~/my-read/vocabulary.org")
@@ -266,6 +293,251 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
   "Return FRAME's center window hosting the EPUB/normal-book tab."
   (my/read-window 'my-reading-epub-window frame))
 
+(defun my/read-position-file ()
+  "Return the persistent PDF/EPUB position file."
+  (expand-file-name my/read-position-file-name my/read-position-directory))
+
+(defun my/read-position--source-type ()
+  "Return the persistent source type for the current buffer."
+  (cond
+   ((derived-mode-p 'pdf-view-mode) 'pdf)
+   ((derived-mode-p 'nov-mode) 'epub)))
+
+(defun my/read-position--source-file ()
+  "Return a stable absolute source file for the current buffer."
+  (when-let ((file (and (my/read-position--source-type)
+                        (or (and (boundp 'nov-file-name) nov-file-name)
+                            buffer-file-name))))
+    (condition-case nil
+        (file-truename file)
+      (file-error (expand-file-name file)))))
+
+(defun my/read-position--empty-data ()
+  "Return an empty position data object."
+  '(:version 1 :entries nil))
+
+(defun my/read-position--valid-data-p (data)
+  "Return non-nil when DATA is a valid position data object."
+  (and (listp data)
+       (equal (plist-get data :version) 1)
+       (let ((entries (plist-get data :entries)))
+         (and (listp entries)
+              (cl-every (lambda (entry)
+                          (and (consp entry)
+                               (stringp (car entry))
+                               (listp (cdr entry))))
+                        entries)))))
+
+(defun my/read-position--read-data ()
+  "Read persistent position data, or return `:invalid' without modifying it."
+  (let ((file (my/read-position-file)))
+    (if (not (file-exists-p file))
+        (my/read-position--empty-data)
+      (condition-case err
+          (with-temp-buffer
+            (insert-file-contents file)
+            (let ((read-eval nil)
+                  (data (read (current-buffer))))
+              (skip-chars-forward " \t\r\n")
+              (unless (and (eobp) (my/read-position--valid-data-p data))
+                (error "invalid position data"))
+              data))
+        (error
+         (message "my-read: 読書位置ファイルを保護しました（%s）"
+                  (error-message-string err))
+         :invalid)))))
+
+(defun my/read-position--write-data (data)
+  "Atomically write validated position DATA."
+  (let* ((directory (file-name-as-directory my/read-position-directory))
+         (file (my/read-position-file))
+         temp)
+    (make-directory directory t)
+    (setq temp (make-temp-file (expand-file-name ".read-positions-" directory)))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (insert ";;; my-read PDF/EPUB positions -*- mode: emacs-lisp; -*-\n")
+            (let ((print-length nil)
+                  (print-level nil))
+              (prin1 data (current-buffer)))
+            (insert "\n")
+            (write-region (point-min) (point-max) temp nil 'silent))
+          (set-file-modes temp #o600)
+          (rename-file temp file t)
+          (setq temp nil))
+      (when (and temp (file-exists-p temp))
+        (delete-file temp)))))
+
+(defun my/read-position--snapshot (&optional window)
+  "Return the current PDF or EPUB position, using WINDOW when available."
+  (pcase (my/read-position--source-type)
+    ('pdf
+     (let ((record
+            (list :type 'pdf
+                  :page (and (fboundp 'pdf-view-current-page)
+                             (ignore-errors (pdf-view-current-page)))
+                  :zoom (and (boundp 'pdf-view-display-size)
+                             pdf-view-display-size))))
+       (when (and (window-live-p window)
+                  (eq (window-buffer window) (current-buffer)))
+         (setq record
+               (plist-put record :vscroll (window-vscroll window t))))
+       record))
+    ('epub
+     (let* ((visible (and (window-live-p window)
+                          (eq (window-buffer window) (current-buffer))))
+            (position (if visible (window-point window) (point)))
+            (record
+             (list :type 'epub
+                   :document (and (boundp 'nov-documents-index)
+                                  nov-documents-index)
+                   :point position)))
+       (when visible
+         (setq record (plist-put record :window-start
+                                 (window-start window))))
+       record))))
+
+(defun my/read-position--merge-record (old new)
+  "Merge non-nil values from NEW into position record OLD."
+  (let ((record (copy-sequence old)))
+    (while new
+      (let ((key (pop new))
+            (value (pop new)))
+        (when value
+          (setq record (plist-put record key value)))))
+    (plist-put record :updated (float-time))))
+
+(defun my/read-position-save-buffer (buffer &optional window)
+  "Persist BUFFER's current PDF or EPUB position, optionally using WINDOW."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when-let* ((key (and (not my/read-position--restoring-p)
+                            (my/read-position--source-file)))
+                  (snapshot (my/read-position--snapshot window)))
+        (let ((data (my/read-position--read-data)))
+          (unless (eq data :invalid)
+            (let* ((entries (copy-tree (plist-get data :entries)))
+                   (old (cdr (assoc-string key entries t)))
+                   (record (my/read-position--merge-record old snapshot)))
+              (setq entries (cons (cons key record)
+                                  (cl-remove key entries
+                                             :key #'car :test #'string-equal)))
+              (setq entries (sort entries
+                                  (lambda (a b) (string-lessp (car a) (car b)))))
+              (my/read-position--write-data
+               (list :version 1 :entries entries)))))))))
+
+(defun my/read-position--save-buffer-now ()
+  "Save the current reading buffer immediately."
+  (when (timerp my/read-position--save-timer)
+    (cancel-timer my/read-position--save-timer))
+  (setq my/read-position--save-timer nil)
+  (my/read-position-save-buffer
+   (current-buffer) (get-buffer-window (current-buffer) t)))
+
+(defun my/read-position--idle-save (buffer)
+  "Save BUFFER after the configured idle delay."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq my/read-position--save-timer nil)
+      (my/read-position-save-buffer
+       buffer (get-buffer-window buffer t)))))
+
+(defun my/read-position--schedule-save ()
+  "Schedule a debounced position save for the current reading buffer."
+  (when (and (my/read-position--source-type)
+             (not my/read-position--restoring-p))
+    (when (timerp my/read-position--save-timer)
+      (cancel-timer my/read-position--save-timer))
+    (setq my/read-position--save-timer
+          (run-with-idle-timer my/read-position-save-delay nil
+                               #'my/read-position--idle-save
+                               (current-buffer)))))
+
+(defun my/read-position--clamp (position)
+  "Clamp POSITION to the accessible part of the current buffer."
+  (max (point-min) (min (point-max) position)))
+
+(defun my/read-position--restore-pdf (record window)
+  "Restore PDF RECORD in WINDOW."
+  (let ((page (plist-get record :page))
+        (zoom (plist-get record :zoom))
+        (vscroll (plist-get record :vscroll)))
+    (with-selected-window window
+      (when (and zoom (boundp 'pdf-view-display-size))
+        (setq pdf-view-display-size zoom))
+      (when (and (integerp page) (> page 0)
+                 (fboundp 'pdf-view-goto-page))
+        (pdf-view-goto-page page))
+      (when (fboundp 'pdf-view-redisplay)
+        (pdf-view-redisplay t))
+      (when (and (numberp vscroll) (>= vscroll 0))
+        (if (fboundp 'image-set-window-vscroll)
+            (image-set-window-vscroll vscroll)
+          (set-window-vscroll window vscroll t))))))
+
+(defun my/read-position--restore-epub (record window)
+  "Restore EPUB RECORD in WINDOW."
+  (let ((document (plist-get record :document))
+        (position (plist-get record :point))
+        (start (plist-get record :window-start)))
+    (with-selected-window window
+      (when (and (integerp document)
+                 (boundp 'nov-documents)
+                 (vectorp nov-documents)
+                 (>= document 0)
+                 (< document (length nov-documents))
+                 (fboundp 'nov-goto-document))
+        (nov-goto-document document))
+      (when (integerp position)
+        (goto-char (my/read-position--clamp position))
+        (set-window-point window (point)))
+      (when (integerp start)
+        (set-window-start window (my/read-position--clamp start) t)))))
+
+(defun my/read-position-restore-buffer (buffer frame)
+  "Restore BUFFER's saved position in FRAME once."
+  (when (and (buffer-live-p buffer) (frame-live-p frame))
+    (with-current-buffer buffer
+      (unless my/read-position--restored-p
+        (setq my/read-position--restored-p t)
+        (when-let* ((key (my/read-position--source-file))
+                    (window (my/read-center-window frame)))
+          (let ((data (my/read-position--read-data)))
+            (unless (eq data :invalid)
+              (when-let ((record
+                          (cdr (assoc-string
+                                key (plist-get data :entries) t))))
+                (let ((my/read-position--restoring-p t))
+                  (pcase (my/read-position--source-type)
+                    ('pdf (my/read-position--restore-pdf record window))
+                    ('epub (my/read-position--restore-epub record window))))))))))))
+
+(defun my/read-position-setup-buffer (buffer frame)
+  "Enable persistent position tracking for BUFFER in FRAME."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (my/read-position--source-type)
+        (add-hook 'post-command-hook #'my/read-position--schedule-save nil t)
+        (add-hook 'kill-buffer-hook #'my/read-position--save-buffer-now nil t)
+        (my/read-position-restore-buffer buffer frame)))))
+
+(defun my/read-position-save-frame (frame)
+  "Persist PDF and EPUB positions belonging to FRAME."
+  (when (framep frame)
+    (let ((window (and (frame-live-p frame) (my/read-center-window frame))))
+      (dolist (buffer
+               (delete-dups
+                (delq nil
+                      (list (frame-parameter frame 'my-reading-epub-buffer)
+                            (and (window-live-p window)
+                                 (window-buffer window))))))
+        (my/read-position-save-buffer
+         buffer (and (window-live-p window)
+                     (eq (window-buffer window) buffer)
+                     window))))))
+
 (defun my/read-eww-window (&optional frame)
   "Return FRAME's center window hosting the EWW tab."
   (my/read-window 'my-reading-eww-window frame))
@@ -466,13 +738,34 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
   "Return non-nil when WINDOW has a live PDF Tools image overlay."
   (and (window-live-p window)
        (eq (window-buffer window) (current-buffer))
-       (boundp 'image-mode-winprops-alist)
-       (listp image-mode-winprops-alist)
-       (let* ((winprops (assq window image-mode-winprops-alist))
-              (overlay (cdr (assq 'overlay (cdr winprops)))))
-         (and (overlayp overlay)
-              (eq (overlay-buffer overlay) (current-buffer))
-              (eq (overlay-get overlay 'window) window)))))
+       (or (and (bound-and-true-p pdf-view-roll-minor-mode)
+                (fboundp 'pdf-roll-page-overlay)
+                (let ((overlay (pdf-roll-page-overlay 1 window)))
+                  (and (overlayp overlay)
+                       (eq (overlay-buffer overlay) (current-buffer))
+                       (eq (overlay-get overlay 'window) window))))
+           (and (boundp 'image-mode-winprops-alist)
+                (listp image-mode-winprops-alist)
+                (let* ((winprops (assq window image-mode-winprops-alist))
+                       (overlay (cdr (assq 'overlay (cdr winprops)))))
+                  (and (overlayp overlay)
+                       (eq (overlay-buffer overlay) (current-buffer))
+                       (eq (overlay-get overlay 'window) window)))))))
+
+(defun my/read--enable-pdf-continuous-scroll (buffer frame)
+  "Enable Preview-like continuous scrolling for PDF BUFFER in FRAME."
+  (when (and my/read-pdf-continuous-scroll
+             (buffer-live-p buffer)
+             (frame-live-p frame)
+             (fboundp 'pdf-view-roll-minor-mode))
+    (when-let ((window (my/read-center-window frame)))
+      (when (and (eq (window-buffer window) buffer)
+                 (with-current-buffer buffer
+                   (derived-mode-p 'pdf-view-mode)))
+        (with-selected-window window
+          (with-current-buffer buffer
+            (unless (bound-and-true-p pdf-view-roll-minor-mode)
+              (pdf-view-roll-minor-mode 1))))))))
 
 (defun my/read--repair-pdf-view-window (buffer frame)
   "Repair BUFFER's PDF Tools image state in FRAME's center window.
@@ -513,6 +806,8 @@ overlay; preserve the current page across that repair."
         (my/read--configure-speech-language))
       (when (derived-mode-p 'nov-mode 'eww-mode 'doc-view-mode 'pdf-view-mode)
         (english-reading-mode 1))
+      (my/read--enable-pdf-continuous-scroll buffer frame)
+      (my/read-position-setup-buffer buffer frame)
       (my-read-center-tab-mode 1))))
 
 (defun my/read-toggle-center-tab ()
@@ -1968,12 +2263,14 @@ When KINDLE-BUFFER is live, expose it, EPUB, and EWW as left-side tabs."
     ;; The delete-frame hooks stop the Kindle bridge, follower modes, timers,
     ;; translation process, and temporary workspace buffers.
     (dolist (frame frames)
+      (my/read-position-save-frame frame)
       (delete-frame frame t))
     (message "my-readを終了しました")))
 
 (defun my/read--frame-deleted (frame)
   "Clean up my-read state when FRAME is deleted."
   (when (my/read-frame-p frame)
+    (my/read-position-save-frame frame)
     (when (and my/read-kokoro-context
                (eq frame (plist-get my/read-kokoro-context :frame)))
       (setq my/read-kokoro-context nil))
