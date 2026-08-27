@@ -45,9 +45,11 @@ nov.elでEPUBを開き、選択中の1文をハイライトしながらorg-noter
 - `j` / `k` で次／前の1文へ移動
 - `SPC` で現在の1文を読み上げ、`s` で文単位の連続読み上げ
 - 読み上げ中の文を対応する本文バッファ上でハイライト
+- EPUB／EWW／Kindleでは読み上げ中の文頭を表示中央へ追従
 - 読み上げ中は翻訳対象を読み上げ中の1文へ固定
 - `l` / `;` で前／次の単語へ移動し、Lookupを追従
 - PDF Toolsで選択した文を新しい読み上げ開始位置として自動採用
+- PDF／EPUBのページ、表示位置、表示倍率を自動保存・復元
 - PDF／EPUB／Kindleをorg-noterで統一して記録
 - PDFの選択範囲を永続ハイライトとして保存
 - Kindleでは前後2ページをメモリ上だけにキャッシュ
@@ -64,7 +66,7 @@ nov.elでEPUBを開き、選択中の1文をハイライトしながらorg-noter
 - Python 3.11以上3.14未満
 - [`uv`](https://docs.astral.sh/uv/)
 - Swift 6以降
-- macOSの `/usr/bin/curl` と `/usr/bin/afplay`
+- macOSの `/usr/bin/curl`、`/usr/bin/say`、`/usr/bin/afplay`
 - ローカル翻訳を使う場合はOllamaと `translategemma:4b`
 - Emacsパッケージ `google-translate`、`lookup`、`org-noter`、`pdf-tools`
 - EPUBを読む場合は `nov.el`
@@ -107,6 +109,10 @@ curl --fail http://127.0.0.1:8000/health
       my/read-vocabulary-file "~/my-read/vocabulary.org"
       my/read-org-noter-directory
       "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read"
+      my/read-position-directory
+      "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read"
+      my/read-japanese-macos-voice "Kyoko"
+      my/read-japanese-macos-rate 540
       my/read-eww-url "https://arxiv.org/"
       my/read-eww-line-spacing 0.5
       my/read-eww-math-enabled t
@@ -141,6 +147,9 @@ curl --fail http://127.0.0.1:8000/health
 ```
 
 `my/read-lookup-dictionary-ids` は通常のLookup設定を変更しません。空リストにすると専用フレーム内のLookupを無効にします。
+
+日本語を多く含むEPUBとPDFだけはmacOS音声へ自動的に切り替わり、既定では
+`Kyoko`を毎分540語で使います。英語のKokoro設定と速度は変更しません。
 
 PDFとorg-noterをまだ導入していない環境では、次の設定も追加してください。
 
@@ -198,6 +207,18 @@ EWWのロード中表示を同期型辞書へ送るとEmacs全体を止めるこ
 EWWタブでは自動Lookupだけを既定で停止しています。必要なら
 `my/read-eww-enable-automatic-lookup`を`t`にしてください。
 
+PDFとEPUBの読書位置は、操作が止まってから1秒後とバッファを閉じるときに
+`my/read-position-directory/read-positions.el`へ保存され、次に開いたとき自動的に
+復元されます。PDFではページ、表示倍率、縦スクロール位置、EPUBでは章、本文位置、
+表示開始位置を記録します。壊れた位置ファイルを検出した場合は上書きしません。
+
+`s`の連続読み上げはEPUBの章境界とPDFのページ境界を越えて進みます。EPUB、EWW、
+Kindleでは読み上げ中の文頭が読書ペインの中央付近へ来るよう表示を追従します。
+PDFの連続読み上げでは、読み上げ箇所をPDF座標から求めて表示中央へ追従します。
+日本語のmacOS音声では次の1文をバックグラウンドで先に合成し、文間の待ち時間を
+短くします。手動でPDFを移動した場合は、意図しない自動移動を防ぐため連続読み上げを
+停止します。
+
 ### PDF Tools
 
 PDFを開くと`pdf-view-mode`と`english-reading-mode`が連携します。PDF表示は
@@ -214,8 +235,8 @@ PDF Toolsで本文をマウス選択すると、選択文字列とページ上�
 選択位置に最も近いものを使います。
 
 英語はローカルKokoro、日本語を多く含むPDFは自動判定してmacOSの日本語音声
-（既定は`Kyoko`）を使います。PDFのテキストレイヤーがないスキャンPDFは、現在の
-実装ではOCR対象外です。
+（既定は`Kyoko`、毎分540語）を使います。PDFのテキストレイヤーがないスキャンPDFは、
+現在の実装ではOCR対象外です。
 
 ### org-noter
 
