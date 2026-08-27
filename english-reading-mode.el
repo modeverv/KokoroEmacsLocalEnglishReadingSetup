@@ -934,10 +934,14 @@ relative source-text position so zoom correction never keeps a stale scroll."
     (english-reading-mode--pdf-center-continuous-speech
      english-reading-mode--active-speech)))
 
-(add-hook 'english-reading-mode-speech-start-hook
-          #'english-reading-mode--pdf-highlight-start)
-(add-hook 'english-reading-mode-speech-start-hook
-          #'english-reading-mode--pdf-center-continuous-speech)
+;; PDF visuals are prepared by the speech advice before a prefetched macOS
+;; player can start.  Remove the former start-hook registrations as well so a
+;; live `load-file' upgrades an already running reader without doing the slow
+;; work a second time after playback begins.
+(remove-hook 'english-reading-mode-speech-start-hook
+             #'english-reading-mode--pdf-highlight-start)
+(remove-hook 'english-reading-mode-speech-start-hook
+             #'english-reading-mode--pdf-center-continuous-speech)
 (add-hook 'english-reading-mode-speech-finish-hook
           #'english-reading-mode--pdf-highlight-finish)
 
@@ -1099,21 +1103,39 @@ period proves that synthesis failed before playback started."
   "Track Kokoro ORIGINAL-FUNCTION for BEG..END when this mode is active."
   (if (not english-reading-mode)
       (apply original-function beg end arguments)
-    (let ((context (english-reading-mode--make-context beg end)))
+    (let* ((context (english-reading-mode--make-context beg end))
+           ;; A prefetched macOS utterance starts playing inside
+           ;; ORIGINAL-FUNCTION.  Building the PDF SVG afterwards can therefore
+           ;; leave a short sentence unhighlighted for most of its playback.
+           ;; Prepare the visible PDF first whenever no older utterance still
+           ;; owns the lifecycle.  The active-speech case retains the old order
+           ;; so stopping that utterance cannot restore over the new layer.
+           (prepare-pdf-first (null english-reading-mode--active-speech)))
+      (when prepare-pdf-first
+        (english-reading-mode--pdf-center-continuous-speech context)
+        (english-reading-mode--pdf-highlight-start context))
       ;; ORIGINAL-FUNCTION creates Kokoro's request process.  Only after that
       ;; succeeds do we publish the new speech context.  `j' moves point after
       ;; this wrapper returns, so listeners lock to the old/current sentence
       ;; before point advances.
-      (prog1
-          (apply original-function beg end arguments)
-        (setq english-reading-mode--active-speech context
-              english-reading-mode--speech-start-time (current-time)
-              english-reading-mode--speech-player-seen-p nil)
-        (run-hook-with-args 'english-reading-mode-speech-start-hook context)
-        ;; Do not infer completion from a request sentinel: Kokoro switches
-        ;; from curl -> afplay at that boundary.  Poll the actual request/player
-        ;; process variables and finish only when BOTH are no longer alive.
-        (english-reading-mode--start-watch context)))))
+      (condition-case err
+          (prog1
+              (apply original-function beg end arguments)
+            (unless prepare-pdf-first
+              (english-reading-mode--pdf-center-continuous-speech context)
+              (english-reading-mode--pdf-highlight-start context))
+            (setq english-reading-mode--active-speech context
+                  english-reading-mode--speech-start-time (current-time)
+                  english-reading-mode--speech-player-seen-p nil)
+            (run-hook-with-args 'english-reading-mode-speech-start-hook context)
+            ;; Do not infer completion from a request sentinel: Kokoro switches
+            ;; from curl -> afplay at that boundary.  Poll the actual request/player
+            ;; process variables and finish only when BOTH are no longer alive.
+            (english-reading-mode--start-watch context))
+        (error
+         (when prepare-pdf-first
+           (english-reading-mode--pdf-highlight-finish context))
+         (signal (car err) (cdr err)))))))
 
 (defun english-reading-mode--after-kokoro-stop (&rest _)
   "Finish the active context after an explicit/internal Kokoro stop."

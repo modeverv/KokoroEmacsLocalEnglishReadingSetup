@@ -992,6 +992,48 @@
         (should (equal restored '(3 test-window)))
         (should-not english-reading-mode--pdf-highlight-page)))))
 
+(ert-deftest english-reading-mode-pdf-highlight-precedes-prefetched-playback ()
+  (with-temp-buffer
+    (setq-local english-reading-mode t)
+    (let ((english-reading-mode--active-speech nil)
+          events)
+      (cl-letf (((symbol-function 'english-reading-mode--make-context)
+                 (lambda (_beg _end) '(:id 1 :text "Short sentence.")))
+                ((symbol-function
+                  'english-reading-mode--pdf-center-continuous-speech)
+                 (lambda (_context) (push 'center events)))
+                ((symbol-function 'english-reading-mode--pdf-highlight-start)
+                 (lambda (_context) (push 'highlight events)))
+                ((symbol-function 'english-reading-mode--start-watch)
+                 (lambda (_context) (push 'watch events))))
+        (english-reading-mode--around-kokoro-speak-bounds
+         (lambda (_beg _end)
+           (push 'play events)
+           'playing)
+         1 2)
+        (should (equal (nreverse events)
+                       '(center highlight play watch)))))))
+
+(ert-deftest english-reading-mode-pdf-highlight-restores-on-speech-error ()
+  (with-temp-buffer
+    (setq-local english-reading-mode t)
+    (let ((english-reading-mode--active-speech nil)
+          events)
+      (cl-letf (((symbol-function 'english-reading-mode--make-context)
+                 (lambda (_beg _end) '(:id 1 :text "Short sentence.")))
+                ((symbol-function
+                  'english-reading-mode--pdf-center-continuous-speech)
+                 #'ignore)
+                ((symbol-function 'english-reading-mode--pdf-highlight-start)
+                 (lambda (_context) (push 'highlight events)))
+                ((symbol-function 'english-reading-mode--pdf-highlight-finish)
+                 (lambda (_context) (push 'restore events))))
+        (should-error
+         (english-reading-mode--around-kokoro-speak-bounds
+          (lambda (&rest _) (error "speech failed"))
+          1 2))
+        (should (equal (nreverse events) '(highlight restore)))))))
+
 (ert-deftest english-reading-mode-pdf-continuous-centers-spoken-line ()
   (save-window-excursion
     (let ((pdf-buffer (generate-new-buffer " *continuous-pdf-center*"))
