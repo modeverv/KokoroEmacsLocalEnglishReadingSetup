@@ -1141,14 +1141,16 @@
   (with-temp-buffer
     (setq-local major-mode 'pdf-view-mode)
     (setq-local english-reading-mode--pdf-page 3)
-    (let (created render-arguments image-arguments displayed restored)
+    (let (created raster-arguments image-arguments displayed restored)
       (cl-letf (((symbol-function 'pdf-view-create-page)
                  (lambda (page &optional window)
                    (setq created (list page window))
                    '(image :type png :width 500)))
-                ((symbol-function 'pdf-cache-renderpage-highlight)
-                 (lambda (page width &rest regions)
-                   (setq render-arguments (list page width regions))
+                ((symbol-function
+                  'english-reading-mode--pdf-borderless-raster-highlight)
+                 (lambda (image geometry rectangles)
+                   (setq raster-arguments
+                         (list image geometry rectangles))
                    "highlight-png-data"))
                 ((symbol-function 'create-image)
                  (lambda (data type data-p &rest properties)
@@ -1170,11 +1172,10 @@
            '((50.0 200.0 250.0 240.0))
            'speech-context))
         (should (equal created '(3 test-window)))
-        (should
-         (equal render-arguments
-                '(3 500
-                  (("#FFD54F" "#FFD54F" 0.35
-                    (0.1 0.2 0.5 0.24))))))
+        (should (equal raster-arguments
+                       '((image :type png :width 500)
+                         (:width 500.0 :height 1000.0)
+                         ((50.0 200.0 250.0 240.0)))))
         (should (equal image-arguments
                        '("highlight-png-data" png t
                          (:width 500 :pointer arrow))))
@@ -1192,6 +1193,42 @@
         (should (equal restored '(3 test-window)))
         (should-not english-reading-mode--pdf-highlight-page)
         (should-not english-reading-mode--pdf-highlight-state)))))
+
+(ert-deftest english-reading-mode-pdf-raster-highlight-has-no-stroke ()
+  (let ((png-data (make-string 24 0))
+        process-arguments)
+    ;; A 1000-pixel Retina PNG displayed at width 500 must still receive
+    ;; coordinates in its native 1000-pixel raster space.
+    (aset png-data 0 #x89)
+    (cl-loop for byte across "PNG\r\n\x1a\n"
+             for index from 1
+             do (aset png-data index byte))
+    (aset png-data 16 0)
+    (aset png-data 17 0)
+    (aset png-data 18 3)
+    (aset png-data 19 232)
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (_program) "/opt/homebrew/bin/magick"))
+              ((symbol-function 'call-process-region)
+               (lambda (_beg _end program _delete destination _display
+                        &rest arguments)
+                 (setq process-arguments (cons program arguments))
+                 (with-current-buffer destination
+                   (set-buffer-multibyte nil)
+                   (insert "borderless-png"))
+                 0)))
+      (should
+       (equal
+        (english-reading-mode--pdf-borderless-raster-highlight
+         `(image :type png :width 500 :data ,png-data)
+         '(:width 500.0 :height 1000.0)
+         '((50.0 200.0 250.0 240.0)))
+        "borderless-png")))
+    (should (member "-stroke" process-arguments))
+    (should (equal (cadr (member "-stroke" process-arguments)) "none"))
+    (should
+     (equal (cadr (member "-draw" process-arguments))
+            "roundrectangle 97.000,398.000 503.000,482.000 3.000,3.000"))))
 
 (ert-deftest english-reading-mode-pdf-roll-highlight-targets-page-overlay ()
   (save-window-excursion

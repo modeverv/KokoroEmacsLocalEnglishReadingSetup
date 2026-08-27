@@ -29,6 +29,11 @@
   :type 'number
   :group 'english-reading-mode)
 
+(defcustom english-reading-mode-pdf-highlight-program "magick"
+  "ImageMagick program used to draw borderless PDF speech highlights."
+  :type 'string
+  :group 'english-reading-mode)
+
 (defcustom english-reading-mode-pdf-highlight-delay 0.5
   "Seconds to wait after PDF scrolling before drawing the speech highlight.
 
@@ -854,6 +859,86 @@ the same image that is actually displayed."
            (append (when display-width (list :width display-width))
                    (list :pointer 'arrow :transform-smoothing t)))))
 
+(defun english-reading-mode--pdf-image-bytes (image)
+  "Return the raw bytes represented by image spec IMAGE."
+  (let* ((properties (cdr image))
+         (data (plist-get properties :data))
+         (file (plist-get properties :file)))
+    (cond
+     ((stringp data) data)
+     ((stringp file)
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (insert-file-contents-literally file)
+        (buffer-string)))
+     (t nil))))
+
+(defun english-reading-mode--png-width (data)
+  "Return the pixel width encoded in PNG DATA, or nil if DATA is not PNG."
+  (let ((bytes (and (stringp data) (string-as-unibyte data))))
+    (when (and bytes
+               (>= (length bytes) 24)
+               (= (aref bytes 0) #x89)
+               (string-equal (substring bytes 1 8) "PNG\r\n\x1a\n"))
+      (+ (ash (aref bytes 16) 24)
+         (ash (aref bytes 17) 16)
+         (ash (aref bytes 18) 8)
+         (aref bytes 19)))))
+
+(defun english-reading-mode--pdf-borderless-raster-highlight
+    (image geometry rectangles)
+  "Return IMAGE's PNG bytes with fill-only highlight RECTANGLES.
+
+Return nil when ImageMagick or the source image bytes are unavailable.  This
+keeps the stable native-raster PDF path while avoiding PDF Tools' mandatory
+opaque stroke around every highlighted region."
+  (when-let* ((program
+               (executable-find english-reading-mode-pdf-highlight-program))
+              (image-data (english-reading-mode--pdf-image-bytes image))
+              (display-width (plist-get (cdr image) :width))
+              (page-width (float (plist-get geometry :width)))
+              ((> page-width 0)))
+    (let* (;; pdf-tools commonly stores a Retina PNG whose raster is twice
+           ;; DISPLAY-WIDTH.  ImageMagick draws in those native pixels, so
+           ;; using the display width shifts and shrinks every rectangle.
+           (raster-width
+            (or (english-reading-mode--png-width image-data) display-width))
+           (scale (/ raster-width page-width))
+           (color-values
+            (or (color-values english-reading-mode-pdf-highlight-color)
+                '(65535 54613 20303)))
+           (fill
+            (format "rgba(%d,%d,%d,%.3f)"
+                    (/ (nth 0 color-values) 257)
+                    (/ (nth 1 color-values) 257)
+                    (/ (nth 2 color-values) 257)
+                    english-reading-mode-pdf-highlight-opacity))
+           (draw
+            (mapconcat
+             (lambda (rectangle)
+               (pcase-let ((`(,xmin ,ymin ,xmax ,ymax) rectangle))
+                 (format "roundrectangle %.3f,%.3f %.3f,%.3f %.3f,%.3f"
+                         (* scale (- xmin 1.5))
+                         (* scale (- ymin 1.0))
+                         (* scale (+ xmax 1.5))
+                         (* scale (+ ymax 1.0))
+                         (* scale 1.5) (* scale 1.5))))
+             rectangles " "))
+           (output (generate-new-buffer " *PDF borderless highlight*")))
+      (unwind-protect
+          (with-temp-buffer
+            (set-buffer-multibyte nil)
+            (insert image-data)
+            (when (zerop
+                   (call-process-region
+                    (point-min) (point-max) program nil output nil
+                    "png:-" "-fill" fill "-stroke" "none"
+                    "-draw" draw "png:-"))
+              (with-current-buffer output
+                (set-buffer-multibyte nil)
+                (buffer-string))))
+        (kill-buffer output)))))
+
 (defun english-reading-mode--pdf-display-state (&optional window)
   "Return (OVERLAY IMAGE SLICE) for WINDOW's displayed PDF page."
   (when (fboundp 'image-mode-window-get)
@@ -914,12 +999,16 @@ image unchanged.  Match pdf-roll's own category and exact page slot here."
          ;; embedding the full page PNG in a giant SVG.  The latter can turn a
          ;; live PDF window black on macOS even though Emacs accepts the image.
          (highlight-data
-          (pdf-cache-renderpage-highlight
-           page width
-           (append (list english-reading-mode-pdf-highlight-color
-                         english-reading-mode-pdf-highlight-color
-                         english-reading-mode-pdf-highlight-opacity)
-                   relative-rectangles)))
+          (or (english-reading-mode--pdf-borderless-raster-highlight
+               page-image geometry rectangles)
+              ;; Retain PDF Tools as a compatibility fallback on systems
+              ;; without ImageMagick.  Its renderer always adds a stroke.
+              (pdf-cache-renderpage-highlight
+               page width
+               (append (list english-reading-mode-pdf-highlight-color
+                             english-reading-mode-pdf-highlight-color
+                             english-reading-mode-pdf-highlight-opacity)
+                       relative-rectangles))))
          (highlight-image
           (create-image highlight-data 'png t
                         :width width :pointer 'arrow)))
