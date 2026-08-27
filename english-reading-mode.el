@@ -23,8 +23,17 @@
   :type 'color
   :group 'english-reading-mode)
 
-(defcustom english-reading-mode-pdf-highlight-opacity 0.32
+(defcustom english-reading-mode-pdf-highlight-opacity 0.15
   "Opacity of the spoken-sentence highlight on a PDF page."
+  :type 'number
+  :group 'english-reading-mode)
+
+(defcustom english-reading-mode-macos-continuous-gap 0.05
+  "Seconds to wait between continuous macOS speech utterances.
+
+macOS speech is rendered to an AIFF file and the next sentence is prefetched,
+so only a small `afplay' handoff margin is needed.  This applies only when the
+speech buffer uses the `macos' backend; Kokoro keeps its zero-gap behavior."
   :type 'number
   :group 'english-reading-mode)
 
@@ -62,6 +71,7 @@ This also runs on synthesis failure or explicit stop.")
 (defvar-local english-reading-mode--pdf-text-point nil)
 (defvar-local english-reading-mode--pdf-bbox-cache nil)
 (defvar-local english-reading-mode--pdf-image-data-cache nil)
+(defvar-local english-reading-mode--pdf-highlight-page nil)
 
 (defvar-local english-reading-mode-key-active-predicate nil
   "Optional function deciding whether this mode's keys are active.
@@ -576,6 +586,49 @@ This currently exposes the text layer used behind a DocView PDF."
           (push start starts))))
     (nreverse starts)))
 
+(defun english-reading-mode--pdf-compact-text (text)
+  "Normalize TEXT for matching scripts that do not separate words by spaces."
+  (downcase (replace-regexp-in-string "[[:space:]\u00a0]+" "" text)))
+
+(defun english-reading-mode--pdf-compact-match-ranges (text words)
+  "Return positioned-word ranges matching compact TEXT in WORDS.
+
+Each result is (START . COUNT).  The match may begin or end inside a bbox word,
+which is common when Japanese PDF extraction groups a whole visual line into
+one positioned word."
+  (let ((needle (english-reading-mode--pdf-compact-text text))
+        (page-text "")
+        (offsets (make-vector (length words) nil))
+        ranges)
+    (dotimes (index (length words))
+      (let* ((start (length page-text))
+             (word
+              (english-reading-mode--pdf-compact-text
+               (plist-get (aref words index) :text))))
+        (setq page-text (concat page-text word))
+        (aset offsets index (cons start (length page-text)))))
+    (unless (string-empty-p needle)
+      (let ((search-start 0))
+        (while (string-match (regexp-quote needle) page-text search-start)
+          (let* ((match-beg (match-beginning 0))
+                 (match-end (match-end 0))
+                 (first
+                  (cl-position-if
+                   (lambda (range)
+                     (and (< (car range) match-end)
+                          (> (cdr range) match-beg)))
+                   offsets))
+                 (last
+                  (cl-position-if
+                   (lambda (range)
+                     (and (< (car range) match-end)
+                          (> (cdr range) match-beg)))
+                   offsets :from-end t)))
+            (when (and first last)
+              (push (cons first (1+ (- last first))) ranges))
+            (setq search-start (max (1+ match-beg) match-end))))))
+    (nreverse ranges)))
+
 (defun english-reading-mode--pdf-nearest-match
     (starts word-count source-beg page-range)
   "Choose from STARTS using SOURCE-BEG's relative position in PAGE-RANGE."
@@ -618,37 +671,59 @@ This currently exposes the text layer used behind a DocView PDF."
          (tokens (english-reading-mode--pdf-normalized-tokens
                   (plist-get context :text)))
          (starts (english-reading-mode--pdf-token-match-starts tokens words))
+         (candidates
+          (if starts
+              (mapcar (lambda (start) (cons start (length tokens))) starts)
+            (english-reading-mode--pdf-compact-match-ranges
+             (plist-get context :text) words)))
          (page-range (english-reading-mode--pdf-page-range page))
-         (start (and starts
+         (start (and candidates
                      (english-reading-mode--pdf-nearest-match
-                      starts (length words) (plist-get context :beg)
-                      page-range))))
+                      (mapcar #'car candidates) (length words)
+                      (plist-get context :beg) page-range)))
+         (count (and start (cdr (assq start candidates)))))
     (when start
       (list geometry
             (english-reading-mode--pdf-word-rectangles
-             words start (length tokens))))))
+             words start count)))))
 
-(defun english-reading-mode--pdf-image-data-uri (image-file)
-  "Return IMAGE-FILE as a cached PNG data URI."
+(defun english-reading-mode--pdf-image-data-uri (image)
+  "Return PDF page IMAGE as a cached data URI.
+
+DocView images normally carry a :file property, while pdf-tools supplies the
+rendered PNG directly in :data.  Supporting both keeps the SVG highlight on
+the same image that is actually displayed."
   (unless (hash-table-p english-reading-mode--pdf-image-data-cache)
     (setq english-reading-mode--pdf-image-data-cache
           (make-hash-table :test #'equal)))
-  (or (gethash image-file english-reading-mode--pdf-image-data-cache)
-      (let ((uri
-             (with-temp-buffer
-               (set-buffer-multibyte nil)
-               (insert-file-contents-literally image-file)
-               (concat "data:image/png;base64,"
-                       (base64-encode-string (buffer-string) t)))))
-        (puthash image-file uri english-reading-mode--pdf-image-data-cache)
-        uri)))
+  (let* ((properties (cdr image))
+         (type (or (plist-get properties :type) 'png))
+         (image-file (plist-get properties :file))
+         (image-data (plist-get properties :data))
+         (cache-key
+          (or image-file
+              (and (stringp image-data)
+                   (list type (secure-hash 'sha1 image-data))))))
+    (unless cache-key
+      (error "PDF page image has neither :file nor :data"))
+    (or (gethash cache-key english-reading-mode--pdf-image-data-cache)
+        (let* ((bytes
+                (or image-data
+                    (with-temp-buffer
+                      (set-buffer-multibyte nil)
+                      (insert-file-contents-literally image-file)
+                      (buffer-string))))
+               (uri
+                (concat (format "data:image/%s;base64," type)
+                        (base64-encode-string bytes t))))
+          (puthash cache-key uri english-reading-mode--pdf-image-data-cache)
+          uri))))
 
 (defun english-reading-mode--pdf-svg-highlight (image geometry rectangles)
   "Return an SVG image spec containing IMAGE with highlighted RECTANGLES."
   (let* ((width (plist-get geometry :width))
          (height (plist-get geometry :height))
-         (image-file (plist-get (cdr image) :file))
-         (image-uri (english-reading-mode--pdf-image-data-uri image-file))
+         (image-uri (english-reading-mode--pdf-image-data-uri image))
          (display-width (plist-get (cdr image) :width))
          (svg
           (concat
@@ -665,31 +740,60 @@ This currently exposes the text layer used behind a DocView PDF."
               (pcase-let ((`(,xmin ,ymin ,xmax ,ymax) rect))
                 (format
                  (concat "<rect x='%.3f' y='%.3f' width='%.3f' height='%.3f' "
-                         "rx='1.5' fill='%s' fill-opacity='%.3f' "
-                         "stroke='%s' stroke-opacity='0.75' stroke-width='0.8'/>")
+                         "rx='1.5' fill='%s' fill-opacity='%.3f'/>")
                  (- xmin 1.5) (- ymin 1.0)
                  (+ (- xmax xmin) 3.0) (+ (- ymax ymin) 2.0)
                  english-reading-mode-pdf-highlight-color
-                 english-reading-mode-pdf-highlight-opacity
-                 english-reading-mode-pdf-highlight-color)))
+                 english-reading-mode-pdf-highlight-opacity)))
             rectangles "")
            "</g></svg>")))
     (apply #'create-image svg 'svg t
            (append (when display-width (list :width display-width))
                    (list :pointer 'arrow :transform-smoothing t)))))
 
-(defun english-reading-mode--pdf-restore-image (pdf-buffer)
-  "Restore PDF-BUFFER's normal DocView page image."
+(defun english-reading-mode--pdf-display-state (&optional window)
+  "Return (OVERLAY IMAGE SLICE) for WINDOW's displayed PDF page."
+  (when (fboundp 'image-mode-window-get)
+    (list (image-mode-window-get 'overlay window)
+          (image-mode-window-get 'image window)
+          (image-mode-window-get 'slice window))))
+
+(defun english-reading-mode--pdf-view-highlight
+    (window geometry rectangles)
+  "Display RECTANGLES as a fill-only highlight in pdf-tools WINDOW."
+  (let* ((page english-reading-mode--pdf-page)
+         ;; `pdf-info-renderpage-highlight' always strokes every region.  Even
+         ;; when its stroke matches the fill, the doubly painted edge remains
+         ;; visibly darker.  Compose the normal page with our fill-only SVG
+         ;; layer instead.
+         (page-image (pdf-view-create-page page window))
+         (highlight-image
+          (english-reading-mode--pdf-svg-highlight
+           page-image geometry rectangles)))
+    (setq english-reading-mode--pdf-highlight-page page)
+    ;; `pdf-view-display-image' updates pdf-tools' canonical page image, so its
+    ;; normal redisplay does not immediately cover the speech highlight.
+    (pdf-view-display-image highlight-image page window)))
+
+(defun english-reading-mode--pdf-restore-image (pdf-buffer &optional window)
+  "Restore PDF-BUFFER's normal page image in WINDOW."
   (when (buffer-live-p pdf-buffer)
     (with-current-buffer pdf-buffer
-      (when (and (derived-mode-p 'doc-view-mode)
-                 (fboundp 'doc-view-current-overlay))
-        (let ((overlay (doc-view-current-overlay))
-              (image (doc-view-current-image))
-              (slice (doc-view-current-slice)))
+      (cond
+       ((and (eq major-mode 'pdf-view-mode)
+             english-reading-mode--pdf-highlight-page)
+        ;; Re-render the normal page at the *current* display size.  Restoring
+        ;; a saved pre-highlight image would undo any zoom made during speech.
+        (pdf-view-display-page english-reading-mode--pdf-highlight-page window)
+        (setq english-reading-mode--pdf-highlight-page nil))
+       ((english-reading-mode--pdf-buffer-p)
+        (pcase-let ((`(,overlay ,image ,slice)
+                     (english-reading-mode--pdf-display-state window)))
           (when (overlayp overlay)
             (overlay-put overlay 'display
-                         (if slice (list (cons 'slice slice) image) image))))))))
+                         (if slice
+                             (list (cons 'slice slice) image)
+                           image)))))))))
 
 (defun english-reading-mode--pdf-highlight-start (context)
   "Highlight the PDF words belonging to speech CONTEXT."
@@ -697,25 +801,26 @@ This currently exposes the text layer used behind a DocView PDF."
          (pdf-buffer (and (window-live-p window) (window-buffer window))))
     (when (and (buffer-live-p pdf-buffer)
                (with-current-buffer pdf-buffer
-                 (and (eq major-mode 'doc-view-mode)
-                      (english-reading-mode--pdf-buffer-p)
+                 (and (english-reading-mode--pdf-buffer-p)
                       (eq (plist-get context :buffer)
                           english-reading-mode--pdf-text-buffer))))
       (with-current-buffer pdf-buffer
         (condition-case err
             (when-let ((match
                         (english-reading-mode--pdf-context-rectangles context)))
-              (let* ((overlay (doc-view-current-overlay))
-                     (image (doc-view-current-image))
-                     (highlight
-                      (english-reading-mode--pdf-svg-highlight
-                       image (car match) (cadr match)))
-                     (slice (doc-view-current-slice)))
-                (when (and (overlayp overlay) highlight)
-                  (overlay-put overlay 'display
-                               (if slice
-                                   (list (cons 'slice slice) highlight)
-                                 highlight)))))
+              (if (eq major-mode 'pdf-view-mode)
+                  (english-reading-mode--pdf-view-highlight
+                   window (car match) (cadr match))
+                (pcase-let* ((`(,overlay ,image ,slice)
+                              (english-reading-mode--pdf-display-state window))
+                             (highlight
+                              (english-reading-mode--pdf-svg-highlight
+                               image (car match) (cadr match))))
+                  (when (and (overlayp overlay) highlight)
+                    (overlay-put overlay 'display
+                                 (if slice
+                                     (list (cons 'slice slice) highlight)
+                                   highlight))))))
           (error
            (message "PDF sentence highlight unavailable: %s"
                     (error-message-string err))))))))
@@ -724,7 +829,8 @@ This currently exposes the text layer used behind a DocView PDF."
   "Remove the PDF highlight associated with speech CONTEXT."
   (let ((window (plist-get context :window)))
     (when (window-live-p window)
-      (english-reading-mode--pdf-restore-image (window-buffer window)))))
+      (english-reading-mode--pdf-restore-image
+       (window-buffer window) window))))
 
 (defun english-reading-mode--pdf-continuous-vscroll
     (rectangle page-height full-image-height displayed-image-height
@@ -817,10 +923,14 @@ relative source-text position so zoom correction never keeps a stale scroll."
   "PDF commands after which continuous speech needs position correction.")
 
 (defun english-reading-mode--pdf-post-command ()
-  "Recenter active continuous PDF speech after an interactive zoom change."
+  "Refresh and recenter active PDF speech after an interactive zoom change."
   (when (and (memq this-command english-reading-mode--pdf-zoom-commands)
              english-reading-mode--continuous-state
              english-reading-mode--active-speech)
+    ;; pdf-tools has just rendered the normal page at the new zoom.  Rebuild
+    ;; the foreground speech layer at that exact size before centering it.
+    (english-reading-mode--pdf-highlight-start
+     english-reading-mode--active-speech)
     (english-reading-mode--pdf-center-continuous-speech
      english-reading-mode--active-speech)))
 
@@ -1106,14 +1216,58 @@ originating from the displayed PDF buffer."
                     (eq speech-buffer
                         english-reading-mode--pdf-text-buffer)))))))
 
+(defun english-reading-mode--next-speech-text (context)
+  "Return the readable sentence following CONTEXT without moving point."
+  (let ((buffer (plist-get context :buffer))
+        (end (plist-get context :end))
+        text)
+    (when (and (buffer-live-p buffer) (integer-or-marker-p end))
+      (with-current-buffer buffer
+        (save-excursion
+          (goto-char (min end (point-max)))
+          (skip-chars-forward " \t\n\r")
+          (while (and (not text) (< (point) (point-max)))
+            (if-let ((bounds (bounds-of-thing-at-point 'sentence)))
+                (let* ((beg (car bounds))
+                       (finish (cdr bounds))
+                       (candidate (kokoro-reader--text beg finish)))
+                  (if (string-match-p "[[:alpha:]].*[[:alpha:]]" candidate)
+                      (setq text candidate)
+                    (goto-char (min (1+ finish) (point-max)))
+                    (skip-chars-forward " \t\n\r")))
+              (goto-char (point-max)))))))
+    text))
+
+(defun english-reading-mode--prefetch-next-macos-sentence (context)
+  "Render the sentence following CONTEXT while the current one is active."
+  (let ((speech-buffer (plist-get context :buffer)))
+    (when (and english-reading-mode--continuous-state
+               (english-reading-mode--continuous-context-owned-p context)
+               (buffer-live-p speech-buffer))
+      (with-current-buffer speech-buffer
+        (when (and (eq kokoro-reader-backend 'macos)
+                   (fboundp 'kokoro-reader-prefetch-macos-text))
+          (when-let ((text (english-reading-mode--next-speech-text context)))
+            (kokoro-reader-prefetch-macos-text text)))))))
+
+(add-hook 'english-reading-mode-speech-start-hook
+          #'english-reading-mode--prefetch-next-macos-sentence)
+
 (defun english-reading-mode--continuous-speech-finished (context)
   "Continue after the sentence represented by CONTEXT has finished."
   (when (and english-reading-mode--continuous-state
              (english-reading-mode--continuous-context-owned-p context))
     (when (timerp english-reading-mode--continuous-timer)
       (cancel-timer english-reading-mode--continuous-timer))
-    (setq english-reading-mode--continuous-timer
-          (run-at-time 0 nil #'english-reading-mode--continuous-next))))
+    (let* ((speech-buffer (plist-get context :buffer))
+           (gap
+            (if (and (buffer-live-p speech-buffer)
+                     (with-current-buffer speech-buffer
+                       (eq kokoro-reader-backend 'macos)))
+                (max 0 english-reading-mode-macos-continuous-gap)
+              0)))
+      (setq english-reading-mode--continuous-timer
+            (run-at-time gap nil #'english-reading-mode--continuous-next)))))
 
 (add-hook 'english-reading-mode-speech-finish-hook
           #'english-reading-mode--continuous-speech-finished)

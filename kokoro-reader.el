@@ -86,6 +86,10 @@ automatic fallback for languages unsupported by Kokoro."
   "Speaking rate passed to the macOS fallback backend."
   :type 'integer)
 
+(defcustom kokoro-reader-macos-prefetch-enabled t
+  "Whether continuous readers may synthesize the next macOS utterance early."
+  :type 'boolean)
+
 (defvar kokoro-reader--request-process nil)
 (defvar kokoro-reader--player-process nil)
 (defvar kokoro-reader--server-process nil)
@@ -93,6 +97,10 @@ automatic fallback for languages unsupported by Kokoro."
 (defvar kokoro-reader--server-health-timer nil)
 (defvar kokoro-reader--audio-file nil)
 (defvar kokoro-reader--overlay nil)
+(defvar kokoro-reader--macos-prefetch-process nil)
+(defvar kokoro-reader--macos-prefetch-file nil)
+(defvar kokoro-reader--macos-prefetch-key nil)
+(defvar kokoro-reader--macos-prefetch-ready-p nil)
 
 (defun kokoro-reader--server-ready-p ()
   (and (process-live-p kokoro-reader--server-process)
@@ -188,6 +196,19 @@ Call ON-ERROR with a diagnostic string when startup cannot be completed."
     (ignore-errors (delete-file kokoro-reader--audio-file)))
   (setq kokoro-reader--audio-file nil))
 
+(defun kokoro-reader--clear-macos-prefetch ()
+  "Cancel and delete any queued macOS speech file."
+  (let ((process kokoro-reader--macos-prefetch-process)
+        (file kokoro-reader--macos-prefetch-file))
+    (setq kokoro-reader--macos-prefetch-process nil
+          kokoro-reader--macos-prefetch-file nil
+          kokoro-reader--macos-prefetch-key nil
+          kokoro-reader--macos-prefetch-ready-p nil)
+    (when (process-live-p process)
+      (delete-process process))
+    (when (and file (file-exists-p file))
+      (ignore-errors (delete-file file)))))
+
 (defun kokoro-reader-stop ()
   "Cancel synthesis or stop current playback."
   (interactive)
@@ -210,6 +231,7 @@ Call ON-ERROR with a diagnostic string when startup cannot be completed."
     (setq kokoro-reader--server-health-timer nil))
   (kokoro-reader--delete-overlay)
   (kokoro-reader--delete-audio-file)
+  (kokoro-reader--clear-macos-prefetch)
   (message "Kokoro stopped"))
 
 (defun kokoro-reader--sentence-bounds ()
@@ -253,7 +275,7 @@ Call ON-ERROR with a diagnostic string when startup cannot be completed."
      (response_format . "wav")
      (stream . :false))))
 
-(defun kokoro-reader--play (audio-file overlay)
+(defun kokoro-reader--play (audio-file overlay &optional backend-label)
   (let ((process
          (make-process
           :name "kokoro-afplay"
@@ -272,9 +294,9 @@ Call ON-ERROR with a diagnostic string when startup cannot be completed."
                 (delete-overlay overlay))
               (when (equal audio-file kokoro-reader--audio-file)
                 (kokoro-reader--delete-audio-file))
-              (message "Kokoro finished"))))))
+              (message "%s finished" (or backend-label "Kokoro")))))))
     (setq kokoro-reader--player-process process)
-    (message "Kokoro speaking…")))
+    (message "%s speaking…" (or backend-label "Kokoro"))))
 
 (defun kokoro-reader--speak-bounds-kokoro (beg end)
   "Speak BEG through END using the local Kokoro server."
@@ -347,42 +369,115 @@ Call ON-ERROR with a diagnostic string when startup cannot be completed."
          (kokoro-reader--delete-audio-file))
        (message "Kokoro request not started: %s" error-text)))))
 
+(defun kokoro-reader--macos-key (text)
+  "Return the synthesis cache key for macOS speech TEXT."
+  (list text kokoro-reader-macos-program
+        kokoro-reader-macos-voice kokoro-reader-macos-rate))
+
+(defun kokoro-reader--macos-command (audio-file)
+  "Return a `say' command that synthesizes into AUDIO-FILE."
+  (append (list kokoro-reader-macos-program
+                "-r" (number-to-string kokoro-reader-macos-rate)
+                "-o" audio-file)
+          (when (and (stringp kokoro-reader-macos-voice)
+                     (not (string-empty-p kokoro-reader-macos-voice)))
+            (list "-v" kokoro-reader-macos-voice))))
+
+(defun kokoro-reader--valid-audio-file-p (file)
+  "Return non-nil when FILE looks like a non-empty synthesized audio file."
+  (and file
+       (file-exists-p file)
+       (> (file-attribute-size (file-attributes file)) 4096)))
+
+(defun kokoro-reader-prefetch-macos-text (text)
+  "Asynchronously synthesize macOS speech for TEXT for the next utterance."
+  (when (and kokoro-reader-macos-prefetch-enabled
+             (eq kokoro-reader-backend 'macos))
+    (let ((key (kokoro-reader--macos-key text)))
+      (unless (equal key kokoro-reader--macos-prefetch-key)
+        (kokoro-reader--clear-macos-prefetch)
+        (let ((file (make-temp-file "kokoro-macos-next-" nil ".aiff"))
+              process)
+          (setq process
+                (make-process
+                 :name "kokoro-macos-prefetch"
+                 :buffer nil
+                 :connection-type 'pipe
+                 :coding 'utf-8-unix
+                 :noquery t
+                 :command (kokoro-reader--macos-command file)
+                 :sentinel
+                 (lambda (proc _event)
+                   (when (and (eq proc kokoro-reader--macos-prefetch-process)
+                              (memq (process-status proc) '(exit signal)))
+                     (setq kokoro-reader--macos-prefetch-process nil)
+                     (if (and (= (process-exit-status proc) 0)
+                              (kokoro-reader--valid-audio-file-p file))
+                         (setq kokoro-reader--macos-prefetch-ready-p t)
+                       (kokoro-reader--clear-macos-prefetch))))))
+          (setq kokoro-reader--macos-prefetch-process process
+                kokoro-reader--macos-prefetch-file file
+                kokoro-reader--macos-prefetch-key key
+                kokoro-reader--macos-prefetch-ready-p nil)
+          (process-send-string process text)
+          (process-send-eof process))))))
+
+(defun kokoro-reader--take-macos-prefetch (key)
+  "Return and detach the ready prefetched file matching KEY."
+  (when (and kokoro-reader--macos-prefetch-ready-p
+             (equal key kokoro-reader--macos-prefetch-key)
+             (kokoro-reader--valid-audio-file-p
+              kokoro-reader--macos-prefetch-file))
+    (prog1 kokoro-reader--macos-prefetch-file
+      (setq kokoro-reader--macos-prefetch-process nil
+            kokoro-reader--macos-prefetch-file nil
+            kokoro-reader--macos-prefetch-key nil
+            kokoro-reader--macos-prefetch-ready-p nil))))
+
 (defun kokoro-reader--speak-bounds-macos (beg end)
-  "Speak BEG through END directly with the macOS `say' command."
-  (kokoro-reader-stop)
+  "Synthesize BEG through END to AIFF, then play it with `afplay'."
   (let* ((text (kokoro-reader--text beg end))
-         (overlay (make-overlay beg end (current-buffer) nil t))
-         (command
-          (append (list kokoro-reader-macos-program
-                        "-r" (number-to-string kokoro-reader-macos-rate))
-                  (when (and (stringp kokoro-reader-macos-voice)
-                             (not (string-empty-p kokoro-reader-macos-voice)))
-                    (list "-v" kokoro-reader-macos-voice))))
-         process)
-    (overlay-put overlay 'face 'highlight)
-    (setq kokoro-reader--overlay overlay)
-    (setq process
-          (make-process
-           :name "kokoro-macos-say"
-           :buffer nil
-           :connection-type 'pipe
-           :coding 'utf-8-unix
-           :noquery t
-           :command command
-           :sentinel
-           (lambda (proc _event)
-             (when (and (eq proc kokoro-reader--player-process)
-                        (memq (process-status proc) '(exit signal)))
-               (setq kokoro-reader--player-process nil)
-               (when (overlayp overlay)
-                 (delete-overlay overlay))
-               (message "macOS speech finished")))))
-    (setq kokoro-reader--player-process process)
-    ;; `make-process' already applies the UTF-8 process coding system.
-    (process-send-string process text)
-    (process-send-eof process)
-    (message "macOS speech speaking with %s…"
-             (or kokoro-reader-macos-voice "the system voice"))))
+         (key (kokoro-reader--macos-key text))
+         (prefetched-file (kokoro-reader--take-macos-prefetch key)))
+    ;; Taking the matching file first prevents the normal stop cleanup from
+    ;; deleting the audio that is about to become the current utterance.
+    (kokoro-reader-stop)
+    (let* ((audio-file (or prefetched-file
+                           (make-temp-file "kokoro-macos-" nil ".aiff")))
+           (overlay (make-overlay beg end (current-buffer) nil t))
+           process)
+      (overlay-put overlay 'face 'highlight)
+      (setq kokoro-reader--audio-file audio-file
+            kokoro-reader--overlay overlay)
+      (if prefetched-file
+          (kokoro-reader--play audio-file overlay "macOS speech")
+        (setq process
+              (make-process
+               :name "kokoro-macos-synthesize"
+               :buffer nil
+               :connection-type 'pipe
+               :coding 'utf-8-unix
+               :noquery t
+               :command (kokoro-reader--macos-command audio-file)
+               :sentinel
+               (lambda (proc _event)
+                 (when (and (eq proc kokoro-reader--request-process)
+                            (memq (process-status proc) '(exit signal)))
+                   (setq kokoro-reader--request-process nil)
+                   (if (and (= (process-exit-status proc) 0)
+                            (kokoro-reader--valid-audio-file-p audio-file))
+                       (kokoro-reader--play
+                        audio-file overlay "macOS speech")
+                     (when (overlayp overlay)
+                       (delete-overlay overlay))
+                     (when (equal audio-file kokoro-reader--audio-file)
+                       (kokoro-reader--delete-audio-file))
+                     (message "macOS speech synthesis failed"))))))
+        (setq kokoro-reader--request-process process)
+        (process-send-string process text)
+        (process-send-eof process)
+        (message "macOS speech synthesizing with %s…"
+                 (or kokoro-reader-macos-voice "the system voice"))))))
 
 (defun kokoro-reader--speak-bounds (beg end)
   "Speak BEG through END with the buffer's configured backend."

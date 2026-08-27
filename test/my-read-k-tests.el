@@ -474,7 +474,8 @@
 (ert-deftest english-reading-mode-pdf-finish-schedules-continuous-next ()
   (let ((pdf-buffer (generate-new-buffer " *continuous-pdf*"))
         (text-buffer (generate-new-buffer " *continuous-pdf-text*"))
-        scheduled)
+        scheduled
+        scheduled-delay)
     (unwind-protect
         (let ((english-reading-mode--continuous-state
                (list :buffer pdf-buffer
@@ -485,15 +486,76 @@
             (setq-local major-mode 'doc-view-mode)
             (setq-local buffer-file-name "/tmp/continuous.pdf")
             (setq-local english-reading-mode--pdf-text-buffer text-buffer))
+          (with-current-buffer text-buffer
+            (setq-local kokoro-reader-backend 'macos))
           (cl-letf (((symbol-function 'run-at-time)
-                     (lambda (_seconds _repeat function &rest _args)
-                       (setq scheduled function)
+                     (lambda (seconds _repeat function &rest _args)
+                       (setq scheduled function
+                             scheduled-delay seconds)
                        'fake-timer)))
             (english-reading-mode--continuous-speech-finished
              (list :buffer text-buffer)))
-          (should (eq scheduled #'english-reading-mode--continuous-next)))
+          (should (eq scheduled #'english-reading-mode--continuous-next))
+          (should (= scheduled-delay
+                     english-reading-mode-macos-continuous-gap)))
       (kill-buffer pdf-buffer)
       (kill-buffer text-buffer))))
+
+(ert-deftest english-reading-mode-kokoro-continuous-speech-keeps-zero-gap ()
+  (with-temp-buffer
+    (let ((source-buffer (current-buffer))
+          (english-reading-mode--continuous-state nil)
+          (english-reading-mode--continuous-timer nil)
+          scheduled-delay)
+      (setq-local kokoro-reader-backend 'kokoro)
+      (setq english-reading-mode--continuous-state
+            (list :buffer source-buffer
+                  :window (selected-window)
+                  :frame (selected-frame)))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (seconds _repeat _function &rest _args)
+                   (setq scheduled-delay seconds)
+                   'fake-timer)))
+        (english-reading-mode--continuous-speech-finished
+         (list :buffer source-buffer)))
+      (should (zerop scheduled-delay)))))
+
+(ert-deftest english-reading-mode-prefetches-next-macos-sentence ()
+  (with-temp-buffer
+    (insert "最初の文です。次の文を先読みします。最後の文です。")
+    (setq-local sentence-end-double-space nil)
+    (setq-local kokoro-reader-backend 'macos)
+    (let ((source-buffer (current-buffer))
+          (english-reading-mode--continuous-state nil)
+          prefetched)
+      (setq english-reading-mode--continuous-state
+            (list :buffer source-buffer
+                  :window (selected-window)
+                  :frame (selected-frame)))
+      (cl-letf (((symbol-function 'kokoro-reader-prefetch-macos-text)
+                 (lambda (text) (setq prefetched text))))
+        (english-reading-mode--prefetch-next-macos-sentence
+         (list :buffer source-buffer
+               :beg (point-min)
+               :end (save-excursion
+                      (goto-char (point-min))
+                      (cdr (bounds-of-thing-at-point 'sentence)))))
+        (should (equal prefetched "次の文を先読みします。"))))))
+
+(ert-deftest kokoro-reader-takes-only-matching-ready-macos-prefetch ()
+  (let* ((file (make-temp-file "kokoro-prefetch-test-"))
+         (key '("次の文です。" "/usr/bin/say" "Kyoko" 540))
+         (kokoro-reader--macos-prefetch-process nil)
+         (kokoro-reader--macos-prefetch-file file)
+         (kokoro-reader--macos-prefetch-key key)
+         (kokoro-reader--macos-prefetch-ready-p t))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert (make-string 5000 ?a)))
+          (should-not (kokoro-reader--take-macos-prefetch '(different)))
+          (should (equal (kokoro-reader--take-macos-prefetch key) file))
+          (should-not kokoro-reader--macos-prefetch-file))
+      (when (file-exists-p file) (delete-file file)))))
 
 (ert-deftest my-read-k-continuous-reading-turns-page-with-continuation-intent ()
   (my-read-k-test--isolated
@@ -812,10 +874,24 @@
      (equal (english-reading-mode--pdf-word-rectangles words 0 2)
             '((10.0 20.0 70.0 30.0))))))
 
+(ert-deftest english-reading-mode-pdf-matches-japanese-across-bbox-lines ()
+  (let ((words
+         (vector
+          '(:text "前の文です。また，デッドロックの検出や解消のための機能は，排他制御機能を提供している"
+            :xmin 10.0 :ymin 20.0 :xmax 500.0 :ymax 30.0)
+          '(:text "ミドルウェアによって提供される。次の文です。"
+            :xmin 10.0 :ymin 35.0 :xmax 300.0 :ymax 45.0))))
+    (should
+     (equal
+      (english-reading-mode--pdf-compact-match-ranges
+       "また，デッドロックの検出や解消のための機能は，排他制御機能を提供しているミドルウェアによって提供される。"
+       words)
+      '((0 . 2))))))
+
 (ert-deftest english-reading-mode-pdf-builds-highlight-svg-at-docview-width ()
   (let (captured)
     (cl-letf (((symbol-function 'english-reading-mode--pdf-image-data-uri)
-               (lambda (_file) "data:image/png;base64,AAAA"))
+               (lambda (_image) "data:image/png;base64,AAAA"))
               ((symbol-function 'create-image)
                (lambda (data type data-p &rest properties)
                  (setq captured (list data type data-p properties))
@@ -830,7 +906,91 @@
       (should (nth 2 captured))
       (should (equal (plist-get (nth 3 captured) :width) 850))
       (should (string-match-p "data:image/png;base64,AAAA" (car captured)))
-      (should (string-match-p "<rect x='8\\.500'" (car captured))))))
+      (should (string-match-p "<rect x='8\\.500'" (car captured)))
+      (should-not (string-match-p "stroke=" (car captured))))))
+
+(ert-deftest english-reading-mode-pdf-image-data-uri-supports-pdf-tools-data ()
+  (let ((english-reading-mode--pdf-image-data-cache
+         (make-hash-table :test #'equal)))
+    (should
+     (equal (english-reading-mode--pdf-image-data-uri
+             '(image :type png :data "PNG bytes"))
+            (concat "data:image/png;base64,"
+                    (base64-encode-string "PNG bytes" t))))))
+
+(ert-deftest english-reading-mode-doc-view-highlights-and-restores-sentence ()
+  (save-window-excursion
+    (let ((pdf-buffer (generate-new-buffer " *pdf-view-highlight*"))
+          (text-buffer (generate-new-buffer " *pdf-view-highlight-text*")))
+      (unwind-protect
+          (progn
+            (switch-to-buffer pdf-buffer)
+            (insert " ")
+            (setq-local major-mode 'doc-view-mode)
+            (setq-local buffer-file-name "/tmp/highlight.pdf")
+            (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+            (let ((page-overlay (make-overlay (point-min) (point-max)))
+                  (page-image '(image :type png :data "PNG bytes" :width 500)))
+              (overlay-put page-overlay 'display page-image)
+              (cl-letf (((symbol-function
+                          'english-reading-mode--pdf-context-rectangles)
+                         (lambda (_context)
+                           '((:width 612.0 :height 792.0)
+                             ((10.0 20.0 70.0 30.0)))))
+                        ((symbol-function
+                          'english-reading-mode--pdf-display-state)
+                         (lambda (&optional _window)
+                           (list page-overlay page-image nil)))
+                        ((symbol-function
+                          'english-reading-mode--pdf-svg-highlight)
+                         (lambda (&rest _arguments) 'highlight-image)))
+                (let ((context (list :window (selected-window)
+                                     :buffer text-buffer
+                                     :text "Spoken sentence."
+                                     :beg 1 :end 17)))
+                  (english-reading-mode--pdf-highlight-start context)
+                  (should (eq (overlay-get page-overlay 'display)
+                              'highlight-image))
+                  (english-reading-mode--pdf-highlight-finish context)
+                  (should (equal (overlay-get page-overlay 'display)
+                                 page-image))))))
+        (when (buffer-live-p pdf-buffer) (kill-buffer pdf-buffer))
+        (when (buffer-live-p text-buffer) (kill-buffer text-buffer))))))
+
+(ert-deftest english-reading-mode-pdf-view-renders-highlight-above-page ()
+  (with-temp-buffer
+    (setq-local major-mode 'pdf-view-mode)
+    (setq-local english-reading-mode--pdf-page 3)
+    (let (created svg-arguments displayed restored)
+      (cl-letf (((symbol-function 'pdf-view-create-page)
+                 (lambda (page &optional window)
+                   (setq created (list page window))
+                   'normal-page-image))
+                ((symbol-function 'english-reading-mode--pdf-svg-highlight)
+                 (lambda (image geometry rectangles)
+                   (setq svg-arguments (list image geometry rectangles))
+                   'fill-only-highlight-image))
+                ((symbol-function 'pdf-view-display-image)
+                 (lambda (image page &optional window _inhibit-slice)
+                   (setq displayed (list image page window))))
+                ((symbol-function 'pdf-view-display-page)
+                 (lambda (page &optional window)
+                   (setq restored (list page window)))))
+        (english-reading-mode--pdf-view-highlight
+         'test-window
+         '(:width 500.0 :height 1000.0)
+         '((50.0 200.0 250.0 240.0)))
+        (should (equal created '(3 test-window)))
+        (should (equal svg-arguments
+                       '(normal-page-image
+                         (:width 500.0 :height 1000.0)
+                         ((50.0 200.0 250.0 240.0)))))
+        (should (equal displayed
+                       '(fill-only-highlight-image 3 test-window)))
+        (should (= english-reading-mode--pdf-highlight-page 3))
+        (english-reading-mode--pdf-restore-image (current-buffer) 'test-window)
+        (should (equal restored '(3 test-window)))
+        (should-not english-reading-mode--pdf-highlight-page)))))
 
 (ert-deftest english-reading-mode-pdf-continuous-centers-spoken-line ()
   (save-window-excursion
@@ -894,11 +1054,15 @@
   (let ((english-reading-mode--continuous-state '(:buffer active-pdf))
         (english-reading-mode--active-speech '(:text "Current sentence."))
         (this-command 'pdf-view-enlarge)
-        centered)
-    (cl-letf (((symbol-function
+        centered
+        refreshed)
+    (cl-letf (((symbol-function 'english-reading-mode--pdf-highlight-start)
+               (lambda (context) (setq refreshed context)))
+              ((symbol-function
                 'english-reading-mode--pdf-center-continuous-speech)
                (lambda (context) (setq centered context))))
       (english-reading-mode--pdf-post-command))
+    (should (equal refreshed english-reading-mode--active-speech))
     (should (equal centered english-reading-mode--active-speech))))
 
 (ert-deftest english-reading-mode-pdf-one-shot-does-not-auto-scroll ()
