@@ -14,7 +14,7 @@
 
 (defcustom my/read-org-noter-directory
   (expand-file-name
-   "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/001_read")
+   "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read")
   "Root directory for Org-noter files created by my-read."
   :type 'directory
   :group 'my-read-org-noter)
@@ -138,6 +138,26 @@
      (and (org-noter--valid-session session)
           (eq (org-noter--session-doc-buffer session) buffer)))
    org-noter--sessions))
+
+(defun my/read-org-noter--reattach-session (session)
+  "Restore Org-noter buffer-local state for an existing SESSION.
+
+Changing a PDF buffer from DocView to PDF Tools runs a new major mode and
+clears Org-noter's buffer-local handler, minor mode, and session pointer."
+  (let ((document-buffer (org-noter--session-doc-buffer session)))
+    (with-current-buffer document-buffer
+      (unless (and org-noter-doc-mode
+                   (eq org-noter--session session))
+        (or (run-hook-with-args-until-success
+             'org-noter-set-up-document-hook major-mode)
+            (run-hook-with-args-until-success
+             'org-noter-set-up-document-hook
+             (org-noter--session-property-text session))
+            (error "This document handler is not supported :/"))
+        (setf (org-noter--session-doc-mode session) major-mode)
+        (org-noter-doc-mode 1)
+        (setq org-noter--session session)
+        (add-hook 'kill-buffer-hook #'org-noter--handle-kill-buffer nil t)))))
 
 (defun my/read-org-noter--setup-windows (original session)
   "Use fixed my-read panes for SESSION, otherwise call ORIGINAL."
@@ -319,8 +339,10 @@
                (or (not (my/read-org-noter--kindle-buffer-p source))
                    (frame-parameter frame 'my-reading-kindle-book-name)))
       (if-let ((session (my/read-org-noter--session-for-buffer source)))
-          (set-window-buffer notes-window
-                             (org-noter--session-notes-buffer session))
+          (progn
+            (my/read-org-noter--reattach-session session)
+            (set-window-buffer notes-window
+                               (org-noter--session-notes-buffer session)))
         (pcase-let* ((`(,notes-buffer . ,root)
                       (my/read-org-noter--ensure-root source frame))
                      (org-noter-always-create-frame nil)
@@ -333,7 +355,10 @@
               (org-noter)))
           ;; Org-noter renames a reused frame.  Keep the workspace identity
           ;; stable because other reader UI and the user refer to it as my-read.
-          (set-frame-parameter frame 'name frame-name))))))
+          (set-frame-parameter frame 'name frame-name)))
+      ;; PDF setup (and especially a DocView -> PDF Tools transition) may run
+      ;; the major mode again, which clears my-read's buffer-local minor modes.
+      (my/read--configure-center-tab-buffer source frame))))
 
 (provide 'my-read-org-noter)
 ;;; my-read-org-noter.el ends here

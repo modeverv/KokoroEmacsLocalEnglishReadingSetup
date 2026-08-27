@@ -117,4 +117,5 @@ It uses the same local Kokoro server settings as `kokoro-reader-mode`:
 | `SPC` | Read the sentence at point |
 | `s` | Read continuously, one sentence at a time |
 | `i` | Insert an Org-noter note while a session is active |
+| `C-v` / `M-v` | Next / previous PDF page |
 | `C-c C-k` | Stop reading |

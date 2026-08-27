@@ -44,6 +44,11 @@
          (my-read-k--back-source-fingerprint nil))
      ,@body))
 
+(ert-deftest my-read-org-noter-uses-obsidian-read-directory ()
+  (should
+   (equal my/read-org-noter-directory
+          "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read")))
+
 (ert-deftest my-read-japanese-epub-uses-macos-japanese-speech ()
   (with-temp-buffer
     (insert "あの日、わたしとあいつとの関係が壊れた。")
@@ -480,6 +485,42 @@
     (should (equal (append (english-reading-mode--pdf-page-ranges) nil)
                    '((1 . 10) (11 . 20) (21 . 32))))))
 
+(ert-deftest english-reading-mode-pdf-selection-moves-reading-position ()
+  (let ((pdf-buffer (generate-new-buffer " *english-reading-pdf-selection*"))
+        (text-buffer (generate-new-buffer " *english-reading-pdf-selection-text*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer text-buffer
+            (insert "Target sentence. Middle sentence. Target sentence.")
+            (setq-local sentence-end-double-space nil))
+          (with-current-buffer pdf-buffer
+            (setq-local major-mode 'pdf-view-mode)
+            (setq-local buffer-file-name "/tmp/english-reading-selection.pdf")
+            (setq-local english-reading-mode t)
+            (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+            (setq-local english-reading-mode--pdf-page-ranges
+                        (with-current-buffer text-buffer
+                          (english-reading-mode--pdf-page-ranges)))
+            (setq-local english-reading-mode--pdf-page 1)
+            (setq-local english-reading-mode--pdf-text-point 1)
+            (setq-local pdf-view-active-region
+                        '(1 (0.1 0.85 0.5 0.9)))
+            (cl-letf (((symbol-function 'pdf-view-current-page)
+                       (lambda () 1))
+                      ((symbol-function 'pdf-view-active-region-p)
+                       (lambda () t))
+                      ((symbol-function 'pdf-view-active-region-text)
+                       (lambda () '("Target\nsentence."))))
+              (let ((location (english-reading-mode-use-pdf-selection)))
+                (should (equal (car location) "Target sentence."))
+                ;; The selection is near the page bottom, so the duplicate
+                ;; sentence nearest that position must be selected.
+                (should (> (nth 2 location) 30))))))
+      (when (buffer-live-p pdf-buffer)
+        (kill-buffer pdf-buffer))
+      (when (buffer-live-p text-buffer)
+        (kill-buffer text-buffer)))))
+
 (ert-deftest english-reading-mode-pdf-j-speaks-and-n-moves-across-pages ()
   (let ((pdf-buffer (generate-new-buffer " *english-reading-pdf-test*"))
         (text-buffer (generate-new-buffer " *english-reading-pdf-text-test*"))
@@ -529,6 +570,38 @@
               (should (= (length spoken) 2))
               (should (equal (car (english-reading-mode-current-text-location))
                              "Second sentence.")))))
+      (when (buffer-live-p pdf-buffer)
+        (kill-buffer pdf-buffer))
+      (when (buffer-live-p text-buffer)
+        (kill-buffer text-buffer)))))
+
+(ert-deftest english-reading-mode-pdf-tools-page-navigation ()
+  (let ((pdf-buffer (generate-new-buffer " *english-reading-pdf-tools-test*"))
+        (text-buffer (generate-new-buffer " *english-reading-pdf-tools-text*"))
+        (shown-page 1))
+    (unwind-protect
+        (progn
+          (with-current-buffer text-buffer
+            (insert "Page one.\fPage two.\fPage three."))
+          (with-current-buffer pdf-buffer
+            (setq-local major-mode 'pdf-view-mode)
+            (setq-local buffer-file-name "/tmp/english-reading-pdf-tools-test.pdf")
+            (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+            (setq-local english-reading-mode--pdf-page-ranges
+                        (with-current-buffer text-buffer
+                          (english-reading-mode--pdf-page-ranges)))
+            (setq-local english-reading-mode--pdf-page 1)
+            (setq-local english-reading-mode--pdf-text-point 1)
+            (cl-letf (((symbol-function 'pdf-view-current-page)
+                       (lambda () shown-page))
+                      ((symbol-function 'pdf-view-goto-page)
+                       (lambda (page) (setq shown-page page))))
+              (english-reading-mode-next-page)
+              (should (= shown-page 2))
+              (should (= english-reading-mode--pdf-page 2))
+              (english-reading-mode-previous-page)
+              (should (= shown-page 1))
+              (should (= english-reading-mode--pdf-page 1)))))
       (when (buffer-live-p pdf-buffer)
         (kill-buffer pdf-buffer))
       (when (buffer-live-p text-buffer)
@@ -1078,6 +1151,13 @@
               #'english-reading-mode-previous-sentence))
   (should (eq (lookup-key english-reading-mode-map (kbd "SPC"))
               #'english-reading-mode-speak-current-sentence))
+  (with-temp-buffer
+    (setq-local major-mode 'pdf-view-mode)
+    (setq-local buffer-file-name "/tmp/reader-key-test.pdf")
+    (should (eq (lookup-key english-reading-mode-map (kbd "C-v"))
+                #'english-reading-mode-next-page))
+    (should (eq (lookup-key english-reading-mode-map (kbd "M-v"))
+                #'english-reading-mode-previous-page)))
   (should-not (lookup-key english-reading-mode-map (kbd "i")))
   (should (eq (lookup-key my-read-k-mode-map (kbd "k"))
               #'my-read-k-backward))

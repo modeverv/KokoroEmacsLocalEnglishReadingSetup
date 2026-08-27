@@ -294,7 +294,7 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
      ((and (frame-live-p frame)
            (eq buffer (frame-parameter frame 'my-reading-epub-buffer)))
       (if (with-current-buffer buffer
-            (derived-mode-p 'doc-view-mode))
+            (derived-mode-p 'doc-view-mode 'pdf-view-mode))
           " PDF "
         " EPUB "))
      ((and (frame-live-p frame)
@@ -469,7 +469,7 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
       (setq-local tab-line-new-button-show nil)
       (when (derived-mode-p 'nov-mode)
         (my/read--configure-speech-language))
-      (when (derived-mode-p 'nov-mode 'eww-mode 'doc-view-mode)
+      (when (derived-mode-p 'nov-mode 'eww-mode 'doc-view-mode 'pdf-view-mode)
         (english-reading-mode 1))
       (my-read-center-tab-mode 1))))
 
@@ -512,7 +512,8 @@ The Kindle, EPUB, and EWW sources share this one window and switch as tabs."
                   (cond
                    ((derived-mode-p 'eww-mode)
                     'my-reading-eww-buffer)
-                   ((derived-mode-p 'nov-mode 'doc-view-mode 'dired-mode)
+                   ((derived-mode-p 'nov-mode 'doc-view-mode 'pdf-view-mode
+                                    'dired-mode)
                     'my-reading-epub-buffer))))))
         (when parameter
           (set-frame-parameter frame parameter buffer)

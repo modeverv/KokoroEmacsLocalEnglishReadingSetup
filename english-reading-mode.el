@@ -110,9 +110,9 @@ shared reading buffer does not keep its keys in unrelated windows.")
     (setq english-reading-mode--read-only-setting-saved-p nil)))
 
 (defun english-reading-mode--pdf-buffer-p (&optional buffer)
-  "Return non-nil when BUFFER is a DocView PDF buffer."
+  "Return non-nil when BUFFER is a DocView or PDF Tools PDF buffer."
   (with-current-buffer (or buffer (current-buffer))
-    (and (derived-mode-p 'doc-view-mode)
+    (and (memq major-mode '(doc-view-mode pdf-view-mode))
          buffer-file-name
          (string-equal (downcase (or (file-name-extension buffer-file-name) ""))
                        "pdf"))))
@@ -206,10 +206,14 @@ breaks are deliberately excluded so page ranges remain intact."
     helper))
 
 (defun english-reading-mode--pdf-current-page ()
-  "Return the current one-based DocView page number."
-  (if (fboundp 'doc-view-current-page)
-      (max 1 (doc-view-current-page))
-    1))
+  "Return the current one-based page number from the active PDF viewer."
+  (max 1
+       (cond
+        ((and (eq major-mode 'pdf-view-mode)
+              (fboundp 'pdf-view-current-page))
+         (pdf-view-current-page))
+        ((fboundp 'doc-view-current-page) (doc-view-current-page))
+        (t 1))))
 
 (defun english-reading-mode--pdf-page-count ()
   "Return the number of extracted pages for the current PDF."
@@ -248,6 +252,117 @@ breaks are deliberately excluded so page ranges remain intact."
             english-reading-mode--pdf-text-point
             (english-reading-mode--pdf-page-start page)))
     english-reading-mode--pdf-text-buffer))
+
+(defun english-reading-mode--pdf-compact-text-index (beg end)
+  "Return compact text and source positions for extracted text BEG to END.
+
+Whitespace is removed so PDF Tools selections can be matched against
+`pdftotext' output even when the two backends place line breaks differently."
+  (let (characters positions)
+    (save-excursion
+      (goto-char beg)
+      (while (< (point) end)
+        (let ((position (point))
+              (character (char-after)))
+          (unless (string-match-p
+                   "\\`[[:space:]\u00a0]\\'"
+                   (char-to-string character))
+            (push (downcase character) characters)
+            (push position positions)))
+        (forward-char 1)))
+    (list (apply #'string (nreverse characters))
+          (vconcat (nreverse positions)))))
+
+(defun english-reading-mode--pdf-selection-ratio (edges)
+  "Return the approximate vertical page ratio of PDF selection EDGES."
+  (if edges
+      (max 0.0
+           (min 1.0
+                (apply #'min
+                       (mapcar (lambda (edge)
+                                 (min (float (nth 1 edge))
+                                      (float (nth 3 edge))))
+                               edges))))
+    0.0))
+
+(defun english-reading-mode--pdf-string-match-starts (needle haystack)
+  "Return every literal match start of NEEDLE in HAYSTACK."
+  (let ((start 0)
+        matches)
+    (while (and (< start (length haystack))
+                (string-match (regexp-quote needle) haystack start))
+      (push (match-beginning 0) matches)
+      (setq start (1+ (match-beginning 0))))
+    (nreverse matches)))
+
+(defun english-reading-mode-use-pdf-selection ()
+  "Move the PDF reading cursor to the sentence selected in PDF Tools.
+
+The active PDF selection remains intact so Org-noter can subsequently use it
+for selected-text notes and persistent highlights."
+  (interactive)
+  (unless (and (eq major-mode 'pdf-view-mode)
+               (fboundp 'pdf-view-active-region-p)
+               (pdf-view-active-region-p))
+    (user-error "Select text in a PDF Tools buffer first"))
+  (english-reading-mode--pdf-sync)
+  (let* ((region pdf-view-active-region)
+         (page (car region))
+         (edges (cdr region))
+         (selected
+          (replace-regexp-in-string
+           "[[:space:]\u00a0]+" ""
+           (downcase
+            (string-join (pdf-view-active-region-text) " "))))
+         (page-range (english-reading-mode--pdf-page-range page)))
+    (unless (and page-range (not (string-empty-p selected)))
+      (user-error "The PDF selection has no extractable text"))
+    (pcase-let* ((`(,page-text ,positions)
+                  (with-current-buffer english-reading-mode--pdf-text-buffer
+                    (english-reading-mode--pdf-compact-text-index
+                     (car page-range) (cdr page-range))))
+                 (matches
+                  (english-reading-mode--pdf-string-match-starts
+                   selected page-text))
+                 (ratio (english-reading-mode--pdf-selection-ratio edges))
+                 (span (max 1 (1- (length positions))))
+                 (index
+                  (if matches
+                      (car
+                       (sort (copy-sequence matches)
+                             (lambda (a b)
+                               (< (abs (- (/ (float a) span) ratio))
+                                  (abs (- (/ (float b) span) ratio))))))
+                    ;; Text extraction can differ around ligatures or unusual
+                    ;; punctuation.  Vertical position remains a useful and
+                    ;; deterministic fallback in that case.
+                    (round (* ratio span)))))
+      (unless (> (length positions) 0)
+        (user-error "PDF page %s has no readable text" page))
+      (setq english-reading-mode--pdf-page page
+            english-reading-mode--pdf-text-point
+            (aref positions (min index (1- (length positions)))))
+      (or (english-reading-mode--pdf-location)
+          (user-error "No readable sentence was found at the selection")))))
+
+(defun english-reading-mode--pdf-selection-finished (&rest _)
+  "Synchronize the reading cursor after PDF Tools finishes a selection."
+  (when (and english-reading-mode
+             (english-reading-mode--pdf-buffer-p)
+             (pdf-view-active-region-p))
+    (condition-case error-data
+        (let ((location (english-reading-mode-use-pdf-selection)))
+          (message "Reading position: %s"
+                   (truncate-string-to-width (car location) 60 nil nil "…")))
+      (error
+       (message "Could not use PDF selection: %s"
+                (error-message-string error-data))))))
+
+(with-eval-after-load 'pdf-view
+  (advice-remove 'pdf-view-mouse-set-region
+                 #'english-reading-mode--pdf-selection-finished)
+  (advice-add 'pdf-view-mouse-set-region :after
+              #'english-reading-mode--pdf-selection-finished))
 
 (defun english-reading-mode--pdf-location ()
   "Return (TEXT BUFFER BEG END) at the PDF text cursor, or nil."
@@ -303,8 +418,12 @@ This currently exposes the text layer used behind a DocView PDF."
   (let ((count (english-reading-mode--pdf-page-count)))
     (unless (<= 1 page count)
       (user-error "No more PDF pages"))
-    (when (fboundp 'doc-view-goto-page)
-      (doc-view-goto-page page))
+    (cond
+     ((and (eq major-mode 'pdf-view-mode)
+           (fboundp 'pdf-view-goto-page))
+      (pdf-view-goto-page page))
+     ((fboundp 'doc-view-goto-page)
+      (doc-view-goto-page page)))
     (setq english-reading-mode--pdf-page page
           english-reading-mode--pdf-text-point
           (english-reading-mode--pdf-page-start page))))
@@ -577,7 +696,8 @@ This currently exposes the text layer used behind a DocView PDF."
          (pdf-buffer (and (window-live-p window) (window-buffer window))))
     (when (and (buffer-live-p pdf-buffer)
                (with-current-buffer pdf-buffer
-                 (and (english-reading-mode--pdf-buffer-p)
+                 (and (eq major-mode 'doc-view-mode)
+                      (english-reading-mode--pdf-buffer-p)
                       (eq (plist-get context :buffer)
                           english-reading-mode--pdf-text-buffer))))
       (with-current-buffer pdf-buffer
@@ -929,6 +1049,30 @@ leave point at the current sentence and report that there is nowhere to go."
           (goto-char origin)
           (message "Already at the first sentence"))))))
 
+(defun english-reading-mode-next-page ()
+  "Display the next PDF page and reset the virtual sentence cursor."
+  (interactive)
+  (unless (english-reading-mode--pdf-buffer-p)
+    (user-error "This command is only available in a PDF buffer"))
+  (english-reading-mode--pdf-sync)
+  (english-reading-mode--pdf-goto-page
+   (1+ (english-reading-mode--pdf-current-page))))
+
+(defun english-reading-mode-previous-page ()
+  "Display the previous PDF page and reset the virtual sentence cursor."
+  (interactive)
+  (unless (english-reading-mode--pdf-buffer-p)
+    (user-error "This command is only available in a PDF buffer"))
+  (english-reading-mode--pdf-sync)
+  (english-reading-mode--pdf-goto-page
+   (1- (english-reading-mode--pdf-current-page))))
+
+(defun english-reading-mode--filter-pdf-key-binding (binding)
+  "Return PDF-only BINDING when reader keys are active."
+  (when (and (english-reading-mode--filter-key-binding binding)
+             (english-reading-mode--pdf-buffer-p))
+    binding))
+
 (defun english-reading-mode-stop ()
   "Stop the current Kokoro reading."
   (interactive)
@@ -942,6 +1086,10 @@ leave point at the current sentence and report that there is nowhere to go."
                    :filter english-reading-mode--filter-key-binding)
   "SPC" '(menu-item "Read current sentence" english-reading-mode-speak-current-sentence
                      :filter english-reading-mode--filter-key-binding)
+  "C-v" '(menu-item "Next PDF page" english-reading-mode-next-page
+                     :filter english-reading-mode--filter-pdf-key-binding)
+  "M-v" '(menu-item "Previous PDF page" english-reading-mode-previous-page
+                     :filter english-reading-mode--filter-pdf-key-binding)
   "s" '(menu-item "Continuous sentence reading" english-reading-mode-continuous-read
                    :filter english-reading-mode--filter-key-binding)
 ;;  "" '(menu-item "Read paragraph" kokoro-reader-speak-paragraph
@@ -963,6 +1111,12 @@ leave point at the current sentence and report that there is nowhere to go."
             '(menu-item "Read current sentence"
                         english-reading-mode-speak-current-sentence
                         :filter english-reading-mode--filter-key-binding))
+(keymap-set english-reading-mode-map "C-v"
+            '(menu-item "Next PDF page" english-reading-mode-next-page
+                        :filter english-reading-mode--filter-pdf-key-binding))
+(keymap-set english-reading-mode-map "M-v"
+            '(menu-item "Previous PDF page" english-reading-mode-previous-page
+                        :filter english-reading-mode--filter-pdf-key-binding))
 ;; `i' belongs exclusively to Org-noter.  Explicit removal also fixes an
 ;; already loaded map, because `defvar-keymap' preserves its old entries.
 (define-key english-reading-mode-map (kbd "i") nil)
@@ -993,7 +1147,8 @@ is exposed through `english-reading-mode-speech-start-hook' and
       (progn
         (english-reading-mode--enable-single-space-sentences)
         (english-reading-mode--enable-read-only)
-        (unless (or (derived-mode-p 'nov-mode 'eww-mode 'doc-view-mode)
+        (unless (or (derived-mode-p 'nov-mode 'eww-mode 'doc-view-mode
+                                    'pdf-view-mode)
                     (bound-and-true-p my-read-k-mode))
           (message "english-reading-mode is designed for reader buffers")))
     (english-reading-mode--restore-sentence-setting)
