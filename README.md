@@ -9,14 +9,15 @@ OCR、Kindleファイルの復号は行いません。
 
 専用フレームは、左の読書領域と右側の3段ペインで構成されます。
 
-- 左: タブで切り替えるKindle、PDF／EPUB、EWW
+- 左: タブで切り替えるDIRED、Kindle、PDF、EPUB、EWW
 - 右上: 現在の資料に対応するorg-noterノート
 - 右中央: カーソル位置、または読み上げ中の1文の翻訳
 - 右下: カーソル位置の単語を自動検索するLookup
 
 ## 動作画面
 
-いずれも実際のmy-readフレームです。左側の読書タブを切り替えても、右側は上から
+いずれも実際に動作中のmy-readフレームを撮影したものです。左側の
+`DIRED / KINDLE / PDF / EPUB / EWW`タブを切り替えても、右側は上から
 org-noter、文単位の翻訳、Lookupの3段構成を保ちます。
 
 ### Kindle.app
@@ -28,10 +29,10 @@ Kindle.appへAccessibilityで接続し、取得した現在ページの本文を
 
 ### PDF Tools
 
-現在開いている`jsicp.pdf`をPDF Toolsで表示しています。日本語本文に合わせて
-翻訳方向を自動判定し、PDF上の文位置と翻訳・Lookupを連動させています。
+現在開いている`Attention Is All You Need`のPDFをPDF Toolsで表示しています。
+PDF上の文位置と翻訳・Lookupを連動させています。
 
-![PDF Toolsでjsicp.pdfを開き、org-noter、翻訳、Lookupを連動させたmy-read画面](docs/screenshots/my-read-pdf.png)
+![PDF ToolsでAttention Is All You Needを開き、org-noter、翻訳、Lookupを連動させたmy-read画面](docs/screenshots/my-read-pdf.png)
 
 ### EPUB
 
@@ -44,13 +45,14 @@ nov.elでEPUBを開き、選択中の1文をハイライトしながらorg-noter
 
 - `j` / `k` で次／前の1文へ移動
 - `SPC` で現在の1文を読み上げ、`s` で文単位の連続読み上げ
+- DIREDからPDF／EPUBを開き、資料種別ごとのタブへ自動登録
 - 読み上げ中の文を対応する本文バッファ上でハイライト
 - EPUB／EWW／Kindleでは読み上げ中の文頭を表示中央へ追従
 - 読み上げ中は翻訳対象を読み上げ中の1文へ固定
 - `l` / `;` で前／次の単語へ移動し、Lookupを追従
 - PDF Toolsで選択した文を新しい読み上げ開始位置として自動採用
 - PDF／EPUBのページ、表示位置、表示倍率を自動保存・復元
-- PDF／EPUB／Kindleをorg-noterで統一して記録
+- PDF／EPUB／Kindle／EWWをorg-noterで統一して記録
 - PDFの選択範囲を永続ハイライトとして保存
 - Kindleでは前後2ページをメモリ上だけにキャッシュ
 - Kindle本文をファイルへ保存しない
@@ -81,11 +83,12 @@ PDF関連の依存パッケージはHomebrewで導入できます。
 brew install poppler automake glib pkgconf
 ```
 
-## 1. Python環境とKokoroの導入
+## 1. Python環境と音声ブリッジの導入
 
 ```sh
 cd ~/Sync/emacs.d/reader
 uv sync
+make my-read-speech-build
 ```
 
 Kokoroサーバーは最初の読み上げ時にEmacsから自動起動されます。手動起動とヘルスチェックは次の通りです。
@@ -96,6 +99,11 @@ curl --fail http://127.0.0.1:8000/health
 ```
 
 既定では `127.0.0.1:8000` のみに接続し、モデル `mlx-community/Kokoro-82M-bf16`、音声 `bf_emma`、イギリス英語を使います。
+
+`my-read-speech-bridge`は常駐するmacOSネイティブ音声プロセスです。英語のKokoro
+WAVと日本語の`AVSpeechSynthesizer`音声を同じ順序付きキューで再生し、連続読み上げ
+では既定で次の2文を先行合成します。`make my-read-k-check`を実行する場合は、テスト
+の前にこのブリッジも自動ビルドされます。
 
 ## 2. Emacs側の設定
 
@@ -197,9 +205,15 @@ Kindleの正式な書名は、Kindle自身のローカル `BookData.sqlite` か�
 M-x my-read
 ```
 
-左側は同じ1ペインの `Kindle` / `PDF・EPUB` / `EWW` タブで切り替えます。
-`C-c t`で次のタブへ移動します。EWWタブでは`g`で初期URL（既定はarXiv）、
-`G`で任意のURLを開けます。Kindleへ接続し直す場合はKindleタブで`r`を押します。
+左側は同じ1ペインの `DIRED` / `KINDLE` / `PDF` / `EPUB` / `EWW` タブで
+切り替えます。起動時は`my/read-book-path`のDIREDを開き、そこからPDFまたはEPUBを
+選ぶと対応する専用タブへ登録して表示します。`C-c t`で次のタブへ移動します。
+EWWタブでは`g`で初期URL（既定はarXiv）、`G`で任意のURLを開けます。Kindleへ
+接続し直す場合はKINDLEタブで`r`を押します。
+
+EWWタブを開くと、最近表示したページのタイトルとURLを最大100件まで一覧表示します。
+履歴は`my/read-position-directory/eww-history.el`へ保存され、同じURLを再訪した場合は
+重複せず最新位置へ移動します。
 
 EWW全体の行間は`my/read-eww-line-spacing`の既定値`0.5`により通常のおよそ
 1.5倍です。arXiv HTMLのTeX注釈はバックグラウンドでSVGへ変換されます。
@@ -240,7 +254,7 @@ PDF Toolsで本文をマウス選択すると、選択文字列とページ上�
 
 ### org-noter
 
-my-read開始時に現在のPDF／EPUB／Kindleに対応するorg-noterセッションを開き、
+my-read開始時に現在のPDF／EPUB／Kindle／EWWに対応するorg-noterセッションを開き、
 右上へノートを表示します。保存先の既定値は次のディレクトリです。
 
 ```text
@@ -249,6 +263,8 @@ my-read開始時に現在のPDF／EPUB／Kindleに対応するorg-noterセッシ
 
 資料ごとのサブディレクトリに`org-noter.org`を作成します。Kindleノートには
 `NOTER_PAGE`に加えて`KINDLE_LOCATION`と`KINDLE_FINGERPRINT`を記録します。
+EWWではフラグメントを除いたURLを資料IDとし、ページ内見出しと本文オフセットで
+ノート位置を同期します。
 
 PDFへ永続ハイライト付きのノートを作る手順は次のとおりです。
 
@@ -280,7 +296,7 @@ PDFへ永続ハイライト付きのノートを作る手順は次のとおり�
 | `C-c C-k` / `C-c k` | 合成または再生を停止 |
 | `u` | 単語、または選択中のフレーズを語彙Orgファイルへ保存 |
 | `C-c o` | 現在資料のorg-noterノートを表示 |
-| `C-c t` | Kindle／PDF・EPUB／EWWタブを順に切り替える |
+| `C-c t` | DIRED／KINDLE／PDF／EPUB／EWWタブを順に切り替える |
 | `r` | Kindle.appへ再接続 |
 
 my-read固有キーは、my-readフレームの左側読書ペインにカーソルがある場合だけ
@@ -449,9 +465,10 @@ make my-read-k-check
 | --- | --- |
 | `kokoro_server.py` | ローカルKokoro HTTPサーバー |
 | `kokoro-reader.el` | 非同期音声生成・再生・ハイライト |
+| `macos-speech-bridge/main.m` | Kokoro WAVとmacOS音声を順序付きで再生する常駐ネイティブブリッジ |
 | `english-reading-mode.el` | 文単位の移動・連続読み上げ・PDF Tools連携 |
 | `my-read.el` | 専用フレーム、右3段ペイン、Lookup、翻訳、語彙保存 |
-| `my-read-org-noter.el` | PDF／EPUB／Kindleのorg-noter統合と保存先管理 |
+| `my-read-org-noter.el` | PDF／EPUB／Kindle／EWWのorg-noter統合と保存先管理 |
 | `my-read-k.el` | Kindle本文バッファ、ページ移動、メモリキャッシュ |
 | `my-read-k2.el` | Kindle.app Accessibilityバックエンド |
 | `my-read-k2/bridge/` | macOS Accessibilityを読むSwiftブリッジ |
