@@ -722,6 +722,77 @@
       (should (equal enqueued '("一番。" "二番。" "三番。")))
       (should (= (length kokoro-reader--macos-prefetch-queue) 4)))))
 
+(ert-deftest kokoro-reader-kokoro-prefetch-appends-only-missing-suffix ()
+  (let ((kokoro-reader-backend 'kokoro)
+        (kokoro-reader-kokoro-prefetch-count 3)
+        (kokoro-reader--macos-prefetch-queue nil)
+        (kokoro-reader--macos-current-entry nil)
+        enqueued)
+    (cl-letf (((symbol-function 'kokoro-reader--enqueue-kokoro-text)
+               (lambda (text &optional announced)
+                 (let ((entry (list :id (1+ (length enqueued))
+                                    :backend 'kokoro
+                                    :key (kokoro-reader--kokoro-key text)
+                                    :announced announced)))
+                   (setq enqueued (append enqueued (list text))
+                         kokoro-reader--macos-prefetch-queue
+                         (append kokoro-reader--macos-prefetch-queue
+                                 (list entry)))
+                   entry))))
+      (kokoro-reader-prefetch-kokoro-texts '("One." "Two."))
+      (kokoro-reader-prefetch-kokoro-texts '("One." "Two." "Three."))
+      (should (equal enqueued '("One." "Two." "Three.")))
+      (should (= (length kokoro-reader--macos-prefetch-queue) 3)))))
+
+(ert-deftest kokoro-reader-kokoro-request-completion-loads-live-entry-by-id ()
+  (let* ((audio-file (make-temp-file "kokoro-reader-test-" nil ".wav"))
+         (live-entry (list :id 42 :backend 'kokoro :audio-file audio-file
+                           :volume 0.8 :announced nil))
+         (stale-entry (copy-sequence live-entry))
+         (kokoro-reader--macos-prefetch-queue (list live-entry))
+         (kokoro-reader--kokoro-request-processes '(fake-process))
+         wire)
+    (unwind-protect
+        (progn
+          (write-region (make-string 64 ?x) nil audio-file nil 'silent)
+          (cl-letf (((symbol-function 'process-exit-status) (lambda (_) 0))
+                    ((symbol-function 'kokoro-reader--ensure-macos-bridge)
+                     (lambda () 'fake-bridge))
+                    ((symbol-function 'process-send-string)
+                     (lambda (_process string) (setq wire string)))
+                    ((symbol-function 'kokoro-reader--launch-pending-requests)
+                     #'ignore))
+            (kokoro-reader--kokoro-request-finished
+             'fake-process stale-entry nil))
+          (let ((command (json-parse-string wire :object-type 'plist)))
+            (should (equal (plist-get command :command) "loadFile"))
+            (should (= (plist-get command :id) 42))
+            (should (equal (plist-get command :path) audio-file))))
+      (when (file-exists-p audio-file)
+        (delete-file audio-file)))))
+
+(ert-deftest english-reading-mode-prefetches-kokoro-chunks ()
+  (with-temp-buffer
+    (insert "One. Two. Three.")
+    (setq-local sentence-end-double-space nil)
+    (setq-local kokoro-reader-backend 'kokoro)
+    (let ((source-buffer (current-buffer))
+          (english-reading-mode--continuous-state nil)
+          (english-reading-mode-macos-prefetch-chunk-count 2)
+          queue-limit prefetched)
+      (setq english-reading-mode--continuous-state
+            (list :buffer source-buffer
+                  :window (selected-window)
+                  :frame (selected-frame)))
+      (cl-letf (((symbol-function 'kokoro-reader-prefetch-kokoro-texts)
+                 (lambda (texts)
+                   (setq prefetched texts
+                         queue-limit kokoro-reader-kokoro-prefetch-count))))
+        (english-reading-mode--prefetch-next-macos-sentence
+         (list :buffer source-buffer :beg 1 :end 5))
+        (should (equal prefetched '("Two." "Three.")))
+        (should (= queue-limit 2))))))
+
 (ert-deftest kokoro-reader-resident-enqueue-preserves-buffer-local-settings ()
   (let (wire)
     (with-temp-buffer

@@ -67,12 +67,12 @@ queue bookkeeping between sentences.  One-shot commands such as
   :group 'english-reading-mode)
 
 (defcustom english-reading-mode-macos-prefetch-chunk-count 6
-  "Number of future macOS speech chunks prepared during continuous reading."
+  "Number of future resident speech chunks prepared during continuous reading."
   :type '(integer :tag "Chunks" 1)
   :group 'english-reading-mode)
 
 (defcustom english-reading-mode-macos-prefetch-check-interval 0.5
-  "Seconds between checks that replenish continuous macOS speech prefetch."
+  "Seconds between checks that replenish resident speech prefetch."
   :type '(number :tag "Seconds")
   :group 'english-reading-mode)
 
@@ -2008,24 +2008,27 @@ does without changing the displayed page."
   (car (english-reading-mode--next-speech-texts context 1)))
 
 (defun english-reading-mode--prefetch-next-macos-sentence (context)
-  "Render future speech chunks following CONTEXT while the current one plays."
+  "Render future resident-player chunks following CONTEXT."
   (let ((speech-buffer (plist-get context :buffer)))
     (when (and english-reading-mode--continuous-state
                (english-reading-mode--continuous-context-owned-p context)
                (buffer-live-p speech-buffer))
       (with-current-buffer speech-buffer
-        (when (and (eq kokoro-reader-backend 'macos)
-                   (fboundp 'kokoro-reader-prefetch-macos-texts))
-          ;; This is the user-facing queue size for continuous reading.  Bind
-          ;; the lower-level safety limit to the same value so it cannot
-          ;; silently truncate a larger requested queue.
-          (let ((kokoro-reader-macos-prefetch-count
-                 english-reading-mode-macos-prefetch-chunk-count))
-            (kokoro-reader-prefetch-macos-texts
-             (english-reading-mode--next-speech-texts context))))))))
+        (let ((texts (english-reading-mode--next-speech-texts context)))
+          (pcase kokoro-reader-backend
+            ('macos
+             (when (fboundp 'kokoro-reader-prefetch-macos-texts)
+               (let ((kokoro-reader-macos-prefetch-count
+                      english-reading-mode-macos-prefetch-chunk-count))
+                 (kokoro-reader-prefetch-macos-texts texts))))
+            ('kokoro
+             (when (fboundp 'kokoro-reader-prefetch-kokoro-texts)
+               (let ((kokoro-reader-kokoro-prefetch-count
+                      english-reading-mode-macos-prefetch-chunk-count))
+                 (kokoro-reader-prefetch-kokoro-texts texts))))))))))
 
 (defun english-reading-mode--monitor-macos-prefetch ()
-  "Replenish future macOS audio for the latest active speech context."
+  "Replenish future resident audio for the latest active speech context."
   (if (not (and english-reading-mode--continuous-state
                 (english-reading-mode--continuous-live-p)))
       (progn
@@ -2039,7 +2042,7 @@ does without changing the displayed page."
        english-reading-mode--active-speech))))
 
 (defun english-reading-mode--start-macos-prefetch-monitor ()
-  "Start periodic replenishment for continuous macOS speech audio."
+  "Start periodic replenishment for continuous resident speech audio."
   (when (timerp english-reading-mode--macos-prefetch-monitor-timer)
     (cancel-timer english-reading-mode--macos-prefetch-monitor-timer))
   (setq english-reading-mode--macos-prefetch-monitor-timer nil)
@@ -2047,7 +2050,7 @@ does without changing the displayed page."
          (plist-get english-reading-mode--active-speech :buffer)))
     (when (and (buffer-live-p speech-buffer)
                (with-current-buffer speech-buffer
-                 (eq kokoro-reader-backend 'macos)))
+                 (memq kokoro-reader-backend '(macos kokoro))))
       (setq english-reading-mode--macos-prefetch-monitor-timer
             (run-with-timer english-reading-mode-macos-prefetch-check-interval
                             english-reading-mode-macos-prefetch-check-interval
@@ -2153,15 +2156,15 @@ does without changing the displayed page."
                                #'english-reading-mode--continuous-warmup-check))))))))
 
 (defun english-reading-mode--start-continuous-speech ()
-  "Start continuous speech and fill the resident macOS utterance queue."
+  "Start continuous speech and fill the resident native audio queue."
   (let* ((spec (english-reading-mode--current-continuous-speech-spec))
          (speech-buffer (plist-get spec :buffer))
-         (resident-macos-p
+         (resident-native-p
           (and (buffer-live-p speech-buffer)
                (with-current-buffer speech-buffer
-                 (eq kokoro-reader-backend 'macos))
+                 (memq kokoro-reader-backend '(macos kokoro)))
                (fboundp 'kokoro-reader--ensure-macos-bridge))))
-    (if resident-macos-p
+    (if resident-native-p
         (progn
           ;; Prevent the first fast render from starting before the synchronous
           ;; speech-start hook has submitted its future chunks.  The native

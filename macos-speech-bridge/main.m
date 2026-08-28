@@ -201,6 +201,17 @@
     [self flushCompletedInOrder:token];
 }
 
+- (BOOL)reserveIdentifier:(NSNumber *)identifier {
+    if (!identifier || self.buffers[identifier]) {
+        [self emit:@"error" id:identifier message:@"duplicate or missing queue id"
+              voice:nil rate:nil];
+        return NO;
+    }
+    [self.renderOrder addObject:identifier];
+    self.buffers[identifier] = [NSMutableArray array];
+    return YES;
+}
+
 - (void)enqueue:(NSDictionary *)command {
     NSNumber *identifier = command[@"id"];
     NSString *text = command[@"text"];
@@ -219,8 +230,7 @@
     utterance.rate = rate.floatValue;
     utterance.volume = volume;
 
-    [self.renderOrder addObject:identifier];
-    self.buffers[identifier] = [NSMutableArray array];
+    if (![self reserveIdentifier:identifier]) return;
     AVSpeechSynthesizer *renderer = [[AVSpeechSynthesizer alloc] init];
     self.renderers[identifier] = renderer;
     NSUInteger token = self.generationToken;
@@ -238,12 +248,65 @@
     [self emit:@"queued" id:identifier message:nil voice:voice rate:rate];
 }
 
+- (void)loadAudioFile:(NSDictionary *)command {
+    NSNumber *identifier = command[@"id"];
+    NSString *path = command[@"path"];
+    if (![identifier isKindOfClass:[NSNumber class]] || !self.buffers[identifier] ||
+        ![path isKindOfClass:[NSString class]] || path.length == 0) {
+        [self emit:@"error" id:identifier message:@"loadFile requires a reserved id and path"
+              voice:nil rate:nil];
+        return;
+    }
+    NSError *error = nil;
+    AVAudioFile *file = [[AVAudioFile alloc] initForReading:[NSURL fileURLWithPath:path]
+                                                     error:&error];
+    if (!file || error) {
+        [self emit:@"error" id:identifier message:error.localizedDescription voice:nil rate:nil];
+        return;
+    }
+    AVAudioFrameCount capacity = (AVAudioFrameCount)file.length;
+    AVAudioPCMBuffer *buffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:file.processingFormat
+                                                             frameCapacity:capacity];
+    if (![file readIntoBuffer:buffer error:&error] || error || buffer.frameLength == 0) {
+        [self emit:@"error" id:identifier
+            message:error.localizedDescription ?: @"audio file contained no frames"
+              voice:nil rate:nil];
+        return;
+    }
+    if (![self configureEngine:buffer.format identifier:identifier]) return;
+    NSNumber *volume = command[@"volume"];
+    if (volume) self.player.volume = MIN(MAX(volume.floatValue, 0.0f), 1.0f);
+    [self.buffers[identifier] addObject:buffer];
+    [self.completed addObject:identifier];
+    [self emit:@"loaded" id:identifier message:nil voice:nil rate:nil];
+    [self flushCompletedInOrder:self.generationToken];
+}
+
+- (void)discardIdentifier:(NSNumber *)identifier {
+    AVSpeechSynthesizer *renderer = self.renderers[identifier];
+    [renderer stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
+    [self.renderers removeObjectForKey:identifier];
+    [self.renderOrder removeObject:identifier];
+    [self.buffers removeObjectForKey:identifier];
+    [self.completed removeObject:identifier];
+    [self emit:@"cancelled" id:identifier message:nil voice:nil rate:nil];
+    [self flushCompletedInOrder:self.generationToken];
+}
+
 - (void)stop {
     self.generationToken++;
     for (AVSpeechSynthesizer *renderer in self.renderers.allValues) {
         [renderer stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
     }
     [self.player stop];
+    if (self.engineConfigured) {
+        [self.engine stop];
+        [self.engine disconnectNodeOutput:self.player];
+        [self.engine detachNode:self.player];
+        self.player = nil;
+        self.engine = nil;
+        self.engineConfigured = NO;
+    }
     [self.renderOrder removeAllObjects];
     [self.buffers removeAllObjects];
     [self.renderers removeAllObjects];
@@ -260,6 +323,16 @@
     NSString *name = command[@"command"];
     if ([name isEqualToString:@"enqueue"]) {
         [self enqueue:command];
+    } else if ([name isEqualToString:@"reserve"]) {
+        NSNumber *identifier = command[@"id"];
+        if ([identifier isKindOfClass:[NSNumber class]] &&
+            [self reserveIdentifier:identifier]) {
+            [self emit:@"queued" id:identifier message:nil voice:nil rate:nil];
+        }
+    } else if ([name isEqualToString:@"loadFile"]) {
+        [self loadAudioFile:command];
+    } else if ([name isEqualToString:@"discard"]) {
+        [self discardIdentifier:command[@"id"]];
     } else if ([name isEqualToString:@"hold"]) {
         self.holdPlayback = YES;
     } else if ([name isEqualToString:@"play"]) {
