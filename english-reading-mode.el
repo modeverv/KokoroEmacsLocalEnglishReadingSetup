@@ -60,9 +60,9 @@ spoken text about one quarter of the way down from the top."
 (defcustom english-reading-mode-macos-continuous-sentence-count 2
   "Maximum number of sentences in one continuous macOS speech utterance.
 
-Larger chunks make `/usr/bin/say' take longer before the first playback, but
-avoid a synthesis/player handoff between every sentence.  One-shot commands
-such as `english-reading-mode-speak-current-sentence' still speak one sentence."
+Larger chunks take longer to render before the first playback, but reduce
+queue bookkeeping between sentences.  One-shot commands such as
+`english-reading-mode-speak-current-sentence' still speak one sentence."
   :type '(integer :tag "Sentences" 1)
   :group 'english-reading-mode)
 
@@ -1611,6 +1611,9 @@ included.  LIMIT, when non-nil, prevents a PDF chunk from crossing its page."
 (defvar english-reading-mode--speech-player-seen-p nil
   "Non-nil after the active utterance has reached actual audio playback.")
 
+(defvar english-reading-mode--exact-player-finish-p nil
+  "Non-nil while handling the audio player's exact exit notification.")
+
 (defvar english-reading-mode--continuous-state nil
   "State plist for sentence-by-sentence continuous reading.")
 
@@ -1672,12 +1675,25 @@ used after readable chunks in the current speech buffer have been exhausted.")
           english-reading-mode--speech-player-seen-p nil)
     (run-hook-with-args 'english-reading-mode-speech-finish-hook context)))
 
+(defun english-reading-mode--player-finished ()
+  "Finish the active speech context from the player's exact exit event.
+
+The periodic speech watcher remains as a synthesis-failure fallback, but a
+successful playback handoff should not wait for its 50 ms polling interval."
+  (when (and english-reading-mode--active-speech
+             (not (process-live-p kokoro-reader--request-process))
+             (not (process-live-p kokoro-reader--player-process)))
+    (let ((english-reading-mode--exact-player-finish-p t))
+      (english-reading-mode--finish english-reading-mode--active-speech))))
+
 (defun english-reading-mode--kokoro-busy-p ()
   "Return non-nil while Kokoro is synthesizing or actually playing audio."
   (or (and (boundp 'kokoro-reader--request-process)
            (process-live-p kokoro-reader--request-process))
       (and (boundp 'kokoro-reader--player-process)
-           (process-live-p kokoro-reader--player-process))))
+           (process-live-p kokoro-reader--player-process))
+      (and (fboundp 'kokoro-reader-macos-speaking-p)
+           (kokoro-reader-macos-speaking-p))))
 
 (defun english-reading-mode--watch-speech (context)
   "Finish CONTEXT only after Kokoro's actual playback has ended.
@@ -1693,8 +1709,10 @@ period proves that synthesis failed before playback started."
     nil)
 
    ;; Actual playback exists: remember that we reached the speaking phase.
-   ((and (boundp 'kokoro-reader--player-process)
-         (process-live-p kokoro-reader--player-process))
+   ((or (and (boundp 'kokoro-reader--player-process)
+             (process-live-p kokoro-reader--player-process))
+        (and (fboundp 'kokoro-reader-macos-speaking-p)
+             (kokoro-reader-macos-speaking-p)))
     (setq english-reading-mode--speech-player-seen-p t))
 
    ;; Curl is still synthesizing/downloading audio.
@@ -1702,8 +1720,9 @@ period proves that synthesis failed before playback started."
          (process-live-p kokoro-reader--request-process))
     nil)
 
-   ;; Once afplay has been seen, no player now means playback really ended.
-   (english-reading-mode--speech-player-seen-p
+   ;; Once playback has been seen, an idle backend means it really ended.
+   ((and english-reading-mode--speech-player-seen-p
+         (not (english-reading-mode--kokoro-busy-p)))
     (english-reading-mode--finish context))
 
    ;; Before playback has been seen, tolerate the curl -> afplay transition.
@@ -2048,10 +2067,29 @@ does without changing the displayed page."
            (plist-put english-reading-mode--continuous-state
                       :next-speech-buffer (plist-get context :buffer))
            :next-speech-position (plist-get context :end)))
-    ;; A zero-delay timer leaves the process sentinel before starting the next
-    ;; chunk, without inserting an intentional silent interval.
-    (setq english-reading-mode--continuous-timer
-          (run-at-time 0 nil #'english-reading-mode--continuous-next))))
+    (cond
+     ;; AVSpeechSynthesizer owns the handoff when another utterance is already
+     ;; queued.  Its didStart callback advances the text/PDF context exactly
+     ;; when that queued voice begins.
+     ((and (fboundp 'kokoro-reader-macos-has-pending-p)
+           (kokoro-reader-macos-has-pending-p))
+      nil)
+     (english-reading-mode--exact-player-finish-p
+        ;; The player's sentinel has already cleared the old process and audio
+        ;; state, so a ready chunk can start synchronously.  Avoiding an
+        ;; otherwise zero-delay timer removes one event-loop turn.
+      (english-reading-mode--continuous-next))
+     (t
+      ;; Synthesis-failure and compatibility paths may finish from a polling
+      ;; timer.  Leave that callback before advancing to avoid re-entrancy.
+      (setq english-reading-mode--continuous-timer
+            (run-at-time 0 nil #'english-reading-mode--continuous-next))))))
+
+(defun english-reading-mode--macos-queued-start ()
+  "Activate the text and visual context for queued resident macOS speech."
+  (when (and english-reading-mode--continuous-state
+             (english-reading-mode--continuous-live-p))
+    (english-reading-mode--continuous-next)))
 
 (add-hook 'english-reading-mode-speech-finish-hook
           #'english-reading-mode--continuous-speech-finished)
@@ -2091,7 +2129,7 @@ does without changing the displayed page."
           (english-reading-mode-stop-continuous t)
         (with-current-buffer speech-buffer
           (let ((kokoro-reader-macos-prefetch-count (length texts)))
-            ;; Reconcile on every check so a failed `say' request is retried
+            ;; Reconcile on every check so a failed render is retried
             ;; before playback begins instead of becoming a mid-reading miss.
             (kokoro-reader-prefetch-macos-texts texts))
           (if (cl-every #'kokoro-reader-macos-prefetch-ready-p texts)
@@ -2115,13 +2153,31 @@ does without changing the displayed page."
                                #'english-reading-mode--continuous-warmup-check))))))))
 
 (defun english-reading-mode--start-continuous-speech ()
-  "Start continuous speech, prebuffering macOS audio before playback."
+  "Start continuous speech and fill the resident macOS utterance queue."
   (let* ((spec (english-reading-mode--current-continuous-speech-spec))
-         (speech-buffer (plist-get spec :buffer)))
-    (if (and (buffer-live-p speech-buffer)
-             (with-current-buffer speech-buffer
-               (eq kokoro-reader-backend 'macos))
-             (fboundp 'kokoro-reader-macos-prefetch-ready-p))
+         (speech-buffer (plist-get spec :buffer))
+         (resident-macos-p
+          (and (buffer-live-p speech-buffer)
+               (with-current-buffer speech-buffer
+                 (eq kokoro-reader-backend 'macos))
+               (fboundp 'kokoro-reader--ensure-macos-bridge))))
+    (if resident-macos-p
+        (progn
+          ;; Prevent the first fast render from starting before the synchronous
+          ;; speech-start hook has submitted its future chunks.  The native
+          ;; bridge renders those chunks in parallel, then schedules their PCM
+          ;; buffers in document order.
+          (with-current-buffer speech-buffer
+            (kokoro-reader-macos-hold))
+          (english-reading-mode-speak-current-sentence)
+          (with-current-buffer speech-buffer
+            (kokoro-reader-macos-play 2))
+          (english-reading-mode--start-macos-prefetch-monitor)
+          (message "Continuous reading started"))
+      (if (and (buffer-live-p speech-buffer)
+               (with-current-buffer speech-buffer
+                 (eq kokoro-reader-backend 'macos))
+               (fboundp 'kokoro-reader-macos-prefetch-ready-p))
         (let* ((context (list :buffer speech-buffer
                               :beg (plist-get spec :beg)
                               :end (plist-get spec :end)
@@ -2136,9 +2192,9 @@ does without changing the displayed page."
                  :warmup-texts texts))
           (message "Preparing %d continuous speech chunks…" (length texts))
           (english-reading-mode--continuous-warmup-check))
-      (english-reading-mode-speak-current-sentence)
-      (english-reading-mode--start-macos-prefetch-monitor)
-      (message "Continuous reading started"))))
+        (english-reading-mode-speak-current-sentence)
+        (english-reading-mode--start-macos-prefetch-monitor)
+        (message "Continuous reading started")))))
 
 (defun english-reading-mode-continuous-read ()
   "Read continuously in speech chunks.
@@ -2174,6 +2230,14 @@ Press `s' again to stop."
 (advice-add 'kokoro-reader-stop
             :after
             #'english-reading-mode--after-kokoro-stop)
+(remove-hook 'kokoro-reader-player-finish-hook
+             #'english-reading-mode--player-finished)
+(add-hook 'kokoro-reader-player-finish-hook
+          #'english-reading-mode--player-finished)
+(remove-hook 'kokoro-reader-macos-queued-start-hook
+             #'english-reading-mode--macos-queued-start)
+(add-hook 'kokoro-reader-macos-queued-start-hook
+          #'english-reading-mode--macos-queued-start)
 
 (defun english-reading-mode--speak-at-point ()
   "Speak the sentence at point with Kokoro."

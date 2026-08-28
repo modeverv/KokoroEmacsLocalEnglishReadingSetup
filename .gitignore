@@ -1,4 +1,6 @@
 /__pycache__
 /.venv
 /my-read-k/bridge/.build
+/macos-speech-bridge/.build
+/macos-speech-bridge/my-read-speech-bridge
 /*.elc

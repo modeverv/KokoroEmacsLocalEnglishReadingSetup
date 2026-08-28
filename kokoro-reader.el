@@ -3,6 +3,7 @@
 ;; This client uses macOS /usr/bin/curl asynchronously to fetch a WAV file and
 ;; /usr/bin/afplay to play it.  It has no third-party Emacs dependencies.
 
+(require 'cl-lib)
 (require 'json)
 (require 'seq)
 (require 'subr-x)
@@ -71,12 +72,16 @@
 
 (defcustom kokoro-reader-backend 'kokoro
   "Speech backend used for the current buffer.
-`kokoro' uses the local HTTP server.  `macos' uses `/usr/bin/say' and is the
-automatic fallback for languages unsupported by Kokoro."
+`kokoro' uses the local HTTP server.  `macos' uses a resident Apple
+`AVSpeechSynthesizer' bridge and is the automatic fallback for languages
+unsupported by Kokoro."
   :type '(choice (const kokoro) (const macos)))
 
-(defcustom kokoro-reader-macos-program "/usr/bin/say"
-  "Path to the macOS speech synthesizer used by the fallback backend."
+(defcustom kokoro-reader-macos-speech-bridge-program
+  (expand-file-name
+   "macos-speech-bridge/my-read-speech-bridge"
+   (file-name-directory (or load-file-name buffer-file-name)))
+  "Path to the resident AVSpeechSynthesizer bridge executable."
   :type 'file)
 
 (defcustom kokoro-reader-macos-voice nil
@@ -95,10 +100,6 @@ automatic fallback for languages unsupported by Kokoro."
   "Maximum number of future macOS utterances synthesized ahead of playback."
   :type '(integer :tag "Utterances" 1))
 
-(defcustom kokoro-reader-macos-prefetch-launch-interval 0.2
-  "Seconds between successive background `say' synthesis launches."
-  :type '(number :tag "Seconds"))
-
 (defvar kokoro-reader--request-process nil)
 (defvar kokoro-reader--player-process nil)
 (defvar kokoro-reader--server-process nil)
@@ -107,7 +108,21 @@ automatic fallback for languages unsupported by Kokoro."
 (defvar kokoro-reader--audio-file nil)
 (defvar kokoro-reader--overlay nil)
 (defvar kokoro-reader--macos-prefetch-queue nil)
-(defvar kokoro-reader--macos-prefetch-launch-timer nil)
+(defvar kokoro-reader--macos-bridge-process nil)
+(defvar kokoro-reader--macos-bridge-fragment "")
+(defvar kokoro-reader--macos-bridge-ready-p nil)
+(defvar kokoro-reader--macos-next-id 0)
+(defvar kokoro-reader--macos-current-entry nil)
+
+(defvar kokoro-reader-macos-queued-start-hook nil
+  "Hook run when AVSpeechSynthesizer starts a previously queued utterance.")
+
+(defvar kokoro-reader-player-finish-hook nil
+  "Hook run immediately after the current audio player exits normally.
+
+This is separate from `kokoro-reader-stop': cancelling or replacing playback
+does not run the hook.  Continuous readers can use it to enqueue the next
+already-rendered utterance without polling the player process.")
 
 (defun kokoro-reader--server-ready-p ()
   (and (process-live-p kokoro-reader--server-process)
@@ -203,29 +218,21 @@ Call ON-ERROR with a diagnostic string when startup cannot be completed."
     (ignore-errors (delete-file kokoro-reader--audio-file)))
   (setq kokoro-reader--audio-file nil))
 
-(defun kokoro-reader--discard-macos-prefetch-entry (entry)
-  "Cancel and delete one queued macOS speech ENTRY."
-  (let ((process (plist-get entry :process))
-        (file (plist-get entry :file)))
-    (when (process-live-p process)
-      (delete-process process))
-    (when (and file (file-exists-p file))
-      (ignore-errors (delete-file file)))))
-
 (defun kokoro-reader--clear-macos-prefetch ()
-  "Cancel and delete all queued macOS speech files."
-  (when (timerp kokoro-reader--macos-prefetch-launch-timer)
-    (cancel-timer kokoro-reader--macos-prefetch-launch-timer))
-  (setq kokoro-reader--macos-prefetch-launch-timer nil)
-  (let ((entries kokoro-reader--macos-prefetch-queue))
-    (setq kokoro-reader--macos-prefetch-queue nil)
-    (dolist (entry entries)
-      (kokoro-reader--discard-macos-prefetch-entry entry))))
+  "Cancel all queued resident macOS speech without killing its bridge."
+  (when (process-live-p kokoro-reader--macos-bridge-process)
+    (process-send-string kokoro-reader--macos-bridge-process
+                         "{\"command\":\"stop\"}\n"))
+  (setq kokoro-reader--macos-prefetch-queue nil
+        kokoro-reader--macos-current-entry nil)
+  (kokoro-reader--delete-overlay))
 
 (defun kokoro-reader-stop (&optional preserve-macos-prefetch)
   "Cancel synthesis or stop current playback.
-When PRESERVE-MACOS-PREFETCH is non-nil, retain future synthesized audio."
+When PRESERVE-MACOS-PREFETCH is non-nil, retain queued macOS utterances."
   (interactive)
+  (unless preserve-macos-prefetch
+    (kokoro-reader--clear-macos-prefetch))
   ;; Clear variables before deleting processes, so their sentinels know that the
   ;; cancellation is intentional and do not start/clean a newer request.
   (let ((request kokoro-reader--request-process)
@@ -245,8 +252,6 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain future synthesized audio."
     (setq kokoro-reader--server-health-timer nil))
   (kokoro-reader--delete-overlay)
   (kokoro-reader--delete-audio-file)
-  (unless preserve-macos-prefetch
-    (kokoro-reader--clear-macos-prefetch))
   (message "Kokoro stopped"))
 
 (defun kokoro-reader--sentence-bounds ()
@@ -309,7 +314,8 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain future synthesized audio."
                 (delete-overlay overlay))
               (when (equal audio-file kokoro-reader--audio-file)
                 (kokoro-reader--delete-audio-file))
-              (message "%s finished" (or backend-label "Kokoro")))))))
+              (message "%s finished" (or backend-label "Kokoro"))
+              (run-hooks 'kokoro-reader-player-finish-hook))))))
     (setq kokoro-reader--player-process process)
     (message "%s speaking…" (or backend-label "Kokoro"))))
 
@@ -385,231 +391,192 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain future synthesized audio."
        (message "Kokoro request not started: %s" error-text)))))
 
 (defun kokoro-reader--macos-key (text)
-  "Return the synthesis cache key for macOS speech TEXT."
-  (list text kokoro-reader-macos-program
-        kokoro-reader-macos-voice kokoro-reader-macos-rate))
+  "Return the resident AVSpeechSynthesizer queue key for TEXT."
+  (list text kokoro-reader-macos-voice kokoro-reader-macos-rate
+        kokoro-reader-volume))
 
-(defun kokoro-reader--macos-command (audio-file)
-  "Return a `say' command that synthesizes into AUDIO-FILE."
-  (append (list kokoro-reader-macos-program
-                "-r" (number-to-string kokoro-reader-macos-rate)
-                "-o" audio-file)
-          (when (and (stringp kokoro-reader-macos-voice)
-                     (not (string-empty-p kokoro-reader-macos-voice)))
-            (list "-v" kokoro-reader-macos-voice))))
+(defun kokoro-reader--macos-entry-for-id (id)
+  "Return the resident speech queue entry identified by ID."
+  (seq-find (lambda (entry) (= id (plist-get entry :id)))
+            kokoro-reader--macos-prefetch-queue))
 
-(defun kokoro-reader--valid-audio-file-p (file)
-  "Return non-nil when FILE looks like a non-empty synthesized audio file."
-  (and file
-       (file-exists-p file)
-       (> (file-attribute-size (file-attributes file)) 4096)))
+(defun kokoro-reader--handle-macos-bridge-event (event)
+  "Handle one decoded AVSpeechSynthesizer bridge EVENT plist."
+  (let* ((name (plist-get event :event))
+         (id (plist-get event :id))
+         (entry (and (integerp id) (kokoro-reader--macos-entry-for-id id))))
+    (pcase name
+      ("ready"
+       (setq kokoro-reader--macos-bridge-ready-p t))
+      ("queued"
+       (when entry (setf (plist-get entry :queued) t)))
+      ("started"
+       (when entry
+         (setq kokoro-reader--macos-current-entry entry)
+         (setf (plist-get entry :started) t)
+         (unless (plist-get entry :announced)
+           (run-hooks 'kokoro-reader-macos-queued-start-hook))))
+      ("finished"
+       (when entry
+         (setq kokoro-reader--macos-prefetch-queue
+               (delq entry kokoro-reader--macos-prefetch-queue))
+         (when (eq entry kokoro-reader--macos-current-entry)
+           (setq kokoro-reader--macos-current-entry nil))
+         (when (plist-get entry :announced)
+           (kokoro-reader--delete-overlay)
+           (run-hooks 'kokoro-reader-player-finish-hook))))
+      ("cancelled"
+       (when entry
+         (setq kokoro-reader--macos-prefetch-queue
+               (delq entry kokoro-reader--macos-prefetch-queue))
+         (when (eq entry kokoro-reader--macos-current-entry)
+           (setq kokoro-reader--macos-current-entry nil))))
+      ("error"
+       (message "macOS speech bridge: %s" (or (plist-get event :message)
+                                                "unknown error"))))))
 
-(defun kokoro-reader--start-macos-prefetch (text)
-  "Create a pending macOS synthesis entry for TEXT."
-  (let* ((key (kokoro-reader--macos-key text))
-         (file (make-temp-file "kokoro-macos-next-" nil ".aiff"))
-         (entry (list :key key :file file :process nil
-                      :ready nil :pending t :launched-at nil)))
-    entry))
+(defun kokoro-reader--macos-bridge-filter (_process output)
+  "Decode newline-delimited bridge OUTPUT and dispatch its events."
+  ;; Publish the incomplete tail before dispatching any event.  Event hooks can
+  ;; enqueue more speech and cause another filter call; retaining byte offsets
+  ;; into the shared fragment across that re-entry produced `Args out of range'.
+  (let* ((parts (split-string
+                 (concat kokoro-reader--macos-bridge-fragment output) "\n"))
+         (lines (butlast parts)))
+    (setq kokoro-reader--macos-bridge-fragment (car (last parts)))
+    (dolist (line lines)
+      (unless (string-empty-p line)
+        (condition-case err
+            (kokoro-reader--handle-macos-bridge-event
+             (json-parse-string line :object-type 'plist))
+          (error
+           (message "macOS speech bridge response error: %s"
+                    (error-message-string err))))))))
 
-(defun kokoro-reader--launch-macos-prefetch (entry)
-  "Launch the pending background `say' process represented by ENTRY."
-  (let* ((key (plist-get entry :key))
-         (text (nth 0 key))
-         ;; Timer callbacks run in whichever buffer is current at firing time.
-         ;; Rebind every buffer-local synthesis setting captured in KEY rather
-         ;; than accidentally using that unrelated buffer's defaults.
-         (kokoro-reader-macos-program (nth 1 key))
-         (kokoro-reader-macos-voice (nth 2 key))
-         (kokoro-reader-macos-rate (nth 3 key))
-         (file (plist-get entry :file))
-         process)
-    (setf (plist-get entry :launched-at) (float-time))
-    (setq process
+(defun kokoro-reader--macos-bridge-sentinel (process event)
+  "Clear resident bridge state when PROCESS exits with EVENT."
+  (when (and (eq process kokoro-reader--macos-bridge-process)
+             (memq (process-status process) '(exit signal)))
+    (setq kokoro-reader--macos-bridge-process nil
+          kokoro-reader--macos-bridge-ready-p nil
+          kokoro-reader--macos-bridge-fragment ""
+          kokoro-reader--macos-prefetch-queue nil
+          kokoro-reader--macos-current-entry nil)
+    (kokoro-reader--delete-overlay)
+    (message "macOS speech bridge exited: %s" (string-trim event))))
+
+(defun kokoro-reader--ensure-macos-bridge ()
+  "Return the live resident AVSpeechSynthesizer bridge process."
+  (unless (process-live-p kokoro-reader--macos-bridge-process)
+    (unless (file-executable-p kokoro-reader-macos-speech-bridge-program)
+      (user-error "Build the speech bridge with `make my-read-speech-build'"))
+    (setq kokoro-reader--macos-bridge-fragment ""
+          kokoro-reader--macos-bridge-ready-p nil
+          kokoro-reader--macos-bridge-process
           (make-process
-           :name "kokoro-macos-prefetch"
+           :name "my-read-speech-bridge"
            :buffer nil
+           :command (list kokoro-reader-macos-speech-bridge-program)
            :connection-type 'pipe
            :coding 'utf-8-unix
            :noquery t
-           :command (kokoro-reader--macos-command file)
-           :sentinel
-           (lambda (proc _event)
-             (when (and (eq proc (plist-get entry :process))
-                        (memq (process-status proc) '(exit signal)))
-               (setf (plist-get entry :process) nil)
-               (if (and (= (process-exit-status proc) 0)
-                        (kokoro-reader--valid-audio-file-p file))
-                   (setf (plist-get entry :ready) t)
-                 (setq kokoro-reader--macos-prefetch-queue
-                       (delq entry kokoro-reader--macos-prefetch-queue))
-                 (kokoro-reader--discard-macos-prefetch-entry entry))))))
-    (setf (plist-get entry :process) process)
-    (process-send-string process text)
-    (process-send-eof process)
+           :filter #'kokoro-reader--macos-bridge-filter
+           :sentinel #'kokoro-reader--macos-bridge-sentinel)))
+  kokoro-reader--macos-bridge-process)
+
+(defun kokoro-reader--enqueue-macos-text (text &optional announced)
+  "Enqueue TEXT in the resident synthesizer and return its entry.
+ANNOUNCED means the normal speech wrapper already owns its visual context."
+  (let* ((process (kokoro-reader--ensure-macos-bridge))
+         (id (cl-incf kokoro-reader--macos-next-id))
+         (entry (list :id id :key (kokoro-reader--macos-key text)
+                      :announced announced :queued nil :started nil))
+         (command `((command . "enqueue")
+                    (id . ,id)
+                    (text . ,text)
+                    (voice . ,kokoro-reader-macos-voice)
+                    (rate . ,kokoro-reader-macos-rate)
+                    (volume . ,kokoro-reader-volume))))
+    (setq kokoro-reader--macos-prefetch-queue
+          (append kokoro-reader--macos-prefetch-queue (list entry)))
+    (process-send-string process (concat (json-serialize command) "\n"))
     entry))
 
-(defun kokoro-reader--run-next-macos-prefetch-launch ()
-  "Launch one pending macOS prefetch and schedule the following one."
-  (setq kokoro-reader--macos-prefetch-launch-timer nil)
-  (when-let* ((entry
-               (seq-find (lambda (candidate)
-                           (plist-get candidate :pending))
-                         kokoro-reader--macos-prefetch-queue)))
-    (setf (plist-get entry :pending) nil)
-    (condition-case nil
-        (kokoro-reader--launch-macos-prefetch entry)
-      (error
-       (setq kokoro-reader--macos-prefetch-queue
-             (delq entry kokoro-reader--macos-prefetch-queue))
-       (kokoro-reader--discard-macos-prefetch-entry entry)))
-    (when (seq-find (lambda (candidate)
-                      (plist-get candidate :pending))
-                    kokoro-reader--macos-prefetch-queue)
-      (setq kokoro-reader--macos-prefetch-launch-timer
-            (run-at-time kokoro-reader-macos-prefetch-launch-interval nil
-                         #'kokoro-reader--run-next-macos-prefetch-launch)))))
+(defun kokoro-reader-macos-hold ()
+  "Hold resident playback while continuous speech fills its initial queue."
+  (process-send-string (kokoro-reader--ensure-macos-bridge)
+                       "{\"command\":\"hold\"}\n"))
 
-(defun kokoro-reader--ensure-macos-prefetch-launch ()
-  "Ensure pending macOS prefetch work starts at the staggered interval."
-  (when (and (not (timerp kokoro-reader--macos-prefetch-launch-timer))
-             (seq-find (lambda (candidate)
-                         (plist-get candidate :pending))
-                       kokoro-reader--macos-prefetch-queue))
-    ;; Delay the first background command too, so it is not launched together
-    ;; with the foreground utterance that caused this prefetch request.
-    (setq kokoro-reader--macos-prefetch-launch-timer
-          (run-at-time kokoro-reader-macos-prefetch-launch-interval nil
-                       #'kokoro-reader--run-next-macos-prefetch-launch))))
+(defun kokoro-reader-macos-play (&optional warmup)
+  "Release resident playback after WARMUP utterances have been rendered."
+  (process-send-string
+   (kokoro-reader--ensure-macos-bridge)
+   (concat (json-serialize
+            `((command . "play") (warmup . ,(max 1 (or warmup 1)))))
+           "\n")))
 
 (defun kokoro-reader-prefetch-macos-texts (texts)
-  "Asynchronously synthesize ordered future macOS utterance TEXTS.
-
-Matching queued work is retained, obsolete work is cancelled, and no more
-than `kokoro-reader-macos-prefetch-count' entries are kept."
+  "Append ordered future TEXTS to the resident AVSpeechSynthesizer queue."
   (when (and kokoro-reader-macos-prefetch-enabled
              (eq kokoro-reader-backend 'macos))
-    (let ((wanted (mapcar #'kokoro-reader--macos-key
-                          (seq-take texts kokoro-reader-macos-prefetch-count)))
-          (available kokoro-reader--macos-prefetch-queue)
-          retained)
-      (dolist (key wanted)
-        (let ((entry (seq-find
-                      (lambda (candidate)
-                        (and (equal key (plist-get candidate :key))
-                             (or (and (plist-get candidate :ready)
-                                      (kokoro-reader--valid-audio-file-p
-                                       (plist-get candidate :file)))
-                                 (plist-get candidate :pending)
-                                 (process-live-p
-                                  (plist-get candidate :process)))))
-                      available)))
-          (if entry
-              (progn
-                (setq available (delq entry available))
-                (push entry retained))
-            (push (kokoro-reader--start-macos-prefetch (car key)) retained))))
-      (dolist (entry available)
-        (kokoro-reader--discard-macos-prefetch-entry entry))
-      (setq kokoro-reader--macos-prefetch-queue (nreverse retained))
-      (kokoro-reader--ensure-macos-prefetch-launch))))
+    (let* ((wanted (mapcar #'kokoro-reader--macos-key
+                           (seq-take texts kokoro-reader-macos-prefetch-count)))
+           (pending (seq-remove
+                     (lambda (entry)
+                       (or (eq entry kokoro-reader--macos-current-entry)
+                           (plist-get entry :announced)))
+                     kokoro-reader--macos-prefetch-queue))
+           (existing (mapcar (lambda (entry) (plist-get entry :key)) pending)))
+      ;; AVSpeechSynthesizer cannot remove one queued utterance without also
+      ;; interrupting the current voice.  Normal continuous reading always
+      ;; supplies the same retained prefix; only append its missing suffix.
+      (when (equal existing (seq-take wanted (length existing)))
+        (dolist (key (seq-drop wanted (length existing)))
+          (let ((kokoro-reader-macos-voice (nth 1 key))
+                (kokoro-reader-macos-rate (nth 2 key))
+                (kokoro-reader-volume (nth 3 key)))
+            (kokoro-reader--enqueue-macos-text (car key))))))))
 
 (defun kokoro-reader-prefetch-macos-text (text)
   "Asynchronously synthesize macOS speech for one future TEXT."
   (kokoro-reader-prefetch-macos-texts (list text)))
 
 (defun kokoro-reader-macos-prefetch-ready-p (text)
-  "Return non-nil when ready prefetched audio matches TEXT and settings."
+  "Return non-nil when TEXT is already in the resident speech queue."
   (let ((key (kokoro-reader--macos-key text)))
-    (seq-some
-     (lambda (entry)
-       (and (plist-get entry :ready)
-            (equal key (plist-get entry :key))
-            (kokoro-reader--valid-audio-file-p (plist-get entry :file))))
-     kokoro-reader--macos-prefetch-queue)))
+    (seq-some (lambda (entry) (equal key (plist-get entry :key)))
+              kokoro-reader--macos-prefetch-queue)))
 
-(defun kokoro-reader--take-macos-prefetch (key)
-  "Return and detach the ready prefetched file matching KEY."
-  (when-let ((entry
-              (seq-find
-               (lambda (candidate)
-                 (and (plist-get candidate :ready)
-                      (equal key (plist-get candidate :key))
-                      (kokoro-reader--valid-audio-file-p
-                       (plist-get candidate :file))))
-               kokoro-reader--macos-prefetch-queue)))
-    (setq kokoro-reader--macos-prefetch-queue
-          (delq entry kokoro-reader--macos-prefetch-queue))
-    (plist-get entry :file)))
+(defun kokoro-reader-macos-speaking-p ()
+  "Return non-nil while resident macOS speech is queued or speaking."
+  (and (process-live-p kokoro-reader--macos-bridge-process)
+       kokoro-reader--macos-prefetch-queue))
 
-(defun kokoro-reader--take-running-macos-prefetch (key)
-  "Return and detach an in-progress prefetch matching KEY.
-
-The return value is (PROCESS . FILE).  Detaching prevents
-`kokoro-reader-stop' from cancelling synthesis when the continuous reader
-promotes this work to the current utterance."
-  (when-let ((entry
-              (seq-find
-               (lambda (candidate)
-                 (and (not (plist-get candidate :ready))
-                      (equal key (plist-get candidate :key))
-                      (process-live-p (plist-get candidate :process))))
-               kokoro-reader--macos-prefetch-queue)))
-    (setq kokoro-reader--macos-prefetch-queue
-          (delq entry kokoro-reader--macos-prefetch-queue))
-    (cons (plist-get entry :process) (plist-get entry :file))))
+(defun kokoro-reader-macos-has-pending-p ()
+  "Return non-nil when an utterance follows the current resident speech."
+  (seq-some (lambda (entry)
+              (not (eq entry kokoro-reader--macos-current-entry)))
+            kokoro-reader--macos-prefetch-queue))
 
 (defun kokoro-reader--speak-bounds-macos (beg end)
-  "Synthesize BEG through END to AIFF, then play it with `afplay'."
+  "Speak BEG through END through the resident AVSpeechSynthesizer queue."
   (let* ((text (kokoro-reader--text beg end))
          (key (kokoro-reader--macos-key text))
-         (prefetched-file (kokoro-reader--take-macos-prefetch key))
-         (running-prefetch
-          (unless prefetched-file
-            (kokoro-reader--take-running-macos-prefetch key))))
-    ;; Detaching matching prefetch work first prevents normal stop cleanup from
-    ;; deleting ready audio or cancelling synthesis that is nearly complete.
-    (kokoro-reader-stop t)
-    (let* ((audio-file (or prefetched-file (cdr running-prefetch)
-                           (make-temp-file "kokoro-macos-" nil ".aiff")))
-           (overlay (make-overlay beg end (current-buffer) nil t))
-           process)
+         (queued-entry
+          (and kokoro-reader--macos-current-entry
+               (not (plist-get kokoro-reader--macos-current-entry :announced))
+               (equal key (plist-get kokoro-reader--macos-current-entry :key))
+               kokoro-reader--macos-current-entry)))
+    (unless queued-entry
+      (kokoro-reader-stop))
+    (let ((overlay (make-overlay beg end (current-buffer) nil t)))
       (overlay-put overlay 'face 'highlight)
-      (setq kokoro-reader--audio-file audio-file
-            kokoro-reader--overlay overlay)
-      (if prefetched-file
-          (kokoro-reader--play audio-file overlay "macOS speech")
-        (setq process
-              (or (car running-prefetch)
-                  (make-process
-                   :name "kokoro-macos-synthesize"
-                   :buffer nil
-                   :connection-type 'pipe
-                   :coding 'utf-8-unix
-                   :noquery t
-                   :command (kokoro-reader--macos-command audio-file))))
-        (set-process-sentinel
-         process
-         (lambda (proc _event)
-           (when (and (eq proc kokoro-reader--request-process)
-                      (memq (process-status proc) '(exit signal)))
-             (setq kokoro-reader--request-process nil)
-             (if (and (= (process-exit-status proc) 0)
-                      (kokoro-reader--valid-audio-file-p audio-file))
-                 (kokoro-reader--play
-                  audio-file overlay "macOS speech")
-               (when (overlayp overlay)
-                 (delete-overlay overlay))
-               (when (equal audio-file kokoro-reader--audio-file)
-                 (kokoro-reader--delete-audio-file))
-               (message "macOS speech synthesis failed")))))
-        (setq kokoro-reader--request-process process)
-        (if running-prefetch
-            (message "macOS speech finishing prefetched audio…")
-          (process-send-string process text)
-          (process-send-eof process)
-          (message "macOS speech synthesizing with %s…"
-                   (or kokoro-reader-macos-voice "the system voice")))))))
+      (setq kokoro-reader--overlay overlay)
+      (if queued-entry
+          (setf (plist-get queued-entry :announced) t)
+        (kokoro-reader--enqueue-macos-text text t))
+      (message "macOS speech queued with %s…"
+               (or kokoro-reader-macos-voice "the system voice")))))
 
 (defun kokoro-reader--speak-bounds (beg end)
   "Speak BEG through END with the buffer's configured backend."
