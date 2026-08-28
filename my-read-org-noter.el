@@ -4,6 +4,7 @@
 ;; how to use the fixed my-read window layout and the virtual Kindle document.
 
 (require 'cl-lib)
+(require 'eww)
 (require 'org)
 (require 'subr-x)
 (require 'org-noter)
@@ -28,6 +29,7 @@
 (defvar my-read-k--last-fingerprint)
 (defvar my-read-k--page-number)
 (defvar my-read-k--target-url)
+(defvar my/read-eww-history-page-p)
 
 (declare-function my/read-center-window "my-read" (&optional frame))
 (declare-function my/read-frame-p "my-read" (&optional frame))
@@ -49,6 +51,41 @@
   "Return non-nil when BUFFER is the my-read Kindle document."
   (and (buffer-live-p buffer)
        (buffer-local-value 'my-read-k-mode buffer)))
+
+(defun my/read-org-noter--eww-buffer-p (buffer)
+  "Return non-nil when BUFFER is a rendered EWW document."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (derived-mode-p 'eww-mode))))
+
+(defun my/read-org-noter--eww-url (&optional buffer)
+  "Return BUFFER's canonical EWW URL without a fragment."
+  (with-current-buffer (or buffer (current-buffer))
+    (when-let ((url (and (boundp 'eww-data)
+                         (plist-get eww-data :url))))
+      (replace-regexp-in-string "#.*\\'" "" url))))
+
+(defun my/read-org-noter--eww-property (&optional buffer)
+  "Return the virtual NOTER_DOCUMENT value for EWW BUFFER."
+  (when-let ((url (my/read-org-noter--eww-url buffer)))
+    (format "[[eww:%s]]" (org-link-escape url))))
+
+(defun my/read-org-noter--eww-url-from-property (property)
+  "Return the URL encoded by EWW document PROPERTY, or nil."
+  (when (stringp property)
+    (let ((path
+           (cond
+            ((and (string-prefix-p "[[eww:" property)
+                  (string-suffix-p "]]" property))
+             (substring property 6 -2))
+            ((string-prefix-p "eww:" property)
+             (substring property 4)))))
+      (and path (org-link-unescape path)))))
+
+(defun my/read-org-noter--eww-mode-p (mode)
+  "Return non-nil when MODE identifies a virtual EWW document."
+  (or (eq mode 'eww-mode)
+      (my/read-org-noter--eww-url-from-property mode)))
 
 (defun my/read-org-noter--document-file (buffer)
   "Return the real document filename represented by BUFFER, or nil."
@@ -74,16 +111,23 @@
 
 (defun my/read-org-noter--document-property (buffer frame)
   "Return Org-noter's document property for BUFFER in FRAME."
-  (if (my/read-org-noter--kindle-buffer-p buffer)
-      (my/read-org-noter--kindle-property buffer frame)
-    (my/read-org-noter--document-file buffer)))
+  (cond
+   ((my/read-org-noter--kindle-buffer-p buffer)
+    (my/read-org-noter--kindle-property buffer frame))
+   ((my/read-org-noter--eww-buffer-p buffer)
+    (my/read-org-noter--eww-property buffer))
+   (t (my/read-org-noter--document-file buffer))))
 
 (defun my/read-org-noter--supported-buffer-p (buffer)
-  "Return non-nil when BUFFER is a PDF, EPUB, or Kindle source."
+  "Return non-nil when BUFFER is a PDF, EPUB, EWW, or Kindle source."
   (and (buffer-live-p buffer)
        (with-current-buffer buffer
          (or (my/read-org-noter--kindle-buffer-p buffer)
-             (memq major-mode '(doc-view-mode pdf-view-mode nov-mode))))))
+             (and (memq major-mode
+                        '(doc-view-mode pdf-view-mode nov-mode eww-mode))
+                  (not (and (eq major-mode 'eww-mode)
+                            (bound-and-true-p
+                             my/read-eww-history-page-p))))))))
 
 (defun my/read-org-noter--notes-file (buffer frame)
   "Return the canonical notes filename for BUFFER in FRAME."
@@ -231,6 +275,164 @@ clears Org-noter's buffer-local handler, minor mode, and session pointer."
 (add-to-list 'org-noter-open-document-functions
              #'my/read-org-noter--kindle-open-document)
 
+(defun my/read-org-noter--eww-open-document (property)
+  "Return an EWW buffer for virtual document PROPERTY."
+  (when-let ((url (my/read-org-noter--eww-url-from-property property)))
+    (or (cl-find-if
+         (lambda (buffer)
+           (and (my/read-org-noter--eww-buffer-p buffer)
+                (equal url (my/read-org-noter--eww-url buffer))))
+         (buffer-list))
+        (save-window-excursion
+          (eww url t)
+          (current-buffer)))))
+
+(add-to-list 'org-noter-open-document-functions
+             #'my/read-org-noter--eww-open-document)
+
+(defun my/read-org-noter--eww-heading-positions (&optional buffer)
+  "Return ordered SHR heading positions in EWW BUFFER."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((position (point-min))
+          positions)
+      (while (< position (point-max))
+        (when (and (get-text-property position 'outline-level)
+                   (or (= position (point-min))
+                       (not (get-text-property (1- position)
+                                               'outline-level))))
+          (push position positions))
+        (setq position
+              (or (next-single-property-change
+                   position 'outline-level nil (point-max))
+                  (point-max))))
+      (nreverse positions))))
+
+(defun my/read-org-noter--eww-location-at (position)
+  "Return EWW section and body offset for buffer POSITION."
+  (let* ((position (min (max position (point-min)) (point-max)))
+         (headings (my/read-org-noter--eww-heading-positions))
+         (section 0)
+         (base (point-min)))
+    (catch 'found
+      (dolist (heading headings)
+        (if (> heading position)
+            (throw 'found nil)
+          (setq section (1+ section)
+                base heading))))
+    (cons section (max 0 (- position base)))))
+
+(defun my/read-org-noter--eww-heading-at-location (location)
+  "Return the heading text represented by EWW LOCATION."
+  (let* ((section (car location))
+         (heading (and (> section 0)
+                       (nth (1- section)
+                            (my/read-org-noter--eww-heading-positions)))))
+    (if heading
+        (string-trim
+         (save-excursion
+           (goto-char heading)
+           (buffer-substring-no-properties heading (line-end-position))))
+      "Top")))
+
+(defun my/read-org-noter--eww-approx-location
+    (mode &optional precise-info _force-new-ref)
+  "Return Org-noter section and body offset for EWW document MODE."
+  (when (my/read-org-noter--eww-mode-p mode)
+    (my/read-org-noter--eww-location-at
+     (cond
+      ((numberp precise-info) precise-info)
+      ((and (consp precise-info) (numberp (car precise-info)))
+       (car precise-info))
+      (t (point))))))
+
+(add-to-list 'org-noter--doc-approx-location-hook
+             #'my/read-org-noter--eww-approx-location)
+
+(defun my/read-org-noter--eww-scroll (&rest _)
+  "Schedule EWW note synchronization after window scrolling."
+  (my/read-org-noter--schedule-sync))
+
+(defun my/read-org-noter--eww-after-render ()
+  "Follow a newly rendered URL when this EWW buffer is visible in my-read."
+  (when-let ((frame (and (boundp 'my/read-center-tab-frame)
+                         my/read-center-tab-frame)))
+    (let ((center (and (frame-live-p frame)
+                       (my/read-center-window frame))))
+      (when (and (window-live-p center)
+                 (eq (window-buffer center) (current-buffer)))
+        (my/read-org-noter-follow-source frame)))))
+
+(defun my/read-org-noter--eww-setup (mode)
+  "Set up Org-noter synchronization for EWW document MODE."
+  (when (my/read-org-noter--eww-mode-p mode)
+    (add-hook 'post-command-hook #'my/read-org-noter--schedule-sync nil t)
+    (add-hook 'window-scroll-functions #'my/read-org-noter--eww-scroll nil t)
+    (add-hook 'eww-after-render-hook
+              #'my/read-org-noter--eww-after-render nil t)
+    t))
+
+(add-to-list 'org-noter-set-up-document-hook
+             #'my/read-org-noter--eww-setup)
+
+(defun my/read-org-noter--eww-current-view (mode)
+  "Return Org-noter's current continuous view for EWW MODE."
+  (when (my/read-org-noter--eww-mode-p mode)
+    (vector 'nov
+            (my/read-org-noter--eww-location-at (window-start))
+            (my/read-org-noter--eww-location-at (window-end nil t)))))
+
+(add-to-list 'org-noter--get-current-view-hook
+             #'my/read-org-noter--eww-current-view)
+
+(defun my/read-org-noter--eww-pretty-location (location)
+  "Serialize EWW LOCATION in Org-noter's readable form."
+  (org-noter--with-valid-session
+   (when (my/read-org-noter--eww-mode-p
+          (org-noter--session-doc-mode session))
+     (format "%S" location))))
+
+(add-to-list 'org-noter--pretty-print-location-hook
+             #'my/read-org-noter--eww-pretty-location)
+
+(defun my/read-org-noter--eww-title-location (location)
+  "Return a heading-aware title fragment for EWW LOCATION."
+  (org-noter--with-valid-session
+   (when (my/read-org-noter--eww-mode-p
+          (org-noter--session-doc-mode session))
+     (with-current-buffer (org-noter--session-doc-buffer session)
+       (format "%s +%s"
+               (my/read-org-noter--eww-heading-at-location location)
+               (cdr location))))))
+
+(add-to-list 'org-noter--pretty-print-location-for-title-hook
+             #'my/read-org-noter--eww-title-location)
+
+(defun my/read-org-noter--eww-goto (mode location &optional _window)
+  "Go to the EWW heading and body offset represented by LOCATION."
+  (when (my/read-org-noter--eww-mode-p mode)
+    (let* ((section (car location))
+           (headings (my/read-org-noter--eww-heading-positions))
+           (base (if (> section 0)
+                     (or (nth (1- section) headings) (car (last headings)))
+                   (point-min)))
+           (next (and (> section 0) (nth section headings)))
+           (limit (or next (point-max)))
+           (target (min limit (+ (or base (point-min)) (cdr location)))))
+      (goto-char (max (point-min) target))
+      (recenter)
+      t)))
+
+(add-to-list 'org-noter--doc-goto-location-hook
+             #'my/read-org-noter--eww-goto)
+
+(defun my/read-org-noter--eww-selected-text (mode)
+  "Return selected EWW text for Org-noter document MODE."
+  (when (and (my/read-org-noter--eww-mode-p mode) (use-region-p))
+    (buffer-substring-no-properties (region-beginning) (region-end))))
+
+(add-to-list 'org-noter-get-selected-text-hook
+             #'my/read-org-noter--eww-selected-text)
+
 (defun my/read-org-noter--kindle-page ()
   "Return Kindle's best current numeric page/location identifier."
   (or (and (listp my-read-k--current-result)
@@ -353,13 +555,35 @@ clears Org-noter's buffer-local handler, minor mode, and session pointer."
           (ignore-errors (org-noter--doc-location-change-handler)))))))
 
 (defun my/read-org-noter--schedule-sync ()
-  "Debounce Org-noter synchronization after Kindle cursor movement."
+  "Debounce Org-noter synchronization after document movement."
   (when (timerp my/read-org-noter--sync-timer)
     (cancel-timer my/read-org-noter--sync-timer))
   (setq my/read-org-noter--sync-timer
         (run-with-idle-timer 0.15 nil
                             #'my/read-org-noter--sync-now
                             (current-buffer))))
+
+(defun my/read-org-noter--session-matches-source-p (session source frame)
+  "Return non-nil when SESSION still represents SOURCE in FRAME."
+  (or (not (my/read-org-noter--eww-buffer-p source))
+      (equal (org-noter--session-property-text session)
+             (my/read-org-noter--document-property source frame))))
+
+(defun my/read-org-noter--detach-reused-eww-session (session)
+  "Detach SESSION without killing its reused EWW document buffer."
+  (setq org-noter--sessions (delq session org-noter--sessions))
+  (let ((document (org-noter--session-doc-buffer session))
+        (notes (org-noter--session-notes-buffer session)))
+    (when (buffer-live-p document)
+      (with-current-buffer document
+        (remove-hook 'kill-buffer-hook #'org-noter--handle-kill-buffer t)
+        (when org-noter-doc-mode (org-noter-doc-mode -1))
+        (setq org-noter--session nil)))
+    (when (buffer-live-p notes)
+      (with-current-buffer notes
+        (remove-hook 'kill-buffer-hook #'org-noter--handle-kill-buffer t)
+        (when org-noter-notes-mode (org-noter-notes-mode -1))
+        (setq org-noter--session nil)))))
 
 (defun my/read-org-noter-follow-source (&optional frame)
   "Show or create the Org-noter notes session for FRAME's active source."
@@ -373,24 +597,30 @@ clears Org-noter's buffer-local handler, minor mode, and session pointer."
                (my/read-org-noter--supported-buffer-p source)
                (or (not (my/read-org-noter--kindle-buffer-p source))
                    (frame-parameter frame 'my-reading-kindle-book-name)))
-      (if-let ((session (my/read-org-noter--session-for-buffer source)))
-          (progn
-            (my/read-org-noter--reattach-session session)
-            (set-window-buffer notes-window
-                               (org-noter--session-notes-buffer session)))
-        (pcase-let* ((`(,notes-buffer . ,root)
-                      (my/read-org-noter--ensure-root source frame))
-                     (org-noter-always-create-frame nil)
-                     (org-noter-notes-window-behavior '(start scroll))
-                     (org-noter-disable-narrowing nil))
-          (set-window-buffer notes-window notes-buffer)
-          (with-selected-frame frame
-            (with-selected-window notes-window
-              (goto-char root)
-              (org-noter)))
-          ;; Org-noter renames a reused frame.  Keep the workspace identity
-          ;; stable because other reader UI and the user refer to it as my-read.
-          (set-frame-parameter frame 'name frame-name)))
+      (let ((session (my/read-org-noter--session-for-buffer source)))
+        (when (and session
+                   (not (my/read-org-noter--session-matches-source-p
+                         session source frame)))
+          (my/read-org-noter--detach-reused-eww-session session)
+          (setq session nil))
+        (if session
+            (progn
+              (my/read-org-noter--reattach-session session)
+              (set-window-buffer notes-window
+                                 (org-noter--session-notes-buffer session)))
+          (pcase-let* ((`(,notes-buffer . ,root)
+                        (my/read-org-noter--ensure-root source frame))
+                       (org-noter-always-create-frame nil)
+                       (org-noter-notes-window-behavior '(start scroll))
+                       (org-noter-disable-narrowing nil))
+            (set-window-buffer notes-window notes-buffer)
+            (with-selected-frame frame
+              (with-selected-window notes-window
+                (goto-char root)
+                (org-noter)))
+            ;; Org-noter renames a reused frame.  Keep the workspace identity
+            ;; stable because other reader UI and the user refer to it as my-read.
+            (set-frame-parameter frame 'name frame-name))))
       ;; PDF setup (and especially a DocView -> PDF Tools transition) may run
       ;; the major mode again, which clears my-read's buffer-local minor modes.
       (my/read--configure-center-tab-buffer source frame))))

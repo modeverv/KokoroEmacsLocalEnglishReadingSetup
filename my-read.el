@@ -95,6 +95,17 @@ around the visible area instead of loading the entire document at once."
   :type 'string
   :group 'my-read)
 
+(defcustom my/read-eww-history-file
+  (expand-file-name "eww-history.el" my/read-position-directory)
+  "File storing URLs rendered in the my-read EWW tab."
+  :type 'file
+  :group 'my-read)
+
+(defcustom my/read-eww-history-limit 100
+  "Maximum number of recent EWW URLs retained by my-read."
+  :type 'integer
+  :group 'my-read)
+
 (defcustom my/read-eww-enable-automatic-lookup nil
   "When non-nil, run automatic Lookup in the EWW center tab.
 
@@ -143,6 +154,7 @@ visible.  Formula SVGs, site icons, raster figures, and logos are not affected."
   :group 'my-read)
 
 (defvar-local my/read--eww-image-background-installed-p nil)
+(defvar-local my/read-eww-history-page-p nil)
 (defconst my/read--eww-image-background-version "v6")
 
 (defun my/read--eww-arxiv-article-image-url-p (url)
@@ -1062,7 +1074,15 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
         (with-selected-window window
           (with-current-buffer buffer
             (unless (bound-and-true-p pdf-view-roll-minor-mode)
-              (pdf-view-roll-minor-mode 1))))))))
+              (pdf-view-roll-minor-mode 1))
+            ;; The mode-line size indicator assumes a single live page
+            ;; overlay.  Roll mode can temporarily have no overlay while it
+            ;; updates the continuously displayed pages, making redisplay
+            ;; signal `wrong-type-argument overlayp nil'.
+            (when (and (bound-and-true-p
+                        pdf-misc-size-indication-minor-mode)
+                       (fboundp 'pdf-misc-size-indication-minor-mode))
+              (pdf-misc-size-indication-minor-mode -1))))))))
 
 (defun my/read--repair-pdf-view-window (buffer frame)
   "Repair BUFFER's PDF Tools image state in FRAME's center window.
@@ -2449,6 +2469,140 @@ Otherwise, translate the sentence containing point."
         (special-mode)))
     buffer))
 
+(defun my/read-eww-history--empty-data ()
+  "Return an empty EWW history data object."
+  '(:version 1 :entries nil))
+
+(defun my/read-eww-history--valid-data-p (data)
+  "Return non-nil when DATA is a valid EWW history object."
+  (and (listp data)
+       (equal (plist-get data :version) 1)
+       (let ((entries (plist-get data :entries)))
+         (and (listp entries)
+              (cl-every
+               (lambda (entry)
+                 (and (consp entry)
+                      (stringp (car entry))
+                      (stringp (plist-get (cdr entry) :title))
+                      (numberp (plist-get (cdr entry) :visited))))
+               entries)))))
+
+(defun my/read-eww-history--read-data ()
+  "Read persistent EWW history, preserving an invalid file unchanged."
+  (if (not (file-exists-p my/read-eww-history-file))
+      (my/read-eww-history--empty-data)
+    (condition-case err
+        (with-temp-buffer
+          (insert-file-contents my/read-eww-history-file)
+          (let ((read-eval nil)
+                (data (read (current-buffer))))
+            (skip-chars-forward " \t\r\n")
+            (unless (and (eobp) (my/read-eww-history--valid-data-p data))
+              (error "invalid EWW history data"))
+            data))
+      (error
+       (message "my-read: EWW履歴ファイルを保護しました（%s）"
+                (error-message-string err))
+       :invalid))))
+
+(defun my/read-eww-history--write-data (data)
+  "Atomically write validated EWW history DATA."
+  (let* ((directory (file-name-directory my/read-eww-history-file))
+         temp)
+    (make-directory directory t)
+    (setq temp (make-temp-file (expand-file-name ".eww-history-" directory)))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (insert ";;; my-read EWW history -*- mode: emacs-lisp; -*-\n")
+            (let ((print-length nil)
+                  (print-level nil))
+              (prin1 data (current-buffer)))
+            (insert "\n")
+            (write-region (point-min) (point-max) temp nil 'silent))
+          (set-file-modes temp #o600)
+          (rename-file temp my/read-eww-history-file t)
+          (setq temp nil))
+      (when (and temp (file-exists-p temp))
+        (delete-file temp)))))
+
+(defun my/read-eww-history--clean-title (title url)
+  "Return a single-line TITLE, falling back to URL."
+  (let ((title (string-trim
+                (replace-regexp-in-string "[\r\n\t ]+" " " (or title "")))))
+    (if (string-empty-p title) url title)))
+
+(defun my/read-eww-history-record-current ()
+  "Persist the current rendered page when it belongs to a my-read EWW tab."
+  (when (derived-mode-p 'eww-mode)
+    (setq my/read-eww-history-page-p nil)
+    (let* ((frame (and (boundp 'my/read-center-tab-frame)
+                       my/read-center-tab-frame))
+           (center (and (frame-live-p frame)
+                        (my/read-center-window frame)))
+           (url (and (boundp 'eww-data) (plist-get eww-data :url)))
+           (title (and (boundp 'eww-data) (plist-get eww-data :title))))
+      (when (and (stringp url)
+                 (not (string-empty-p url))
+                 (frame-live-p frame)
+                 (my/read-frame-p frame)
+                 (eq (frame-parameter frame 'my-reading-eww-buffer)
+                     (current-buffer)))
+        (let ((data (my/read-eww-history--read-data)))
+          (unless (eq data :invalid)
+            (let* ((entry (list url
+                                :title (my/read-eww-history--clean-title
+                                        title url)
+                                :visited (float-time)))
+                   (entries
+                    (cons entry
+                          (cl-remove url (plist-get data :entries)
+                                     :key #'car :test #'equal))))
+              (setf (plist-get data :entries)
+                    (cl-subseq entries 0
+                               (min (length entries)
+                                    (max 0 my/read-eww-history-limit))))
+              (my/read-eww-history--write-data data))))
+        (when (and (window-live-p center)
+                   (eq (window-buffer center) (current-buffer))
+                   (fboundp 'my/read-org-noter-follow-source))
+          (my/read-org-noter-follow-source frame))))))
+
+(defun my/read-eww-history-open (button)
+  "Open the URL stored on history BUTTON in the current EWW buffer."
+  (setq my/read-eww-history-page-p nil)
+  (eww (button-get button 'my/read-eww-url)))
+
+(defun my/read-eww-history-render ()
+  "Render persistent title-and-URL history in the current EWW buffer."
+  (let* ((data (my/read-eww-history--read-data))
+         (entries (unless (eq data :invalid) (plist-get data :entries)))
+         (inhibit-read-only t))
+    (erase-buffer)
+    (setq my/read-eww-history-page-p t)
+    (setq-local eww-data (list :url my/read-eww-url :title "EWW History"))
+    (insert (propertize "EWW History\n\n" 'face 'font-lock-keyword-face))
+    (insert "G: URLを入力\n")
+    (insert (format "g: %s を開く\n\n" my/read-eww-url))
+    (cond
+     ((eq data :invalid)
+      (insert "履歴ファイルが不正なため、内容を変更せず保護しています。"))
+     ((null entries)
+      (insert "履歴はまだありません。"))
+     (t
+      (dolist (entry entries)
+        (let ((url (car entry))
+              (title (plist-get (cdr entry) :title)))
+          (insert-text-button
+           title 'follow-link t 'help-echo url
+           'my/read-eww-url url 'action #'my/read-eww-history-open)
+          (insert "\n  ")
+          (insert-text-button
+           url 'follow-link t 'help-echo title
+           'my/read-eww-url url 'action #'my/read-eww-history-open)
+          (insert "\n\n")))))
+    (goto-char (point-min))))
+
 (defun my/read--prepare-eww-buffer (frame)
   "Create and return FRAME's EWW center-tab buffer."
   (require 'eww)
@@ -2462,20 +2616,14 @@ Otherwise, translate the sentence containing point."
       (require 'my-read-eww-math)
       (my/read-eww-math-setup)
       (my/read--eww-image-background-setup)
+      (add-hook 'eww-after-render-hook
+                #'my/read-eww-history-record-current nil t)
       (setq-local line-spacing my/read-eww-line-spacing)
       ;; Reuse the EPUB/Kindle reading controls in rendered web papers.
       ;; `eww-setup-buffer' does not re-run `eww-mode' on navigation, so this
       ;; minor mode and its reader bindings remain active after page loads.
       (english-reading-mode 1)
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (propertize "EWW / arXiv\n\n" 'face 'font-lock-keyword-face))
-        (insert (format "g: %s を開く\nG: URLを入力"
-                        my/read-eww-url)))
-      ;; Make the normal EWW reload command (`g') open the initial URL from
-      ;; this landing buffer.  EWW stores its URL in `eww-data', not in a
-      ;; separate `eww-current-url' variable.
-      (plist-put eww-data :url my/read-eww-url))
+      (my/read-eww-history-render))
     buffer))
 
 (defun my/read--prepare-center-tab-placeholder (frame type)

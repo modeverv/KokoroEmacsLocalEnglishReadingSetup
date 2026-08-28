@@ -130,11 +130,13 @@
   (save-window-excursion
     (let ((buffer (generate-new-buffer " *my-read-pdf-roll*"))
           (frame (selected-frame))
-          enabled-in)
+          enabled-in
+          size-indication-disabled-in)
       (unwind-protect
           (progn
             (switch-to-buffer buffer)
             (setq-local major-mode 'pdf-view-mode)
+            (setq-local pdf-misc-size-indication-minor-mode t)
             (let ((my/read-pdf-continuous-scroll t))
               (cl-letf (((symbol-function 'my/read-center-window)
                          (lambda (_frame) (selected-window)))
@@ -142,10 +144,21 @@
                          (lambda (&optional _arg)
                            (setq enabled-in
                                  (list (current-buffer)
-                                       (selected-window))))))
+                                       (selected-window)))))
+                        ((symbol-function
+                          'pdf-misc-size-indication-minor-mode)
+                         (lambda (&optional arg)
+                           (setq size-indication-disabled-in
+                                 (list (current-buffer)
+                                       (selected-window)
+                                       arg))
+                           (setq pdf-misc-size-indication-minor-mode nil))))
                 (my/read--enable-pdf-continuous-scroll buffer frame)))
             (should (equal enabled-in
-                           (list buffer (selected-window)))))
+                           (list buffer (selected-window))))
+            (should (equal size-indication-disabled-in
+                           (list buffer (selected-window) -1)))
+            (should-not pdf-misc-size-indication-minor-mode))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
@@ -726,7 +739,7 @@
           (should (stringp (nth 4 command))))
       (kokoro-reader--discard-macos-prefetch-entry entry))))
 
-(ert-deftest english-reading-mode-macos-continuous-speaks-six-sentence-chunks ()
+(ert-deftest english-reading-mode-macos-continuous-speaks-two-sentence-chunks ()
   (with-temp-buffer
     (insert "一番目です。二番目です。三番目です。四番目です。五番目です。六番目です。七番目です。")
     (goto-char (point-min))
@@ -740,7 +753,7 @@
         (english-reading-mode-speak-current-sentence))
       (should (equal (buffer-substring-no-properties
                       (car spoken-bounds) (cdr spoken-bounds))
-                     "一番目です。二番目です。三番目です。四番目です。五番目です。六番目です。")))))
+                     "一番目です。二番目です。")))))
 
 (ert-deftest kokoro-reader-promotes-running-macos-prefetch ()
   (let ((kokoro-reader--macos-prefetch-queue
@@ -914,6 +927,173 @@
         (set-frame-parameter frame 'my-reading-center-windows nil)
         (kill-buffer kindle)
         (kill-buffer eww)))))
+
+(ert-deftest my-read-org-noter-eww-url-is-document-identity ()
+  (with-temp-buffer
+    (eww-mode)
+    (setq-local eww-data
+                '(:url "https://example.test/paper?id=7#results"
+                  :title "Example Paper"))
+    (should (my/read-org-noter--supported-buffer-p (current-buffer)))
+    (should (equal (my/read-org-noter--eww-url)
+                   "https://example.test/paper?id=7"))
+    (let ((property (my/read-org-noter--eww-property)))
+      (should (equal property "[[eww:https://example.test/paper?id=7]]"))
+      (should (equal (my/read-org-noter--eww-url-from-property property)
+                     "https://example.test/paper?id=7")))))
+
+(ert-deftest my-read-org-noter-eww-location-uses-heading-and-body-offset ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (eww-mode)
+      (let ((inhibit-read-only t)
+            first second alpha beta)
+        (insert "Introduction\n")
+        (setq first (point))
+        (insert "First section\n")
+        (setq alpha (point))
+        (insert "Alpha body text.\n")
+        (setq second (point))
+        (insert "Second section\n")
+        (setq beta (point))
+        (insert "Beta body text.\n")
+        (put-text-property first (1- alpha) 'outline-level 1)
+        (put-text-property second (1- beta) 'outline-level 2)
+        (should (equal (my/read-org-noter--eww-heading-positions)
+                       (list first second)))
+        (should (equal (my/read-org-noter--eww-location-at (+ alpha 6))
+                       (cons 1 (- (+ alpha 6) first))))
+        (should (equal (my/read-org-noter--eww-location-at (+ beta 5))
+                       (cons 2 (- (+ beta 5) second))))
+        (should (equal (my/read-org-noter--eww-heading-at-location '(2 . 3))
+                       "Second section"))
+        (my/read-org-noter--eww-goto 'eww-mode
+                                     (cons 1 (- alpha first)))
+        (should (= (point) alpha))
+        (should (looking-at-p "Alpha body"))))))
+
+(ert-deftest my-read-org-noter-eww-opener-reuses-matching-live-buffer ()
+  (let ((buffer (generate-new-buffer " *my-read-noter-eww-open*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (eww-mode)
+          (setq-local eww-data
+                      '(:url "https://example.test/article#details"))
+          (should (eq (my/read-org-noter--eww-open-document
+                       "[[eww:https://example.test/article]]")
+                      buffer)))
+      (kill-buffer buffer))))
+
+(ert-deftest my-read-org-noter-eww-url-change-rejects-old-session ()
+  (let ((document (generate-new-buffer " *my-read-noter-eww-document*"))
+        (notes (generate-new-buffer " *my-read-noter-eww-notes*")))
+    (unwind-protect
+        (let ((session
+               (make-org-noter--session
+                :property-text "[[eww:https://example.test/old]]"
+                :doc-mode "[[eww:https://example.test/old]]"
+                :doc-buffer document :notes-buffer notes)))
+          (with-current-buffer document
+            (eww-mode)
+            (setq-local eww-data '(:url "https://example.test/new"))
+            (setq-local org-noter--session session))
+          (with-current-buffer notes
+            (org-mode)
+            (setq-local org-noter--session session))
+          (setq org-noter--sessions (cons session org-noter--sessions))
+          (should-not
+           (my/read-org-noter--session-matches-source-p
+            session document (selected-frame)))
+          (my/read-org-noter--detach-reused-eww-session session)
+          (should (buffer-live-p document))
+          (should-not (memq session org-noter--sessions))
+          (should-not (buffer-local-value 'org-noter--session document))
+          (should-not (buffer-local-value 'org-noter--session notes)))
+      (setq org-noter--sessions
+            (cl-remove-if
+             (lambda (session)
+               (or (eq (org-noter--session-doc-buffer session) document)
+                   (eq (org-noter--session-notes-buffer session) notes)))
+             org-noter--sessions))
+      (kill-buffer document)
+      (kill-buffer notes))))
+
+(ert-deftest my-read-eww-history-records-title-and-deduplicates-url ()
+  (save-window-excursion
+    (let* ((frame (selected-frame))
+           (window (selected-window))
+           (buffer (generate-new-buffer " *my-read-eww-history-record*"))
+           (file (make-temp-file "my-read-eww-history-"))
+           (my/read-eww-history-file file)
+           (my/read-eww-history-limit 10))
+      (unwind-protect
+          (progn
+            (delete-file file)
+            (set-frame-parameter frame 'my-reading-frame t)
+            (set-frame-parameter frame 'my-reading-center-window window)
+            (set-frame-parameter frame 'my-reading-eww-buffer buffer)
+            (set-window-buffer window buffer)
+            (with-current-buffer buffer
+              (eww-mode)
+              (setq-local my/read-center-tab-frame frame)
+              (setq-local eww-data
+                          '(:url "https://example.test/paper"
+                            :title "  First\n title  "))
+              (cl-letf (((symbol-function 'my/read-org-noter-follow-source)
+                         #'ignore))
+                (my/read-eww-history-record-current))
+              (plist-put eww-data :title "Updated title")
+              (cl-letf (((symbol-function 'my/read-org-noter-follow-source)
+                         #'ignore))
+                (my/read-eww-history-record-current)))
+            (let* ((data (my/read-eww-history--read-data))
+                   (entries (plist-get data :entries)))
+              (should (= (length entries) 1))
+              (should (equal (caar entries)
+                             "https://example.test/paper"))
+              (should (equal (plist-get (cdar entries) :title)
+                             "Updated title"))))
+        (set-frame-parameter frame 'my-reading-frame nil)
+        (set-frame-parameter frame 'my-reading-center-window nil)
+        (set-frame-parameter frame 'my-reading-eww-buffer nil)
+        (when (buffer-live-p buffer) (kill-buffer buffer))
+        (when (file-exists-p file) (delete-file file))))))
+
+(ert-deftest my-read-eww-history-landing-page-lists-title-and-url ()
+  (let* ((file (make-temp-file "my-read-eww-history-"))
+         (my/read-eww-history-file file))
+    (unwind-protect
+        (progn
+          (delete-file file)
+          (my/read-eww-history--write-data
+           '(:version 1
+             :entries
+             (("https://example.test/article"
+               :title "Example Article" :visited 1.0))))
+          (with-temp-buffer
+            (eww-mode)
+            (my/read-eww-history-render)
+            (should my/read-eww-history-page-p)
+            (should (string-match-p "Example Article" (buffer-string)))
+            (should (string-match-p "https://example.test/article"
+                                    (buffer-string)))
+            (goto-char (point-min))
+            (search-forward "Example Article")
+            (let ((button (button-at (1- (point)))))
+              (should button)
+              (should (equal (button-get button 'my/read-eww-url)
+                             "https://example.test/article")))))
+      (when (file-exists-p file) (delete-file file)))))
+
+(ert-deftest my-read-eww-history-landing-is-not-an-org-noter-document ()
+  (with-temp-buffer
+    (eww-mode)
+    (setq-local eww-data '(:url "https://arxiv.org/" :title "EWW History"))
+    (setq-local my/read-eww-history-page-p t)
+    (should-not (my/read-org-noter--supported-buffer-p (current-buffer)))
+    (setq my/read-eww-history-page-p nil)
+    (should (my/read-org-noter--supported-buffer-p (current-buffer)))))
 
 (ert-deftest my-read-org-noter-appends-kindle-location-properties ()
   (let ((doc (generate-new-buffer " *my-read-noter-kindle-doc*"))
@@ -1443,8 +1623,8 @@
      (equal (cadr (member "-draw" process-arguments))
             "roundrectangle 97.000,398.000 503.000,482.000 3.000,3.000"))))
 
-(ert-deftest english-reading-mode-pdf-highlight-delay-is-ten-milliseconds ()
-  (should (= english-reading-mode-pdf-highlight-delay 0.01)))
+(ert-deftest english-reading-mode-pdf-highlight-delay-is-one-millisecond ()
+  (should (= english-reading-mode-pdf-highlight-delay 0.001)))
 
 (ert-deftest english-reading-mode-pdf-highlight-watch-reapplies-overwritten-image ()
   (save-window-excursion
@@ -1677,7 +1857,7 @@
                        :buffer text-buffer
                        :text "Spoken sentence."
                        :beg 1 :end 17))))
-            (should (= centered-at 820)))
+            (should (= centered-at 860)))
         (when (buffer-live-p pdf-buffer)
           (kill-buffer pdf-buffer))
         (when (buffer-live-p text-buffer)
@@ -1690,6 +1870,7 @@
           goto-page
           (goto-count 0)
           (simulated-vscroll 0)
+          positioned-vscrolls
           forward-scrolls
           single-page-scroll)
       (unwind-protect
@@ -1719,6 +1900,18 @@
                          (lambda (&optional _window) 3))
                         ((symbol-function 'pdf-roll-display-page)
                          (lambda (&rest _) 2000))
+                        ((symbol-function 'pdf-roll-display-pages)
+                         (lambda (&rest _)))
+                        ((symbol-function 'pdf-roll-page-to-pos)
+                         (lambda (page) page))
+                        ((symbol-function 'pdf-roll-set-vscroll)
+                         (lambda (vscroll &optional _window)
+                           (setq simulated-vscroll vscroll)))
+                        ((symbol-function
+                          'english-reading-mode--pdf-roll-set-position)
+                         (lambda (_page vscroll _window)
+                           (setq simulated-vscroll vscroll)
+                           (push vscroll positioned-vscrolls)))
                         ((symbol-function 'pdf-roll-scroll-forward)
                          (lambda (pixels window pixelwise)
                            (cl-incf simulated-vscroll pixels)
@@ -1749,15 +1942,194 @@
                        :buffer text-buffer
                        :text "Following sentence."
                        :beg 18 :end 37))))
-            ;; The already-visible page is measured in place; advancing to the
-            ;; next utterance must not force a page jump.
+            ;; Each exact highlight position is placed at the configured
+            ;; 20-percent anchor without forcing a page-head jump.
             (should-not goto-page)
             (should (= goto-count 0))
-            (should (equal (mapcar #'car (reverse forward-scrolls))
-                           '(820 200)))
-            (should (cl-every (lambda (scroll) (eq (nth 2 scroll) t))
-                              forward-scrolls))
+            (should (equal (reverse positioned-vscrolls) '(860 1060)))
+            (should-not forward-scrolls)
             (should-not single-page-scroll))
+        (when (buffer-live-p pdf-buffer)
+          (kill-buffer pdf-buffer))
+        (when (buffer-live-p text-buffer)
+          (kill-buffer text-buffer))))))
+
+(ert-deftest english-reading-mode-pdf-continuous-does-not-rewind-to-page-head ()
+  (save-window-excursion
+    (let ((pdf-buffer (generate-new-buffer " *continuous-pdf-no-rewind*"))
+          (text-buffer (generate-new-buffer
+                        " *continuous-pdf-no-rewind-text*"))
+          goto-page
+          scroll)
+      (unwind-protect
+          (progn
+            (switch-to-buffer pdf-buffer)
+            (setq-local major-mode 'pdf-view-mode)
+            (setq-local buffer-file-name "/tmp/continuous-no-rewind.pdf")
+            (setq-local pdf-view-roll-minor-mode t)
+            (setq-local english-reading-mode--pdf-page 3)
+            (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+            (let ((english-reading-mode--continuous-state
+                   (list :buffer pdf-buffer)))
+              (cl-letf (((symbol-function
+                          'english-reading-mode--pdf-context-rectangles)
+                         (lambda (_context)
+                           '((:height 1000.0)
+                             ((10.0 600.0 100.0 620.0)))))
+                        ;; Roll mode has already advanced its topmost page.
+                        ((symbol-function 'pdf-view-current-page)
+                         (lambda (&optional _window) 4))
+                        ((symbol-function 'pdf-roll-display-page)
+                         (lambda (&rest _) 2000))
+                        ((symbol-function 'pdf-roll-goto-page)
+                         (lambda (&rest arguments)
+                           (setq goto-page arguments)))
+                        ((symbol-function 'pdf-roll-scroll-forward)
+                         (lambda (&rest arguments) (setq scroll arguments)))
+                        ((symbol-function 'pdf-roll-scroll-backward)
+                         (lambda (&rest arguments) (setq scroll arguments)))
+                        ((symbol-function 'window-vscroll)
+                         (lambda (&optional _window _pixels) 375))
+                        ((symbol-function 'window-inside-pixel-edges)
+                         (lambda (&optional _window) '(0 0 500 800))))
+                (english-reading-mode--pdf-center-continuous-speech
+                 (list :window (selected-window)
+                       :buffer text-buffer
+                       :text "Delayed sentence."
+                       :beg 1 :end 17))))
+            (should-not goto-page)
+            (should-not scroll))
+        (when (buffer-live-p pdf-buffer)
+          (kill-buffer pdf-buffer))
+        (when (buffer-live-p text-buffer)
+          (kill-buffer text-buffer))))))
+
+(ert-deftest english-reading-mode-pdf-continuous-position-follows-highlight ()
+  (let ((english-reading-mode--pdf-page 2)
+        (english-reading-mode--pdf-page-ranges
+         [(1 . 100) (101 . 201)]))
+    (cl-letf (((symbol-function 'english-reading-mode--pdf-bbox-page)
+               (lambda (_page) '(:height 1000.0)))
+              ;; Exact bbox order is deliberately unrelated to source order.
+              ((symbol-function
+                'english-reading-mode--pdf-context-rectangles)
+               (lambda (_context)
+                 '((:height 1000.0) ((10.0 100.0 100.0 120.0))))))
+      (should
+       (equal (english-reading-mode--pdf-continuous-position '(:beg 151))
+              '((:height 1000.0) (10.0 100.0 100.0 120.0)))))))
+
+(ert-deftest english-reading-mode-pdf-roll-target-keeps-boundary-continuous ()
+  (let ((pdf-roll-vertical-margin 2))
+    (cl-letf (((symbol-function 'english-reading-mode--pdf-page-count)
+               (lambda () 5))
+              ((symbol-function 'pdf-roll-display-page)
+               (lambda (_page _window) 1000)))
+      ;; The first line on page 4 is shown at 20% while page 3's bottom remains
+      ;; above it; a later line naturally advances the top page to page 4.
+      (should (equal (english-reading-mode--pdf-roll-target-position
+                      4 100 200 'test-window)
+                     '(3 900)))
+      (should (equal (english-reading-mode--pdf-roll-target-position
+                      4 300 200 'test-window)
+                     '(4 100))))))
+
+(ert-deftest english-reading-mode-pdf-roll-set-position-uses-window-property ()
+  (let (calls)
+    (cl-letf (((symbol-function 'image-mode-window-put)
+               (lambda (property value window)
+                 (push (list 'put property value window) calls)))
+              ((symbol-function 'pdf-roll-display-pages)
+               (lambda (page window &rest _)
+                 (push (list 'display page window) calls)))
+              ((symbol-function 'pdf-roll-page-to-pos)
+               (lambda (page) (+ 100 page)))
+              ((symbol-function 'set-window-start)
+               (lambda (window position &optional noforce)
+                 (push (list 'start window position noforce) calls)))
+              ((symbol-function 'pdf-roll-set-vscroll)
+               (lambda (vscroll window)
+                 (push (list 'vscroll vscroll window) calls)))
+              ((symbol-function 'force-window-update)
+               (lambda (window) (push (list 'force window) calls))))
+      (english-reading-mode--pdf-roll-set-position 4 275 'test-window))
+    (should
+     (equal (reverse calls)
+            '((put page 4 test-window)
+              (display 4 test-window)
+              (start test-window 104 t)
+              (vscroll 275 test-window)
+              (force test-window))))))
+
+(ert-deftest english-reading-mode-pdf-roll-rejects-regression-and-stale-context ()
+  (let ((english-reading-mode--continuous-state
+         '(:pdf-roll-page 3 :pdf-roll-pixel 700 :pdf-roll-source-beg 200))
+        applied)
+    (cl-letf (((symbol-function
+                'english-reading-mode--pdf-roll-target-position)
+               (lambda (_page spoken-pixel _anchor _window)
+                 (list 3 spoken-pixel)))
+              ((symbol-function
+                'english-reading-mode--pdf-roll-set-position)
+               (lambda (&rest arguments) (push arguments applied))))
+      ;; A later text chunk whose PDF rectangle is above the last rectangle
+      ;; must not pull the viewport backward.
+      (should-not
+       (english-reading-mode--pdf-roll-position-spoken
+        3 650 0 220 'test-window))
+      ;; Nor may a delayed callback move forward after its text position has
+      ;; already been superseded.
+      (should-not
+       (english-reading-mode--pdf-roll-position-spoken
+        3 800 0 180 'test-window))
+      (should-not applied)
+      ;; A genuinely later canonical position is applied exactly once.
+      (should
+       (equal (english-reading-mode--pdf-roll-position-spoken
+               3 800 0 220 'test-window)
+              '(3 800)))
+      (should (equal applied '((3 800 test-window)))))))
+
+(ert-deftest english-reading-mode-pdf-continuous-never-scrolls-backward ()
+  (save-window-excursion
+    (let ((pdf-buffer (generate-new-buffer " *continuous-pdf-forward-only*"))
+          (text-buffer (generate-new-buffer
+                        " *continuous-pdf-forward-only-text*"))
+          backward-scroll)
+      (unwind-protect
+          (progn
+            (switch-to-buffer pdf-buffer)
+            (setq-local major-mode 'pdf-view-mode)
+            (setq-local buffer-file-name "/tmp/continuous-forward-only.pdf")
+            (setq-local pdf-view-roll-minor-mode t)
+            (setq-local english-reading-mode--pdf-page 3)
+            (setq-local english-reading-mode--pdf-text-buffer text-buffer)
+            (let ((english-reading-mode--continuous-state
+                   (list :buffer pdf-buffer)))
+              (cl-letf (((symbol-function
+                          'english-reading-mode--pdf-continuous-position)
+                         (lambda (_context)
+                           '((:height 1000.0)
+                             (0.0 50.0 0.0 50.0))))
+                        ((symbol-function 'pdf-view-current-page)
+                         (lambda (&optional _window) 3))
+                        ((symbol-function 'pdf-roll-display-page)
+                         (lambda (&rest _) 1000))
+                        ((symbol-function 'pdf-roll-scroll-forward)
+                         (lambda (&rest _) (error "unexpected forward scroll")))
+                        ((symbol-function 'pdf-roll-scroll-backward)
+                         (lambda (&rest arguments)
+                           (setq backward-scroll arguments)))
+                        ((symbol-function 'window-vscroll)
+                         (lambda (&optional _window _pixels) 0))
+                        ((symbol-function 'window-inside-pixel-edges)
+                         (lambda (&optional _window) '(0 0 500 800))))
+                (english-reading-mode--pdf-center-continuous-speech
+                 (list :window (selected-window)
+                       :buffer text-buffer
+                       :text "Already above the anchor."
+                       :beg 1 :end 26))))
+            (should-not backward-scroll))
         (when (buffer-live-p pdf-buffer)
           (kill-buffer pdf-buffer))
         (when (buffer-live-p text-buffer)

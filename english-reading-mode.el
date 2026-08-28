@@ -1285,21 +1285,24 @@ edges."
 (defun english-reading-mode--pdf-continuous-position (context)
   "Return page geometry and a vertical position for speech CONTEXT.
 
-Prefer exact positioned-word matching.  If PDF text extraction represents
-math or punctuation differently, estimate the vertical position from CONTEXT's
-relative source-text position so zoom correction never keeps a stale scroll."
-  (or (when-let ((match
-                  (english-reading-mode--pdf-context-rectangles context)))
-        (list (car match) (car (cadr match))))
-      (let* ((geometry
-              (english-reading-mode--pdf-bbox-page
-               english-reading-mode--pdf-page))
-             (page-range
-              (english-reading-mode--pdf-page-range
-               english-reading-mode--pdf-page))
-             (span (and page-range
-                        (max 1 (- (cdr page-range) (car page-range)))))
-             (source-beg (plist-get context :beg)))
+Prefer the exact rectangle used by the speech highlight, so scrolling places
+that visible rectangle at the configured screen position.  Fall back to
+CONTEXT's relative source-text position only when PDF word matching fails."
+  (let* ((page-range
+          (and (integerp english-reading-mode--pdf-page)
+               (english-reading-mode--pdf-page-range
+                english-reading-mode--pdf-page)))
+         (span (and page-range
+                    (max 1 (- (cdr page-range) (car page-range)))))
+         (source-beg (plist-get context :beg))
+         (geometry
+          (and page-range
+               (numberp source-beg)
+               (english-reading-mode--pdf-bbox-page
+                english-reading-mode--pdf-page))))
+    (or (when-let ((match
+                    (english-reading-mode--pdf-context-rectangles context)))
+          (list (car match) (car (cadr match))))
         (when (and geometry page-range (numberp source-beg))
           (let* ((ratio
                   (max 0.0
@@ -1308,24 +1311,78 @@ relative source-text position so zoom correction never keeps a stale scroll."
                  (y (* ratio (plist-get geometry :height))))
             (list geometry (list 0.0 y 0.0 y)))))))
 
-(defun english-reading-mode--pdf-roll-spoken-window-pixel
-    (page spoken-pixel window)
-  "Return PAGE's SPOKEN-PIXEL position inside roll-mode WINDOW.
+(defun english-reading-mode--pdf-roll-set-position (page vscroll window)
+  "Atomically show PAGE at VSCROLL in roll-mode WINDOW."
+  ;; `pdf-view-current-page' is a macro whose SETF expansion is unavailable
+  ;; when this file is reloaded before pdf-macs.  Write the underlying
+  ;; image-mode window property directly, as pdf-roll does for vscroll.
+  (image-mode-window-put 'page page window)
+  (pdf-roll-display-pages page window)
+  (set-window-start window (pdf-roll-page-to-pos page) t)
+  (pdf-roll-set-vscroll vscroll window)
+  (force-window-update window))
 
-The result is measured from the top of the visible viewport.  Return nil when
-PAGE precedes the topmost visible page, so the caller can re-establish an
-absolute page position before measuring again."
-  (let ((top-page (and (fboundp 'pdf-view-current-page)
-                       (pdf-view-current-page window))))
-    (when (and (integerp top-page) (<= top-page page))
-      (let ((margin (if (boundp 'pdf-roll-vertical-margin)
-                        pdf-roll-vertical-margin
-                      0)))
-        (- (+ spoken-pixel
-              (cl-loop for visible-page from top-page below page
-                       sum (+ (pdf-roll-display-page visible-page window)
-                              margin)))
-           (window-vscroll window t))))))
+(defun english-reading-mode--pdf-roll-target-position
+    (page spoken-pixel anchor-pixel window)
+  "Return roll page and vscroll placing speech at ANCHOR-PIXEL.
+
+PAGE and SPOKEN-PIXEL identify the highlighted speech rectangle.  Normalize
+the result across page boundaries so the bottom of the preceding page remains
+visible while speech near the next page's head reaches the configured anchor."
+  (let* ((target-page page)
+         (offset (- spoken-pixel anchor-pixel))
+         (page-count (english-reading-mode--pdf-page-count))
+         (margin (if (boundp 'pdf-roll-vertical-margin)
+                     pdf-roll-vertical-margin
+                   0)))
+    (while (and (< offset 0) (> target-page 1))
+      (setq target-page (1- target-page)
+            offset (+ offset
+                      (pdf-roll-display-page target-page window)
+                      margin)))
+    (let ((page-height (pdf-roll-display-page target-page window)))
+      (while (and (< target-page page-count)
+                  (>= offset (+ page-height margin)))
+        (setq offset (- offset page-height margin)
+              target-page (1+ target-page)
+              page-height (pdf-roll-display-page target-page window)))
+      (list target-page
+            (min (max 0 (round offset)) (max 0 (1- page-height)))))))
+
+(defun english-reading-mode--pdf-roll-position-spoken
+    (page spoken-pixel anchor-pixel source-beg window)
+  "Move forward so PAGE's SPOKEN-PIXEL appears at ANCHOR-PIXEL in WINDOW.
+
+SOURCE-BEG identifies the ordered speech context.  Compare against the last
+canonical roll position stored in the continuous-reading state rather than
+`pdf-view-current-page', whose meaning changes while roll mode normalizes a
+page boundary.  Return the applied canonical position, or nil when the PDF
+rectangle or callback moves backward."
+  (pcase-let* ((`(,target-page ,target-vscroll)
+                (english-reading-mode--pdf-roll-target-position
+                 page spoken-pixel anchor-pixel window))
+               (last-page
+                (plist-get english-reading-mode--continuous-state
+                           :pdf-roll-page))
+               (last-vscroll
+                (plist-get english-reading-mode--continuous-state
+                           :pdf-roll-pixel))
+               (last-source-beg
+                (plist-get english-reading-mode--continuous-state
+                           :pdf-roll-source-beg)))
+    (when (and (or (not (numberp last-source-beg))
+                   (>= source-beg last-source-beg))
+               (or (not (integerp last-page))
+                   (> target-page last-page)
+                   (and (= target-page last-page)
+                        (or (not (numberp last-vscroll))
+                            (> target-vscroll last-vscroll)))))
+      ;; Always restore the canonical window start together with its vscroll.
+      ;; Updating only vscroll lets pdf-roll reinterpret the same viewport as
+      ;; the next page and produces an apparent jump on the following chunk.
+      (english-reading-mode--pdf-roll-set-position
+       target-page target-vscroll window)
+      (list target-page target-vscroll))))
 
 (defun english-reading-mode--pdf-center-continuous-speech (context)
   "Position PDF speech CONTEXT while preserving continuous-page scrolling."
@@ -1351,14 +1408,14 @@ absolute page position before measuring again."
                                (> (plist-get geometry :height) 0)
                                (> viewport-height 0))
                       (if (and (bound-and-true-p pdf-view-roll-minor-mode)
-                               (fboundp 'pdf-roll-goto-page)
                                (fboundp 'pdf-roll-display-page)
-                               (fboundp 'pdf-roll-scroll-forward)
-                               (fboundp 'pdf-roll-scroll-backward))
-                          ;; Re-measure the spoken line against the live roll
-                          ;; viewport for every utterance.  Relative-only motion
-                          ;; accumulates page-margin and vscroll errors and lets
-                          ;; the anchor drift away from its configured position.
+                               (fboundp 'pdf-roll-display-pages)
+                               (fboundp 'pdf-roll-page-to-pos)
+                               (fboundp 'pdf-roll-set-vscroll))
+                          ;; Recompute an absolute roll position from the exact
+                          ;; highlight rectangle for every utterance.  This
+                          ;; prevents estimated relative deltas from drifting
+                          ;; away from the configured screen anchor.
                           (let* ((page english-reading-mode--pdf-page)
                                  (page-height
                                   (pdf-roll-display-page page window))
@@ -1368,31 +1425,23 @@ absolute page position before measuring again."
                                  (spoken-pixel
                                   (round (* (/ spoken-y
                                                (plist-get geometry :height))
-                                            page-height)))
-                                 (actual-pixel
-                                  (english-reading-mode--pdf-roll-spoken-window-pixel
-                                   page spoken-pixel window)))
-                            (unless (numberp actual-pixel)
-                              (pdf-roll-goto-page page window)
-                              (setq actual-pixel
-                                    (english-reading-mode--pdf-roll-spoken-window-pixel
-                                     page spoken-pixel window)))
-                            (when (numberp actual-pixel)
-                              (let ((delta
-                                     (round
-                                      (- actual-pixel
-                                         (english-reading-mode--pdf-speech-anchor-pixel
-                                          viewport-height)))))
-                                (if (>= delta 0)
-                                    (pdf-roll-scroll-forward delta window t)
-                                  (pdf-roll-scroll-backward
-                                   (- delta) window t))))
-                            (setq english-reading-mode--continuous-state
-                                  (plist-put
-                                   (plist-put
-                                    english-reading-mode--continuous-state
-                                    :pdf-roll-page page)
-                                   :pdf-roll-pixel spoken-pixel)))
+                                            page-height))))
+                            (when-let ((applied
+                                       (english-reading-mode--pdf-roll-position-spoken
+                                        page spoken-pixel
+                                        (english-reading-mode--pdf-speech-anchor-pixel
+                                         viewport-height)
+                                        (plist-get context :beg)
+                                        window)))
+                              (setq english-reading-mode--continuous-state
+                                    (plist-put
+                                     (plist-put
+                                      (plist-put
+                                       english-reading-mode--continuous-state
+                                       :pdf-roll-page (car applied))
+                                      :pdf-roll-pixel (cadr applied))
+                                     :pdf-roll-source-beg
+                                     (plist-get context :beg)))))
                         (let ((full-image-height
                                (cdr (pdf-view-image-size nil window)))
                               (displayed-image-height
@@ -1431,6 +1480,9 @@ absolute page position before measuring again."
            (plist-put english-reading-mode--continuous-state
                       :pdf-roll-page nil)
            :pdf-roll-pixel nil))
+    (setq english-reading-mode--continuous-state
+          (plist-put english-reading-mode--continuous-state
+                     :pdf-roll-source-beg nil))
     (english-reading-mode--pdf-center-continuous-speech
      english-reading-mode--active-speech)
     (english-reading-mode--schedule-pdf-highlight
