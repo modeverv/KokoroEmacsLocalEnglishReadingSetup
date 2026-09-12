@@ -204,6 +204,14 @@ WAVと日本語の`AVSpeechSynthesizer`音声を同じ順序付きキューで�
 日本語を含むEPUB・PDF・TEXT・ローカルHTMLはmacOS音声へ自動的に切り替わり、既定では
 `Kyoko`を毎分540語で使います。英語のKokoro設定と速度は変更しません。
 
+GitHubなど、サイトの言語とREADME本文の言語が異なるときは、EWW本文で
+`M-x my-read-use-japanese-speech`を実行すると日本語音声に固定できます。
+実行時に再生と先読みを停止するので、`SPC`または`s`で再開してください。
+指定は同じバッファ内のページ移動・再描画でも維持され、閉じるまで有効です。
+`M-x my-read-use-auto-speech`で自動判定へ戻せます。
+`M-x my-read-set-speech-language`では`ja`・`en`・`auto`を選べます。
+TEXT・EPUBの本文でも同じコマンドを利用できます。
+
 `M-x my-read-change-speed` で日本語の読み上げ速度を変更できます。
 ミニバッファに `400` などの正の整数を入力して `RET` を押すと、
 開いている日本語の読書バッファと、以後開く文書に反映されます。

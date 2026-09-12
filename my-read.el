@@ -1142,17 +1142,58 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
       (goto-char (point-min))
       (re-search-forward "[ぁ-んァ-ヶ一-龠々]" nil t))))
 
+(defvar-local my/read-speech-language-override nil
+  "Manual speech language for this buffer: nil (automatic), ja, or en.
+The override lasts until changed or the buffer is closed, including EWW
+navigation and redisplay in the same buffer.")
+
 (defun my/read--configure-speech-language ()
-  "Configure speech for the language of the current reading-text buffer."
-  (if (my/read--buffer-contains-japanese-p)
+  "Configure speech, preferring the buffer's explicit language selection."
+  (if (or (eq my/read-speech-language-override 'ja)
+          (and (null my/read-speech-language-override)
+               (my/read--buffer-contains-japanese-p)))
       (setq-local my/read-source-language "ja"
                   kokoro-reader-backend 'macos
                   kokoro-reader-macos-voice my/read-japanese-macos-voice
                   kokoro-reader-macos-rate my/read-japanese-macos-rate)
     (setq-local my/read-source-language "en")
-    (kill-local-variable 'kokoro-reader-backend)
+    (if (eq my/read-speech-language-override 'en)
+        (setq-local kokoro-reader-backend 'kokoro)
+      (kill-local-variable 'kokoro-reader-backend))
     (kill-local-variable 'kokoro-reader-macos-voice)
     (kill-local-variable 'kokoro-reader-macos-rate)))
+
+(defun my-read-set-speech-language (language)
+  "Set the current EWW/TEXT/EPUB reading buffer's speech LANGUAGE.
+LANGUAGE is ja, en, or nil for automatic detection.  Stop current playback
+and discard prefetched audio; press SPC or s to resume at the current point.
+The selection survives EWW navigation in this buffer, until reset or closed."
+  (interactive
+   (list (pcase (completing-read "読み上げ言語: " '("ja" "en" "auto") nil t)
+           ("ja" 'ja) ("en" 'en) (_ nil))))
+  (unless (memq language '(nil ja en))
+    (user-error "言語は ja、en、または nil を指定してください"))
+  (unless (and (my/read--center-window-active-p)
+               (or (derived-mode-p 'eww-mode 'nov-mode)
+                   (my/read--text-file-buffer-p)))
+    (user-error "my-readのEWW・TEXT・EPUB本文で実行してください"))
+  (english-reading-mode-stop-continuous)
+  (setq-local my/read-speech-language-override language)
+  (my/read--configure-speech-language)
+  (when (derived-mode-p 'eww-mode)
+    (add-hook 'eww-after-render-hook #'my/read--configure-speech-language nil t))
+  (message "読み上げ言語: %s（SPC または s で再開）"
+           (pcase language ('ja "日本語") ('en "英語") (_ "自動判定"))))
+
+(defun my-read-use-japanese-speech ()
+  "Read this my-read EWW/TEXT/EPUB buffer using Japanese macOS speech."
+  (interactive)
+  (my-read-set-speech-language 'ja))
+
+(defun my-read-use-auto-speech ()
+  "Restore automatic language detection for this reading buffer."
+  (interactive)
+  (my-read-set-speech-language nil))
 
 (add-hook 'english-reading-mode-pdf-text-buffer-hook
           #'my/read--configure-speech-language)
