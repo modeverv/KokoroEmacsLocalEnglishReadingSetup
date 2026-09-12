@@ -48,7 +48,7 @@
   :group 'my-read)
 
 (defcustom my/read-position-save-delay 1.0
-  "Idle seconds before saving the current PDF or EPUB position."
+  "Idle seconds before saving the current PDF, EPUB, or text position."
   :type 'number
   :group 'my-read)
 
@@ -543,19 +543,51 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
   (my/read-window 'my-reading-dired-window frame))
 
 (defun my/read-position-file ()
-  "Return the persistent PDF/EPUB position file."
+  "Return the persistent PDF/EPUB/text position file."
   (expand-file-name my/read-position-file-name my/read-position-directory))
+
+(defvar-local my/read-position--eww-file nil
+  "Local file belonging to the fully rendered EWW document, or nil.")
+
+(defun my/read-position--eww-before-render (&rest _)
+  "Save the old EWW document before its rendered contents are replaced."
+  (when my/read-position--eww-file
+    (my/read-position--save-buffer-now)
+    (setq my/read-position--eww-file nil
+          my/read-position--restored-p nil)))
+
+(defun my/read-position--eww-after-render ()
+  "Restore a local EWW document only after rendering has completed."
+  (when (and (derived-mode-p 'eww-mode)
+             (frame-live-p my/read-center-tab-frame)
+             (not my/read-eww-history-page-p))
+    (let* ((url (plist-get eww-data :url))
+           (parsed (and (stringp url) (url-generic-parse-url url))))
+      (setq my/read-position--eww-file
+            (when (and parsed (equal (url-type parsed) "file")
+                       (member (url-host parsed) '(nil "" "localhost")))
+              (decode-coding-string
+               (url-unhex-string (url-filename parsed)) 'utf-8))
+            my/read-position--restored-p nil)
+      (when my/read-position--eww-file
+        (my/read-position-setup-buffer (current-buffer) my/read-center-tab-frame)))))
+
+(with-eval-after-load 'eww
+  (advice-add 'eww-setup-buffer :before #'my/read-position--eww-before-render))
 
 (defun my/read-position--source-type ()
   "Return the persistent source type for the current buffer."
   (cond
    ((derived-mode-p 'pdf-view-mode) 'pdf)
-   ((derived-mode-p 'nov-mode) 'epub)))
+   ((derived-mode-p 'nov-mode) 'epub)
+   ((and (derived-mode-p 'eww-mode) my/read-position--eww-file) 'html)
+   ((my/read--text-file-buffer-p) 'text)))
 
 (defun my/read-position--source-file ()
   "Return a stable absolute source file for the current buffer."
   (when-let ((file (and (my/read-position--source-type)
-                        (or (and (boundp 'nov-file-name) nov-file-name)
+                        (or my/read-position--eww-file
+                            (and (boundp 'nov-file-name) nov-file-name)
                             buffer-file-name))))
     (condition-case nil
         (file-truename file)
@@ -606,7 +638,7 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
     (unwind-protect
         (progn
           (with-temp-buffer
-            (insert ";;; my-read PDF/EPUB positions -*- mode: emacs-lisp; -*-\n")
+            (insert ";;; my-read PDF/EPUB/text positions -*- mode: emacs-lisp; -*-\n")
             (let ((print-length nil)
                   (print-level nil))
               (prin1 data (current-buffer)))
@@ -619,7 +651,7 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
         (delete-file temp)))))
 
 (defun my/read-position--snapshot (&optional window)
-  "Return the current PDF or EPUB position, using WINDOW when available."
+  "Return the current PDF, EPUB, or text position, using WINDOW when available."
   (pcase (my/read-position--source-type)
     ('pdf
      (let ((record
@@ -633,12 +665,17 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
          (setq record
                (plist-put record :vscroll (window-vscroll window t))))
        record))
-    ('epub
+    ((or 'epub 'text 'html)
      (let* ((visible (and (window-live-p window)
                           (eq (window-buffer window) (current-buffer))))
-            (position (if visible (window-point window) (point)))
+            (speech english-reading-mode--active-speech)
+            (position (if (and (memq (my/read-position--source-type) '(text html))
+                               (eq (plist-get speech :buffer) (current-buffer))
+                               (integerp (plist-get speech :beg)))
+                          (plist-get speech :beg)
+                        (if visible (window-point window) (point))))
             (record
-             (list :type 'epub
+             (list :type (my/read-position--source-type)
                    :document (and (boundp 'nov-documents-index)
                                   nov-documents-index)
                    :point position)))
@@ -658,7 +695,7 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
     (plist-put record :updated (float-time))))
 
 (defun my/read-position-save-buffer (buffer &optional window)
-  "Persist BUFFER's current PDF or EPUB position, optionally using WINDOW."
+  "Persist BUFFER's current PDF, EPUB, or text position, optionally using WINDOW."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (when-let* ((key (and (not my/read-position--restoring-p)
@@ -745,11 +782,44 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
       (when (integerp start)
         (set-window-start window (my/read-position--clamp start) t)))))
 
+(defun my/read-position--restore-text (record window)
+  "Restore the saved text point and viewport from RECORD in WINDOW."
+  (with-selected-window window
+    (when (integerp (plist-get record :point))
+      (goto-char (my/read-position--clamp (plist-get record :point)))
+      (set-window-point window (point))
+      (when (derived-mode-p 'org-mode)
+        (org-fold-show-context 'lineage)))
+    (when (integerp (plist-get record :window-start))
+      (set-window-start window
+                        (my/read-position--clamp
+                         (plist-get record :window-start)) t))))
+
+(defun my/read-position--speech-start (context)
+  "Save a text source's spoken position even without keyboard activity."
+  (let ((buffer (plist-get context :buffer))
+        (frame (plist-get context :frame))
+        (window (plist-get context :window)))
+    (when (and (buffer-live-p buffer)
+               (frame-live-p frame)
+               (my/read-frame-p frame)
+               (my/read--center-source-window-p window frame))
+      (with-current-buffer buffer
+        (when (memq (my/read-position--source-type) '(text html))
+          (let ((english-reading-mode--active-speech context))
+            (my/read-position-save-buffer buffer window)))))))
+
+(add-hook 'english-reading-mode-speech-start-hook
+          #'my/read-position--speech-start)
+
 (defun my/read-position-restore-buffer (buffer frame)
   "Restore BUFFER's saved position in FRAME once."
   (when (and (buffer-live-p buffer) (frame-live-p frame))
     (with-current-buffer buffer
-      (unless my/read-position--restored-p
+      (unless (or my/read-position--restored-p
+                  (and (memq (my/read-position--source-type) '(text html))
+                       (not (eq buffer (window-buffer
+                                        (my/read-center-window frame))))))
         (setq my/read-position--restored-p t)
         (when-let* ((key (my/read-position--source-file))
                     (window (my/read-center-window frame)))
@@ -761,7 +831,8 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
                 (let ((my/read-position--restoring-p t))
                   (pcase (my/read-position--source-type)
                     ('pdf (my/read-position--restore-pdf record window))
-                    ('epub (my/read-position--restore-epub record window))))))))))))
+                    ('epub (my/read-position--restore-epub record window))
+                    ((or 'text 'html) (my/read-position--restore-text record window))))))))))))
 
 (defun my/read-position-setup-buffer (buffer frame)
   "Enable persistent position tracking for BUFFER in FRAME."
@@ -773,7 +844,7 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
         (my/read-position-restore-buffer buffer frame)))))
 
 (defun my/read-position-save-frame (frame)
-  "Persist PDF and EPUB positions belonging to FRAME."
+  "Persist PDF, EPUB, and text positions belonging to FRAME."
   (when (framep frame)
     (let ((window (and (frame-live-p frame) (my/read-center-window frame))))
       (dolist (buffer
@@ -781,6 +852,8 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
                 (delq nil
                       (list (frame-parameter frame 'my-reading-epub-buffer)
                             (frame-parameter frame 'my-reading-pdf-buffer)
+                            (frame-parameter frame 'my-reading-text-buffer)
+                            (frame-parameter frame 'my-reading-eww-buffer)
                             (and (window-live-p window)
                                  (window-buffer window))))))
         (my/read-position-save-buffer
@@ -812,6 +885,7 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
                       my-reading-kindle-buffer
                       my-reading-pdf-buffer
                       my-reading-epub-buffer
+                      my-reading-text-buffer
                       my-reading-eww-buffer))))))
 
 (defun my/read-center-tab-name (buffer &optional _buffers)
@@ -833,6 +907,9 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
      ((and (frame-live-p frame)
            (eq buffer (frame-parameter frame 'my-reading-eww-buffer)))
       " EWW ")
+     ((and (frame-live-p frame)
+           (eq buffer (frame-parameter frame 'my-reading-text-buffer)))
+      " TEXT ")
      (t (format " %s " (buffer-name buffer))))))
 
 (defun my/read--center-automatic-lookup-p (window)
@@ -856,7 +933,8 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
                       my-reading-pdf-buffer
                       my-reading-epub-buffer
                       my-reading-eww-buffer
-                      my-reading-dired-buffer))))))
+                      my-reading-dired-buffer
+                      my-reading-text-buffer))))))
 
 (defun my/read--center-source-window-p (window frame)
   "Return non-nil when WINDOW displays a registered source in FRAME."
@@ -924,6 +1002,38 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
     (my/read-lookup-follow-post-command)
     (my/read-translate-follow-post-command)
     (message "PDFを閉じました")))
+
+(defun my/read--filter-eww-close-key-binding (binding)
+  "Return BINDING only in the active my-read EWW reading pane."
+  (when (and (my/read--center-window-active-p) (derived-mode-p 'eww-mode))
+    binding))
+
+(defun my/read-close-eww ()
+  "Close the displayed EWW page while keeping the my-read workspace open."
+  (interactive)
+  (unless (and (my/read--center-window-active-p) (derived-mode-p 'eww-mode))
+    (user-error "my-readのEWWペインで実行してください"))
+  (let* ((frame (selected-frame))
+         (center (my/read-center-window frame))
+         (page (current-buffer))
+         (dired (frame-parameter frame 'my-reading-dired-buffer))
+         (notes (my/read-note-window frame)))
+    (unless (buffer-live-p dired)
+      (user-error "my-readのDIREDタブが見つかりません"))
+    (my/read-position-save-buffer page center)
+    (english-reading-mode-stop-continuous)
+    ;; Org-noter must not own either visible window during its teardown.
+    (when (window-live-p notes)
+      (set-window-buffer notes (my/read--prepare-notes-buffer frame)))
+    (set-window-buffer center dired)
+    (select-window center)
+    (my/read-org-noter-close-source page)
+    (when (buffer-live-p page) (kill-buffer page))
+    (set-frame-parameter frame 'my-reading-eww-buffer nil)
+    (my/read--configure-center-tab-buffer (my/read--prepare-eww-buffer frame) frame)
+    (my/read-lookup-follow-post-command)
+    (my/read-translate-follow-post-command)
+    (message "EWWのページを閉じました")))
 
 (defun my/read-next-word ()
   "Move point to the beginning of the next word in the reading pane."
@@ -1011,6 +1121,10 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
 (keymap-set my-read-center-tab-mode-map "l"
             '(menu-item "Previous word" my/read-previous-word
                         :filter my/read--filter-center-key-binding))
+
+(keymap-set my-read-center-tab-mode-map "C-x C-k"
+            '(menu-item "Close my-read EWW page" my/read-close-eww
+                        :filter my/read--filter-eww-close-key-binding))
 
 (define-minor-mode my-read-center-tab-mode
   "Display the my-read center sources as a dedicated tab line."
@@ -1130,6 +1244,13 @@ overlay; preserve the current page across that repair."
               (pdf-view-mode)
               (pdf-view-goto-page page))))))))
 
+(defun my/read--text-file-buffer-p ()
+  "Return non-nil for a prose file, including Markdown, Org, and plain text.
+Require a visiting file so temporary notes and capture buffers stay editable."
+  (and buffer-file-name
+       (derived-mode-p 'text-mode)
+       (not (derived-mode-p 'nov-mode))))
+
 (defun my/read--configure-center-tab-buffer (buffer frame)
   "Configure BUFFER as one of FRAME's center reading tabs."
   (when (buffer-live-p buffer)
@@ -1142,9 +1263,11 @@ overlay; preserve the current page across that repair."
       (setq-local tab-line-tab-name-function #'my/read-center-tab-name)
       (setq-local tab-line-close-button-show nil)
       (setq-local tab-line-new-button-show nil)
-      (when (derived-mode-p 'nov-mode)
+      (when (or (derived-mode-p 'nov-mode)
+                (my/read--text-file-buffer-p))
         (my/read--configure-speech-language))
-      (when (derived-mode-p 'nov-mode 'eww-mode 'doc-view-mode 'pdf-view-mode)
+      (when (or (derived-mode-p 'nov-mode 'eww-mode 'doc-view-mode 'pdf-view-mode)
+                (my/read--text-file-buffer-p))
         (english-reading-mode 1))
       (my/read--enable-pdf-continuous-scroll buffer frame)
       (my/read-position-setup-buffer buffer frame)
@@ -1178,10 +1301,36 @@ overlay; preserve the current page across that repair."
     (when (fboundp 'my/read-org-noter-follow-source)
       (my/read-org-noter-follow-source frame))))
 
+(defun my/read--local-html-file ()
+  "Return the local HTML file visited by the current source buffer."
+  (and buffer-file-name
+       (not (file-remote-p buffer-file-name))
+       (member (downcase (or (file-name-extension buffer-file-name) ""))
+               '("html" "htm" "xhtml"))
+       buffer-file-name))
+
+(defun my/read--open-html-in-eww (file frame)
+  "Render local HTML FILE in FRAME's EWW reading tab."
+  (let ((buffer (frame-parameter frame 'my-reading-eww-buffer)))
+    (unless (buffer-live-p buffer)
+      (setq buffer (my/read--prepare-eww-buffer frame)))
+    (with-selected-window (my/read-center-window frame)
+      (switch-to-buffer buffer)
+      (my/read--configure-center-tab-buffer buffer frame)
+      (add-hook 'eww-after-render-hook
+                #'my/read-position--eww-after-render nil t)
+      (add-hook 'eww-after-render-hook
+                #'my/read--configure-speech-language nil t)
+      (eww-open-file file))
+    buffer))
+
 (defun my/read--track-center-tab-buffer (frame)
   "Remember a newly displayed center buffer in FRAME by source type."
   (when (and (frame-live-p frame) (my/read-frame-p frame))
     (when-let ((window (my/read-center-window frame)))
+      (when-let ((file (with-current-buffer (window-buffer window)
+                        (my/read--local-html-file))))
+        (my/read--open-html-in-eww file frame))
       (let* ((buffer (window-buffer window))
              (kindle (frame-parameter frame 'my-reading-kindle-buffer))
              (parameter
@@ -1195,7 +1344,9 @@ overlay; preserve the current page across that repair."
                    ((derived-mode-p 'doc-view-mode 'pdf-view-mode)
                     'my-reading-pdf-buffer)
                    ((derived-mode-p 'dired-mode)
-                    'my-reading-dired-buffer))))))
+                    'my-reading-dired-buffer)
+                   ((my/read--text-file-buffer-p)
+                    'my-reading-text-buffer))))))
         (when parameter
           (set-frame-parameter frame parameter buffer)
           (my/read--configure-center-tab-buffer buffer frame)
@@ -2675,6 +2826,7 @@ When KINDLE-BUFFER is live, expose it with the center document tabs."
            ;; Two columns: reading on the left, three utilities on the right.
            (note-window (split-window-right))
            epub-buffer
+           text-buffer
            pdf-buffer
            dired-buffer
            eww-buffer
@@ -2743,6 +2895,11 @@ When KINDLE-BUFFER is live, expose it with the center document tabs."
          ((or (derived-mode-p 'pdf-view-mode 'doc-view-mode)
               (string-match-p "\\.pdf\\'" book-path))
           (setq pdf-buffer (current-buffer)))
+         ((my/read--local-html-file)
+          (setq eww-buffer
+                (my/read--open-html-in-eww (my/read--local-html-file) frame)))
+         ((my/read--text-file-buffer-p)
+          (setq text-buffer (current-buffer)))
          (t
           (setq epub-buffer (current-buffer))))
         (unless (buffer-live-p dired-buffer)
@@ -2761,16 +2918,22 @@ When KINDLE-BUFFER is live, expose it with the center document tabs."
       (unless (buffer-live-p epub-buffer)
         (setq epub-buffer
               (my/read--prepare-center-tab-placeholder frame 'epub)))
+      (unless (buffer-live-p text-buffer)
+        (setq text-buffer
+              (my/read--prepare-center-tab-placeholder frame 'text)))
       (set-frame-parameter frame 'my-reading-kindle-buffer kindle-buffer)
       (set-frame-parameter frame 'my-reading-epub-buffer epub-buffer)
       (set-frame-parameter frame 'my-reading-pdf-buffer pdf-buffer)
       (set-frame-parameter frame 'my-reading-dired-buffer dired-buffer)
-      (dolist (buffer (list kindle-buffer pdf-buffer epub-buffer dired-buffer))
+      (set-frame-parameter frame 'my-reading-text-buffer text-buffer)
+      (dolist (buffer (list kindle-buffer pdf-buffer epub-buffer dired-buffer
+                           text-buffer))
         (my/read--configure-center-tab-buffer buffer frame))
 
       ;; Keep an EWW buffer ready for arXiv without fetching the network until
       ;; the user opens the tab and presses `G'.
-      (setq eww-buffer (my/read--prepare-eww-buffer frame))
+      (unless (buffer-live-p eww-buffer)
+        (setq eww-buffer (my/read--prepare-eww-buffer frame)))
       (my/read--configure-center-tab-buffer eww-buffer frame)
 
       ;; DIRED is the leftmost and initially selected center tab.
@@ -2792,6 +2955,20 @@ When KINDLE-BUFFER is live, expose it with the center document tabs."
       ;; Kindle attaches asynchronously; EPUB/PDF can start immediately.
       (my/read-org-noter-follow-source frame))))
 
+(defun my-read-restart-japanese-speech ()
+  "Restart the resident speech engine and discard stale continuous playback."
+  (interactive)
+  ;; Kill first: a wedged bridge may not consume even its stop command.
+  ;; Detach its sentinel before creating the replacement process.
+  (let ((process kokoro-reader--macos-bridge-process))
+    (setq kokoro-reader--macos-bridge-process nil
+          kokoro-reader--macos-bridge-ready-p nil
+          kokoro-reader--macos-bridge-fragment "")
+    (when (process-live-p process)
+      (delete-process process)))
+  (english-reading-mode-stop-continuous)
+  (kokoro-reader--ensure-macos-bridge))
+
 ;;;###autoload
 (defun my-read ()
   "Open the unified Kindle.app, EPUB, and EWW reading workspace."
@@ -2799,6 +2976,7 @@ When KINDLE-BUFFER is live, expose it with the center document tabs."
   ;; Load lazily to avoid a load-time cycle: my-read-k2 requires my-read via
   ;; the shared my-read-k UI implementation.
   (require 'my-read-k2)
+  (my-read-restart-japanese-speech)
   (my-read-k2--open-unified-workspace))
 
 ;;;###autoload

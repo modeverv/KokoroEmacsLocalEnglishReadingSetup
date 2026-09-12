@@ -451,7 +451,7 @@ for selected-text notes and persistent highlights."
                           (point-max)))
           (skip-chars-forward " \t\n\r")
           (while (and (not location) (< (point) (point-max)))
-            (if-let ((bounds (bounds-of-thing-at-point 'sentence)))
+            (if-let ((bounds (english-reading-mode--sentence-bounds-at-point)))
                 (progn
                   (goto-char (car bounds))
                   (skip-chars-forward " \t\n\r" (cdr bounds))
@@ -1501,9 +1501,21 @@ rectangle or callback moves backward."
 (add-hook 'english-reading-mode-speech-finish-hook
           #'english-reading-mode--pdf-highlight-finish)
 
+(defun english-reading-mode--sentence-bounds-at-point ()
+  "Return speech bounds at point, including Markdown ATX headings.
+Markdown marks heading lines as paragraph separators, so Emacs returns no
+sentence there.  Treat the whole heading as a speech unit to keep navigation,
+continuous playback, and prefetch advancing through it."
+  (or (and (derived-mode-p 'markdown-mode)
+           (save-excursion
+             (beginning-of-line)
+             (when (looking-at "[ \t]*#+\\(?:[ \t]+\\|$\\)")
+               (cons (line-beginning-position) (line-end-position)))))
+      (bounds-of-thing-at-point 'sentence)))
+
 (defun english-reading-mode--sentence-bounds ()
   "Return the sentence at point, or signal a user error."
-  (or (bounds-of-thing-at-point 'sentence)
+  (or (english-reading-mode--sentence-bounds-at-point)
       (user-error "Place point in an English sentence")))
 
 (defun english-reading-mode--continuous-speech-buffer-owned-p (speech-buffer)
@@ -1557,7 +1569,7 @@ included.  LIMIT, when non-nil, prevents a PDF chunk from crossing its page."
         (while (and (> remaining 0) (< (point) boundary))
           (skip-chars-forward " \t\n\r" boundary)
           (if-let ((bounds (and (< (point) boundary)
-                               (bounds-of-thing-at-point 'sentence))))
+                               (english-reading-mode--sentence-bounds-at-point))))
               (let ((next-end (min (cdr bounds) boundary)))
                 (if (> next-end chunk-end)
                     (setq chunk-end next-end
@@ -1837,7 +1849,7 @@ state and timer prevents its completion hook from moving the PDF again."
    (t
     (english-reading-mode-next-sentence)
     (cond
-     ((bounds-of-thing-at-point 'sentence)
+     ((english-reading-mode--sentence-bounds-at-point)
       (english-reading-mode-speak-current-sentence))
      ((and (derived-mode-p 'nov-mode)
            (boundp 'nov-documents-index)
@@ -1869,7 +1881,7 @@ responsible for page/chapter boundaries when no sentence follows locally."
        ((eq source-buffer speech-buffer)
         (goto-char (min next-position (point-max)))
         (skip-chars-forward " \t\n\r")
-        (when (bounds-of-thing-at-point 'sentence)
+        (when (english-reading-mode--sentence-bounds-at-point)
           (english-reading-mode-speak-current-sentence)
           t))
        ((and (english-reading-mode--pdf-buffer-p source-buffer)
@@ -1938,7 +1950,7 @@ limited to one page so its cache key matches normal playback."
                 (goto-char (min (max scan-position (point-min)) (point-max)))
                 (skip-chars-forward " \t\n\r")
                 (setq bounds (and (< (point) (point-max))
-                                  (bounds-of-thing-at-point 'sentence)))
+                                  (english-reading-mode--sentence-bounds-at-point)))
                 (if (not bounds)
                     (goto-char (point-max))
                   (goto-char (car bounds))
@@ -2396,7 +2408,7 @@ through `english-reading-mode-speech-start-hook' and
         (add-hook 'post-command-hook
                   #'english-reading-mode--pdf-post-command nil t)
         (unless (or (derived-mode-p 'nov-mode 'eww-mode 'doc-view-mode
-                                    'pdf-view-mode)
+                                    'pdf-view-mode 'text-mode)
                     (bound-and-true-p my-read-k-mode))
           (message "english-reading-mode is designed for reader buffers")))
     (english-reading-mode--restore-sentence-setting)

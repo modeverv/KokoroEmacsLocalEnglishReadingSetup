@@ -1,15 +1,15 @@
 # Emacs 多言語Reader
 
-EmacsでPDF、EPUB、EWW、Kindle.appの本を読みながら、文単位の読み上げ、翻訳、
+EmacsでPDF、EPUB、Markdown・Org・TXT、HTML、Kindle.appの本を読みながら、文単位の読み上げ、翻訳、
 Lookup辞書、org-noterの読書メモを一つの専用フレームにまとめるプロジェクトです。
 
-PDFはPDF Tools、EPUBはnov.el、WebページはEWWを使います。Kindle本文はmacOS
+PDFはPDF Tools、EPUBはnov.el、WebページとローカルHTMLはEWW、テキスト文書は元のメジャーモードを使います。Kindle本文はmacOS
 Accessibilityから現在表示中のページだけを取得します。スクリーンショット取得、
 OCR、Kindleファイルの復号は行いません。
 
 専用フレームは、左の読書領域と右側の3段ペインで構成されます。
 
-- 左: タブで切り替えるDIRED、Kindle、PDF、EPUB、EWW
+- 左: タブで切り替えるDIRED、Kindle、PDF、EPUB、TEXT、EWW
 - 右上: 現在の資料に対応するorg-noterノート
 - 右中央: カーソル位置、または読み上げ中の1文の翻訳
 - 右下: カーソル位置の単語を自動検索するLookup
@@ -17,10 +17,27 @@ OCR、Kindleファイルの復号は行いません。
 ## 動作画面
 
 実際に動作中のmy-readフレームを撮影したものです。左側の
-`DIRED / KINDLE / PDF / EPUB / EWW`タブを切り替えても、右側は上から
+`DIRED / KINDLE / PDF / EPUB / TEXT / EWW`タブを切り替えても、右側は上から
 org-noter、文単位の翻訳、Lookupの3段構成を保ちます。
-EWW・PDF・EPUBは2026-09-12に再撮影しました。Kindleは今回の再接続が
-完了しなかったため、2026-08-28撮影の参考画像を掲載しています。
+TEXTとローカルHTMLは2026-09-13に、同梱サンプルを実際に開いて撮影しました。
+Web論文・PDF・EPUBは2026-09-12、Kindleは2026-08-28撮影の参考画像です。
+以前の画像にはTEXTタブがありません。
+
+### TEXT: Markdown・Org・TXT
+
+[サンプルMarkdown](docs/examples/reader-demo.md)をTEXTタブで開いた画面です。
+見出しを含む本文を連続読み上げでき、読書位置を保存・復元します。
+TEXTはorg-noter連携の対象外なので、右上には待機画面が表示されます。
+
+![TEXTタブで日本語Markdownを開いたmy-read画面](docs/screenshots/my-read-text.png)
+
+### EWW: ローカルHTML
+
+[サンプルHTML](docs/examples/reader-demo.html)をEWWタブで開いた画面です。
+HTMLのタグを本文として読むのではなく、見出し・段落・リンクをレンダリングします。
+再度開くと描画後に読書位置へ戻り、`C-x C-k`でページだけを閉じられます。
+
+![EWWタブでローカルHTMLをレンダリングしたmy-read画面](docs/screenshots/my-read-html.png)
 
 ### EWW: Web論文と数式
 
@@ -56,6 +73,11 @@ nov.elでEPUBを開き、翻訳対象の1文をハイライトしながら読書
 - `j` / `k` で次／前の1文へ移動
 - `SPC` で現在の1文を読み上げ、`s` で連続読み上げ
 - DIREDからPDF／EPUBを開き、資料種別ごとのタブへ自動登録
+- ローカルHTML（`.html`／`.htm`／`.xhtml`）をEWWタブでレンダリング
+- Markdown・Org・TXTなどをTEXTタブに自動登録し、見出しを越えて連続読み上げ
+- テキストとローカルHTMLの読書位置を保存し、再度開いたときに復元
+- EWWの`C-x C-k`でページを閉じ、my-readを残してDIREDへ戻る
+- my-read起動時に音声エンジンを再起動し、古い再生キューを破棄
 - 読み上げ中の文を対応する本文バッファ上でハイライト
 - EPUB／EWW／Kindleでは読み上げ中の文頭を表示中央へ追従
 - 読み上げ中は翻訳対象を読み上げ中の1文へ固定
@@ -84,6 +106,7 @@ nov.elでEPUBを開き、翻訳対象の1文をハイライトしながら読書
 - ローカル翻訳を使う場合はOllamaと `translategemma:4b`
 - Emacsパッケージ `google-translate`、`lookup`、`org-noter`、`pdf-tools`
 - EPUBを読む場合は `nov.el`
+- Markdownの表示とERTテストには `markdown-mode`
 - PDFを読む場合はPopplerの `pdftotext` とPDF Toolsの `epdfinfo`
 - EWWでarXiv数式を画像表示する場合はTeX Liveの `latex` と `dvisvgm`
 - PDFの枠なしハイライトとEWWの透過図の背景処理にはImageMagickの `magick`
@@ -178,7 +201,7 @@ WAVと日本語の`AVSpeechSynthesizer`音声を同じ順序付きキューで�
 
 `my/read-lookup-dictionary-ids` は通常のLookup設定を変更しません。空リストにすると専用フレーム内のLookupを無効にします。
 
-日本語を多く含むEPUBとPDFだけはmacOS音声へ自動的に切り替わり、既定では
+日本語を含むEPUB・PDF・TEXT・ローカルHTMLはmacOS音声へ自動的に切り替わり、既定では
 `Kyoko`を毎分540語で使います。英語のKokoro設定と速度は変更しません。
 
 `M-x my-read-change-speed` で日本語の読み上げ速度を変更できます。
@@ -233,9 +256,9 @@ Kindleの正式な書名は、Kindle自身のローカル `BookData.sqlite` か�
 M-x my-read
 ```
 
-左側は同じ1ペインの `DIRED` / `KINDLE` / `PDF` / `EPUB` / `EWW` タブで
-切り替えます。起動時は`my/read-book-path`のDIREDを開き、そこからPDFまたはEPUBを
-選ぶと対応する専用タブへ登録して表示します。`C-c t`で次のタブへ移動します。
+左側は同じ1ペインの `DIRED` / `KINDLE` / `PDF` / `EPUB` / `TEXT` / `EWW` タブで
+切り替えます。起動時は`my/read-book-path`のDIREDを開き、そこから文書を
+選ぶとPDF／EPUB／TEXT／EWWの対応タブへ登録して表示します。`C-c t`で次のタブへ移動します。
 EWWタブでは`g`で初期URL（既定はarXiv）、`G`で任意のURLを開けます。Kindleへ
 接続し直す場合はKINDLEタブで`r`を押します。
 
@@ -249,10 +272,15 @@ EWWのロード中表示を同期型辞書へ送るとEmacs全体を止めるこ
 EWWタブでは自動Lookupだけを既定で停止しています。必要なら
 `my/read-eww-enable-automatic-lookup`を`t`にしてください。
 
-PDFとEPUBの読書位置は、操作が止まってから1秒後とバッファを閉じるときに
+PDF・EPUB・テキスト・ローカルHTMLの読書位置は、操作が止まってから1秒後と
+バッファを閉じるときに
 `my/read-position-directory/read-positions.el`へ保存され、次に開いたとき自動的に
 復元されます。PDFではページ、表示倍率、縦スクロール位置、EPUBでは章、本文位置、
-表示開始位置を記録します。壊れた位置ファイルを検出した場合は上書きしません。
+表示開始位置を記録します。テキストとローカルHTMLでは本文位置と表示開始位置を
+保存し、連続読み上げ中も各区間の開始位置を記録します。HTMLはレンダリング後に
+復元します。`SPC`または`s`で再開できます。文書の編集や表示幅の変更で本文位置が
+変わった場合は、復元位置がずれることがあります。HTTP(S)ページの読書位置保存は
+対象外です。壊れた位置ファイルを検出した場合は上書きしません。
 
 `s`の連続読み上げはEPUBの章境界とPDFのページ境界を越えて進みます。EPUB、EWW、
 Kindleでは読み上げ中の文頭が読書ペインの中央付近へ来るよう表示を追従します。
@@ -353,10 +381,19 @@ PDFへ永続ハイライト付きのノートを作る手順は次のとおり�
 | `C-c C-k` / `C-c k` | 合成または再生を停止 |
 | `u` | 単語、または選択中のフレーズを語彙Orgファイルへ保存 |
 | `C-c o` | 現在資料のorg-noterノートを表示 |
-| `C-c t` | DIRED／KINDLE／PDF／EPUB／EWWタブを順に切り替える |
+| `C-c t` | DIRED／KINDLE／PDF／EPUB／TEXT／EWWタブを順に切り替える |
 | `r` | Kindle.appへ再接続 |
+| `C-x C-k`（EWW） | 読書位置を保存してページを閉じ、DIREDへ戻る。my-readは維持 |
+| `C-x k`（PDF） | PDFだけを閉じてDIREDへ戻る。my-readは維持 |
 | `G`（EWW） | URLを入力して開く |
 | `g`（EWW） | ページを再読み込み。履歴画面では初期URLを開く |
+
+TEXTタブには最後に開いたテキストファイルが表示されます。読書中は読み取り専用です。
+編集するときは`M-x english-reading-mode`で解除します。
+
+`M-x my-read`は起動のたびに音声エンジンを再起動します。音声が応答しない場合は
+`M-x my-read-restart-japanese-speech`でも手動で再起動できます。再起動は現在の
+読み上げと先読みを停止します。音声検索結果はプロセス内で再利用されます。
 
 `M-x my-read-change-speed`で日本語の速度を変更し、`M-x my-read-end`で
 専用フレームとバックグラウンド処理を終了できます。

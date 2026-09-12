@@ -77,3 +77,9 @@ PDF Toolsで本文をマウス選択すると、その文へ読み上げ位置�
 読書移動を `j` / `k`、単発読み上げを `SPC` に変更した。my-readとKindle固有の
 両キーマップから `i` を削除しているため、org-noterセッション中の `i` は常に
 `org-noter-insert-note` として解決される。
+
+## ページを閉じる
+
+- EWW本文の `C-x C-k` は、位置を保存してページだけを閉じ、DIREDへ戻ります。
+- PDF本文の `C-x k` も、PDFだけを閉じてDIREDへ戻ります。
+- どちらもmy-readのフレームを維持します。全体の終了は `M-x my-read-end` です。

@@ -24,11 +24,13 @@
       (should (eq my-read-k--reconnect-function #'my-read-k2-reconnect)))))
 
 (ert-deftest my-read-opens-the-kindle-app-backend ()
-  (let (called)
-    (cl-letf (((symbol-function 'my-read-k2--open-unified-workspace)
-               (lambda () (setq called t))))
+  (let (calls)
+    (cl-letf (((symbol-function 'my-read-restart-japanese-speech)
+               (lambda () (push 'restart calls)))
+              ((symbol-function 'my-read-k2--open-unified-workspace)
+               (lambda () (push 'open calls))))
       (my-read)
-      (should called))))
+      (should (equal (nreverse calls) '(restart open))))))
 
 (ert-deftest my-read-k2-reports-the-actual-connection-error ()
   (should

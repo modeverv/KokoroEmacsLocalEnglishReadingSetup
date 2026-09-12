@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 
 @interface MyReadSpeechRuntime : NSObject
+@property(nonatomic, strong) NSMutableDictionary<NSString *, AVSpeechSynthesisVoice *> *voiceCache;
 @property(nonatomic, strong) AVAudioEngine *engine;
 @property(nonatomic, strong) AVAudioPlayerNode *player;
 @property(nonatomic, strong) NSMutableArray<NSNumber *> *renderOrder;
@@ -22,6 +23,7 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
+        _voiceCache = [NSMutableDictionary dictionary];
         _renderOrder = [NSMutableArray array];
         _buffers = [NSMutableDictionary dictionary];
         _renderers = [NSMutableDictionary dictionary];
@@ -52,9 +54,16 @@
 
 - (AVSpeechSynthesisVoice *)voiceNamed:(NSString *)requested {
     if (![requested isKindOfClass:[NSString class]] || requested.length == 0) return nil;
+    // Voice enumeration can block inside macOS TextToSpeech.  Resolve each
+    // requested voice once for this resident process, not once per chunk.
+    AVSpeechSynthesisVoice *cached = self.voiceCache[requested];
+    if (cached) return cached;
     NSArray<AVSpeechSynthesisVoice *> *voices = [AVSpeechSynthesisVoice speechVoices];
     for (AVSpeechSynthesisVoice *voice in voices) {
-        if ([voice.identifier isEqualToString:requested]) return voice;
+        if ([voice.identifier isEqualToString:requested]) {
+            self.voiceCache[requested] = voice;
+            return voice;
+        }
     }
     NSString *plain = [requested stringByReplacingOccurrencesOfString:@"\\s*\\((Enhanced|Premium)\\)\\s*$"
                                                             withString:@""
@@ -66,6 +75,7 @@
                      [voice.name caseInsensitiveCompare:plain] == NSOrderedSame;
         if (match && (!best || voice.quality > best.quality)) best = voice;
     }
+    if (best) self.voiceCache[requested] = best;
     return best;
 }
 
