@@ -16,9 +16,19 @@ OCR、Kindleファイルの復号は行いません。
 
 ## 動作画面
 
-いずれも実際に動作中のmy-readフレームを撮影したものです。左側の
+実際に動作中のmy-readフレームを撮影したものです。左側の
 `DIRED / KINDLE / PDF / EPUB / EWW`タブを切り替えても、右側は上から
 org-noter、文単位の翻訳、Lookupの3段構成を保ちます。
+EWW・PDF・EPUBは2026-09-12に再撮影しました。Kindleは今回の再接続が
+完了しなかったため、2026-08-28撮影の参考画像を掲載しています。
+
+### EWW: Web論文と数式
+
+`Attention Is All You Need`の[arXiv HTML版](https://arxiv.org/html/1706.03762v7)を
+EWWで開いた画面です。本文内の数式をSVGで表示し、読書ノートと文単位の翻訳を
+同じフレームで参照できます。EWWの自動Lookupは既定では無効です。
+
+![EWWでarXiv論文の本文と数式を表示したmy-read画面](docs/screenshots/my-read-eww.png)
 
 ### Kindle.app
 
@@ -29,22 +39,22 @@ Kindle.appへAccessibilityで接続し、取得した現在ページの本文を
 
 ### PDF Tools
 
-現在開いている`Attention Is All You Need`のPDFをPDF Toolsで表示しています。
-PDF上の文位置と翻訳・Lookupを連動させています。
+同じ論文のPDF版をPDF Toolsで表示しています。PDFのテキストレイヤーに沿って
+文を移動し、翻訳と読書ノートを参照できます。
 
-![PDF ToolsでAttention Is All You Needを開き、org-noter、翻訳、Lookupを連動させたmy-read画面](docs/screenshots/my-read-pdf.png)
+![PDF ToolsでAttention Is All You Needを開き、読書ノートと翻訳を表示したmy-read画面](docs/screenshots/my-read-pdf.png)
 
 ### EPUB
 
-nov.elでEPUBを開き、選択中の1文をハイライトしながらorg-noter、翻訳、Lookupを
-連動させている状態です。
+nov.elでEPUBを開き、翻訳対象の1文をハイライトしながら読書ノートと訳文を
+参照している状態です。
 
 ![nov.elのEPUB本文、org-noter、翻訳、Lookupを表示したmy-read画面](docs/screenshots/my-read-epub.png)
 
 ## 主な機能
 
 - `j` / `k` で次／前の1文へ移動
-- `SPC` で現在の1文を読み上げ、`s` で文単位の連続読み上げ
+- `SPC` で現在の1文を読み上げ、`s` で連続読み上げ
 - DIREDからPDF／EPUBを開き、資料種別ごとのタブへ自動登録
 - 読み上げ中の文を対応する本文バッファ上でハイライト
 - EPUB／EWW／Kindleでは読み上げ中の文頭を表示中央へ追従
@@ -53,6 +63,8 @@ nov.elでEPUBを開き、選択中の1文をハイライトしながらorg-noter
 - PDF Toolsで選択した文を新しい読み上げ開始位置として自動採用
 - PDF／EPUBのページ、表示位置、表示倍率を自動保存・復元
 - PDF／EPUB／Kindle／EWWをorg-noterで統一して記録
+- EWWのURL履歴からWebページを再訪し、arXiv HTMLの数式・図を表示
+- `M-x my-read-change-speed` で日本語音声の速度を数値入力して変更
 - PDFの選択範囲を永続ハイライトとして保存
 - Kindleでは前後2ページをメモリ上だけにキャッシュ
 - Kindle本文をファイルへ保存しない
@@ -74,13 +86,15 @@ nov.elでEPUBを開き、選択中の1文をハイライトしながらorg-noter
 - EPUBを読む場合は `nov.el`
 - PDFを読む場合はPopplerの `pdftotext` とPDF Toolsの `epdfinfo`
 - EWWでarXiv数式を画像表示する場合はTeX Liveの `latex` と `dvisvgm`
+- PDFの枠なしハイライトとEWWの透過図の背景処理にはImageMagickの `magick`
+- EWWの大きなSVG図を軽量化する場合はlibrsvgの `rsvg-convert`
 
 Kindle.appの本文取得にはmacOSのアクセシビリティ権限が必要です。Lookup本体、辞書エージェント、EPWING辞書などは別途設定してください。
 
 PDF関連の依存パッケージはHomebrewで導入できます。
 
 ```sh
-brew install poppler automake glib pkgconf
+brew install poppler automake glib pkgconf imagemagick librsvg
 ```
 
 ## 1. Python環境と音声ブリッジの導入
@@ -102,7 +116,8 @@ curl --fail http://127.0.0.1:8000/health
 
 `my-read-speech-bridge`は常駐するmacOSネイティブ音声プロセスです。英語のKokoro
 WAVと日本語の`AVSpeechSynthesizer`音声を同じ順序付きキューで再生し、連続読み上げ
-では既定で次の2文を先行合成します。`make my-read-k-check`を実行する場合は、テスト
+では音声を先行合成して文間の待ちを減らします。日本語は既定で最大2文を1区間とし、
+先の6区間まで準備します。`make my-read-k-check`を実行する場合は、テスト
 の前にこのブリッジも自動ビルドされます。
 
 ## 2. Emacs側の設定
@@ -116,9 +131,9 @@ WAVと日本語の`AVSpeechSynthesizer`音声を同じ順序付きキューで�
 (setq my/read-book-path "/path/to/books"
       my/read-vocabulary-file "~/my-read/vocabulary.org"
       my/read-org-noter-directory
-      "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read"
+      "~/my-read/notes"
       my/read-position-directory
-      "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read"
+      "~/my-read/state"
       my/read-japanese-macos-voice "Kyoko"
       my/read-japanese-macos-rate 540
       my/read-eww-url "https://arxiv.org/"
@@ -129,7 +144,14 @@ WAVと日本語の`AVSpeechSynthesizer`音声を同じ順序付きキューで�
       my/read-eww-math-image-vertical-margin 0
       my/read-eww-math-svg-stroke-width 0.18
       my/read-eww-math-svg-padding 1.0
+      my/read-eww-math-max-processes 4
+      my/read-eww-article-image-background "#f5f5f5"
+      my/read-eww-article-svg-max-width 720
       my/read-eww-enable-automatic-lookup nil)
+
+;; 履歴ファイルの既定値はロード時に決まるため、保存先を変えたらこちらも指定します。
+(setq my/read-eww-history-file
+      (expand-file-name "eww-history.el" my/read-position-directory))
 
 (setq kokoro-reader-server-directory
       (expand-file-name "~/Sync/emacs.d/reader")
@@ -158,6 +180,12 @@ WAVと日本語の`AVSpeechSynthesizer`音声を同じ順序付きキューで�
 
 日本語を多く含むEPUBとPDFだけはmacOS音声へ自動的に切り替わり、既定では
 `Kyoko`を毎分540語で使います。英語のKokoro設定と速度は変更しません。
+
+`M-x my-read-change-speed` で日本語の読み上げ速度を変更できます。
+ミニバッファに `400` などの正の整数を入力して `RET` を押すと、
+開いている日本語の読書バッファと、以後開く文書に反映されます。
+読み上げ中は一度停止し、次の再生から新しい速度を使います。
+変更は現在のEmacsセッション内で有効です。
 
 PDFとorg-noterをまだ導入していない環境では、次の設定も追加してください。
 
@@ -228,10 +256,39 @@ PDFとEPUBの読書位置は、操作が止まってから1秒後とバッファ
 
 `s`の連続読み上げはEPUBの章境界とPDFのページ境界を越えて進みます。EPUB、EWW、
 Kindleでは読み上げ中の文頭が読書ペインの中央付近へ来るよう表示を追従します。
-PDFの連続読み上げでは、読み上げ箇所をPDF座標から求めて表示中央へ追従します。
-日本語のmacOS音声では次の1文をバックグラウンドで先に合成し、文間の待ち時間を
-短くします。手動でPDFを移動した場合は、意図しない自動移動を防ぐため連続読み上げを
+PDFの連続読み上げでは、読み上げ箇所をPDF座標から求め、既定では読書ペインの
+上から20%付近へ追従します。`english-reading-mode-pdf-speech-screen-position`で
+位置を調整できます。日本語音声は最大2文ずつ、先の6区間までバックグラウンドで
+準備します。手動でPDFを移動した場合は、意図しない自動移動を防ぐため連続読み上げを
 停止します。
+
+### EWW: Webページ・arXiv論文
+
+1. `C-c t`でEWWタブへ切り替えます。初期画面には保存済みの閲覧履歴が表示されます。
+2. `G`でURLを入力するか、履歴のタイトル／URLにカーソルを置いて`RET`を押します。
+3. 本文では`j` / `k`で文を移動し、`SPC`で1文、`s`で現在のWebページを連続読み上げします。
+4. `C-c o`で資料に対応するノートを表示し、`i`で現在位置にノートを作れます。
+
+`g`はEWW標準の再読み込みです。初期の履歴画面では、表示されている初期URLを
+開きます。Webページの読み上げがリンク先へ自動で巡回することはありません。
+
+arXiv HTMLのMathMLに含まれるTeX注釈を、`latex`と`dvisvgm`で数式画像へ変換します。
+既定では最大4式を並列処理し、表示位置を保って順次置き換えます。結果は
+`my/read-eww-math-cache-directory`へキャッシュされます。ツールがない場合は
+TeX文字列を表示します。変換対象は既定でarXivのHTTPSページに限定されます。
+
+論文中の図には明るい背景を付け、暗いテーマでも文字や線を見やすくします。
+複雑なSVG図は`rsvg-convert`で画像化し、EWWの幅の95%、最大720ピクセルに収めます。
+数式・サイトのアイコン・ロゴはこの図の処理の対象外です。
+
+| 設定 | 既定値・用途 |
+| --- | --- |
+| `my/read-eww-history-limit` | 履歴を最大100件保存 |
+| `my/read-eww-line-spacing` | `0.5`。通常の約1.5倍の行間 |
+| `my/read-eww-math-max-processes` | 数式を最大4式並列変換 |
+| `my/read-eww-article-image-background` | 図の背景色 `#f5f5f5` |
+| `my/read-eww-article-svg-max-width` | SVG図の最大幅720ピクセル |
+| `my/read-eww-enable-automatic-lookup` | `nil`。自動Lookupを停止。翻訳は有効 |
 
 ### PDF Tools
 
@@ -281,7 +338,7 @@ PDFへ永続ハイライト付きのノートを作る手順は次のとおり�
 | `j` | 次の1文へ移動 |
 | `k` | 前の1文へ移動 |
 | `SPC` | 現在の1文を読み上げ |
-| `s` | 現在位置から1文ずつ連続読み上げ。もう一度押すと停止 |
+| `s` | 現在位置から連続読み上げ。日本語は最大2文ずつ。もう一度押すと停止 |
 | `l` | 前の単語に移動 |
 | `;` | 次の単語に移動 |
 | `p` | 次のLookup辞書エントリへ切り替え |
@@ -298,6 +355,11 @@ PDFへ永続ハイライト付きのノートを作る手順は次のとおり�
 | `C-c o` | 現在資料のorg-noterノートを表示 |
 | `C-c t` | DIRED／KINDLE／PDF／EPUB／EWWタブを順に切り替える |
 | `r` | Kindle.appへ再接続 |
+| `G`（EWW） | URLを入力して開く |
+| `g`（EWW） | ページを再読み込み。履歴画面では初期URLを開く |
+
+`M-x my-read-change-speed`で日本語の速度を変更し、`M-x my-read-end`で
+専用フレームとバックグラウンド処理を終了できます。
 
 my-read固有キーは、my-readフレームの左側読書ペインにカーソルがある場合だけ
 有効です。右側のOrgバッファや通常のEmacsバッファには影響しません。org-noterの
@@ -468,6 +530,7 @@ make my-read-k-check
 | `macos-speech-bridge/main.m` | Kokoro WAVとmacOS音声を順序付きで再生する常駐ネイティブブリッジ |
 | `english-reading-mode.el` | 文単位の移動・連続読み上げ・PDF Tools連携 |
 | `my-read.el` | 専用フレーム、右3段ペイン、Lookup、翻訳、語彙保存 |
+| `my-read-eww-math.el` | EWWのarXiv数式を非同期・並列変換し、SVGをキャッシュ |
 | `my-read-org-noter.el` | PDF／EPUB／Kindle／EWWのorg-noter統合と保存先管理 |
 | `my-read-k.el` | Kindle本文バッファ、ページ移動、メモリキャッシュ |
 | `my-read-k2.el` | Kindle.app Accessibilityバックエンド |
