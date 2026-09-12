@@ -1317,9 +1317,12 @@ CONTEXT's relative source-text position only when PDF word matching fails."
   ;; when this file is reloaded before pdf-macs.  Write the underlying
   ;; image-mode window property directly, as pdf-roll does for vscroll.
   (image-mode-window-put 'page page window)
+  ;; Determine visible pages using the destination offset.  At a boundary,
+  ;; the old offset can leave the next visible page as a placeholder until
+  ;; another redisplay pass (or the next speech chunk) repairs it.
+  (pdf-roll-set-vscroll vscroll window)
   (pdf-roll-display-pages page window)
   (set-window-start window (pdf-roll-page-to-pos page) t)
-  (pdf-roll-set-vscroll vscroll window)
   (force-window-update window))
 
 (defun english-reading-mode--pdf-roll-target-position

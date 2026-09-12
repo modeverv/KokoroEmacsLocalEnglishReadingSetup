@@ -1043,6 +1043,29 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
 (add-hook 'english-reading-mode-pdf-text-buffer-hook
           #'my/read--configure-speech-language)
 
+(defun my-read-change-speed (rate)
+  "Set Japanese reading speed to RATE words per minute for this session.
+Prompt for a positive integer, defaulting to the current speed.  Update
+existing Japanese reading buffers as well as the default for new ones.
+Stop active Japanese speech to discard audio queued at the old speed;
+the next playback uses RATE."
+  (interactive
+   (list (read-number "日本語の読み上げ速度（毎分語数）: "
+                      my/read-japanese-macos-rate)))
+  (unless (and (integerp rate) (> rate 0))
+    (user-error "速度は正の整数で入力してください"))
+  (when-let* ((buffer (and (overlayp kokoro-reader--overlay)
+                          (overlay-buffer kokoro-reader--overlay))))
+    (with-current-buffer buffer
+      (when (equal my/read-source-language "ja")
+        (kokoro-reader-stop))))
+  (setq my/read-japanese-macos-rate rate)
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (equal my/read-source-language "ja")
+        (setq-local kokoro-reader-macos-rate rate))))
+  (message "日本語の読み上げ速度を %d に変更しました（次の再生から適用）" rate))
+
 (defun my/read--pdf-view-window-overlay-valid-p (window)
   "Return non-nil when WINDOW has a live PDF Tools image overlay."
   (and (window-live-p window)

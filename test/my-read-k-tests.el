@@ -2149,10 +2149,29 @@
     (should
      (equal (reverse calls)
             '((put page 4 test-window)
+              (vscroll 275 test-window)
               (display 4 test-window)
               (start test-window 104 t)
-              (vscroll 275 test-window)
               (force test-window))))))
+
+(ert-deftest english-reading-mode-pdf-roll-boundary-renders-next-visible-page ()
+  ;; A 1000px page fills the 600px viewport at the old offset of zero.
+  ;; At the destination offset of 900, page 5 must already be rendered.
+  (let ((offset 0) visible-pages)
+    (cl-letf (((symbol-function 'image-mode-window-put) #'ignore)
+              ((symbol-function 'pdf-roll-set-vscroll)
+               (lambda (value _window) (setq offset value)))
+              ((symbol-function 'pdf-roll-display-pages)
+               (lambda (page _window)
+                 (setq visible-pages
+                       (if (< (- 1000 offset) 600)
+                           (list page (1+ page))
+                         (list page)))))
+              ((symbol-function 'pdf-roll-page-to-pos) #'identity)
+              ((symbol-function 'set-window-start) #'ignore)
+              ((symbol-function 'force-window-update) #'ignore))
+      (english-reading-mode--pdf-roll-set-position 4 900 'test-window)
+      (should (equal visible-pages '(4 5))))))
 
 (ert-deftest english-reading-mode-pdf-roll-rejects-regression-and-stale-context ()
   (let ((english-reading-mode--continuous-state
