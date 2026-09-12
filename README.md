@@ -77,6 +77,7 @@ nov.elでEPUBを開き、翻訳対象の1文をハイライトしながら読書
 - Markdown・Org・TXTなどをTEXTタブに自動登録し、見出しを越えて連続読み上げ
 - テキストとローカルHTMLの読書位置を保存し、再度開いたときに復元
 - EWWの`C-x C-k`でページを閉じ、my-readを残してDIREDへ戻る
+- EWW・TEXT・EPUBで読み上げ言語を日本語／英語に手動指定し、自動判定へ戻す
 - my-read起動時に音声エンジンを再起動し、古い再生キューを破棄
 - 読み上げ中の文を対応する本文バッファ上でハイライト
 - EPUB／EWW／Kindleでは読み上げ中の文頭を表示中央へ追従
@@ -204,13 +205,8 @@ WAVと日本語の`AVSpeechSynthesizer`音声を同じ順序付きキューで�
 日本語を含むEPUB・PDF・TEXT・ローカルHTMLはmacOS音声へ自動的に切り替わり、既定では
 `Kyoko`を毎分540語で使います。英語のKokoro設定と速度は変更しません。
 
-GitHubなど、サイトの言語とREADME本文の言語が異なるときは、EWW本文で
-`M-x my-read-use-japanese-speech`を実行すると日本語音声に固定できます。
-実行時に再生と先読みを停止するので、`SPC`または`s`で再開してください。
-指定は同じバッファ内のページ移動・再描画でも維持され、閉じるまで有効です。
-`M-x my-read-use-auto-speech`で自動判定へ戻せます。
-`M-x my-read-set-speech-language`では`ja`・`en`・`auto`を選べます。
-TEXT・EPUBの本文でも同じコマンドを利用できます。
+GitHubの日本語READMEなどが英語音声になる場合は、
+[読み上げ言語の指定](#読み上げ言語の指定)で日本語音声へ切り替えられます。
 
 `M-x my-read-change-speed` で日本語の読み上げ速度を変更できます。
 ミニバッファに `400` などの正の整数を入力して `RET` を押すと、
@@ -366,6 +362,49 @@ PDFへ永続ハイライト付きのノートを作る手順は次のとおり�
 3. `C-x C-s`でPDFを保存し、ハイライトをPDFファイルへ書き込みます。
 
 `C-u i`を使うと、その1回だけハイライト設定を反転できます。
+
+### 読み上げ言語の指定
+
+GitHubなどでサイト側の言語が英語でも、本文が日本語なら手動で日本語音声を
+指定できます。my-readの**EWW・TEXT・EPUB本文にカーソルを置いて**実行してください。
+
+| コマンド（`M-x`） | 動作 |
+| --- | --- |
+| `my-read-use-japanese-speech` | 日本語のmacOS音声に固定。設定済みの音声・速度を使用 |
+| `my-read-use-auto-speech` | 手動指定を解除し、本文から言語を自動判定 |
+| `my-read-set-speech-language` | `ja`（日本語）・`en`（Kokoro英語）・`auto`（自動判定）から選択 |
+
+日本語READMEを読む手順:
+
+1. EWWでREADMEを開き、左側の本文ペインへ移動します。
+2. `M-x my-read-use-japanese-speech`を実行します。
+3. `s`で連続読み上げ、または`SPC`で現在の1文を読み上げます。
+
+言語変更時には現在の再生と先読みキューを停止します。言語を変えただけでは
+再生を始めないので、`s`または`SPC`で再開してください。
+
+指定はバッファ単位です。同じEWWタブでページを移動・再描画しても維持されます。
+英語ページへ移ったら`my-read-set-speech-language`で`en`を選ぶか、
+`my-read-use-auto-speech`で自動判定へ戻してください。バッファを閉じると指定は
+解除され、ディスクには保存しません。PDFにはこの手動指定コマンドを適用しません。
+
+Emacs Lispから指定する場合の引数はシンボルです。
+
+```elisp
+(my-read-set-speech-language 'ja)  ; 日本語に固定
+(my-read-set-speech-language 'en)  ; Kokoro英語に固定
+(my-read-set-speech-language nil)  ; 自動判定に戻す
+```
+
+### 音声関連のコマンド
+
+| コマンド（`M-x`） | 動作 |
+| --- | --- |
+| `my-read-change-speed` | 日本語音声の毎分語数を変更。次の再生から適用 |
+| `my-read-restart-japanese-speech` | 音声エンジンを再起動し、現在の再生・先読みを停止 |
+
+`my-read`の起動時にも音声エンジンを再起動します。音声が応答しない場合は
+上記の再起動コマンドを使い、その後`SPC`または`s`で読み上げを再開できます。
 
 ### キーバインド
 
