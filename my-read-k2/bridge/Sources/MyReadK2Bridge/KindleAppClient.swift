@@ -7,7 +7,11 @@ enum PageDirection {
     case next
     case previous
 
-    var keyCode: CGKeyCode { self == .next ? 124 : 123 }
+    // Kindle interprets Page Down/Up as logical next/previous in both
+    // left-to-right books and right-to-left (e.g. Japanese vertical) books.
+    // Left/Right arrows are physical directions and reverse with the layout.
+    // All navigation, including prefetch and restoration, goes through here.
+    var keyCode: CGKeyCode { self == .next ? 121 : 116 }
 }
 
 struct KindlePage: Equatable, Sendable {
@@ -47,7 +51,7 @@ final class KindleAppClient {
         else {
             throw BridgeFailure(
                 code: "NO_KINDLE_APP",
-                message: "Kindle.app is not running. Open an English book in Kindle first.")
+                message: "Kindle.app is not running. Open a book in Kindle first.")
         }
         guard AXIsProcessTrusted() else {
             throw BridgeFailure(
@@ -71,7 +75,7 @@ final class KindleAppClient {
         guard let pageElement = findPageElement(in: appElement, depth: 0) else {
             throw BridgeFailure(
                 code: "NO_PAGE_TEXT",
-                message: "No open Kindle page was found. Open an English book and try again.")
+                message: "No open Kindle page was found. Open a book and try again.")
         }
         let identifier = stringAttribute(kAXIdentifierAttribute, of: pageElement) ?? ""
         guard let rawText = stringAttribute(kAXValueAttribute, of: pageElement) else {
@@ -128,7 +132,7 @@ final class KindleAppClient {
         }
         throw BridgeFailure(
             code: "PAGE_DID_NOT_CHANGE",
-            message: "Kindle.app did not change pages after the arrow-key event.")
+            message: "Kindle.app did not change pages after the page-key event.")
     }
 
     private func findPageElement(in element: AXUIElement, depth: Int,

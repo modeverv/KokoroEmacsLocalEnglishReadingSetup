@@ -2,6 +2,13 @@ import Testing
 @testable import MyReadK2Bridge
 
 struct KindlePageTests {
+    @Test func logicalNavigationUsesLayoutIndependentPageKeys() {
+        // macOS Page Down / Page Up, rather than physical Right / Left.
+        // The same mapping is used when prefetch visits pages and returns.
+        #expect(PageDirection.next.keyCode == 121)
+        #expect(PageDirection.previous.keyCode == 116)
+    }
+
     @Test func parsesKindlePagePositions() {
         let identifier = #"pageDetails:{"start":{"short":8783,"long":""},"end":{"short":9885,"long":""},"words":[]}"#
         let positions = KindlePage.positions(from: identifier)
