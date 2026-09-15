@@ -106,18 +106,22 @@ The bridge currently supports two."
      (t "en"))))
 
 (defun my-read-k--configure-buffer-language (result)
-  "Apply RESULT's source language to the Kindle buffer and frame."
-  (let ((language (my-read-k--language-from-result result)))
-    (setq my-read-k--detected-language language)
+  "Apply RESULT's language, honoring the Kindle buffer's speech override."
+  (setq my-read-k--detected-language (my-read-k--language-from-result result))
+  (let ((language
+         (with-current-buffer my-read-k--buffer
+           (kill-local-variable 'kokoro-reader-lang-code)
+           (kill-local-variable 'kokoro-reader-voice)
+           (my/read--configure-speech-language my-read-k--detected-language)
+           (setq header-line-format
+                 (format " Kindle: attached | %s/%s | Accessibility"
+                         (upcase my/read-source-language)
+                         (if (eq kokoro-reader-backend 'kokoro) "Kokoro" "macOS")))
+           my/read-source-language)))
     (when (frame-live-p my-read-k--frame)
       (set-frame-parameter my-read-k--frame
                            'my-reading-source-language language))
-    (with-current-buffer my-read-k--buffer
-      (setq-local my/read-source-language language)
-      (kill-local-variable 'kokoro-reader-backend)
-      (kill-local-variable 'kokoro-reader-lang-code)
-      (kill-local-variable 'kokoro-reader-voice)
-      (kill-local-variable 'kokoro-reader-macos-voice))
+    (my-read-k--update-prefetch-header)
     language))
 
 (defun my-read-k--nonterminal-abbreviation-p (sentence)
@@ -490,22 +494,15 @@ When SPEAK is non-nil, continue the existing sentence-reading flow."
                      (max 1 (1- my-read-k--page-number))))))
     (setq my-read-k--last-fingerprint (my-read-k--alist-get 'fingerprint result)
           my-read-k--current-result result)
-    (let* ((language (my-read-k--configure-buffer-language result))
-           (backend
-            (with-current-buffer my-read-k--buffer
-              kokoro-reader-backend)))
-      (with-current-buffer my-read-k--buffer
-        (let ((inhibit-read-only t))
-          (erase-buffer)
-          (insert (my-read-k--one-sentence-per-line text))
-          (unless (bolp) (insert "\n"))
-          (my-read-k--position-for-direction direction)
-          (setq buffer-read-only t)
-          (set-buffer-modified-p nil)
-          (setq header-line-format
-                (format " Kindle: attached | %s/%s | Accessibility"
-                        (upcase language)
-                        (if (eq backend 'kokoro) "Kokoro" "macOS"))))))
+    (my-read-k--configure-buffer-language result)
+    (with-current-buffer my-read-k--buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (my-read-k--one-sentence-per-line text))
+        (unless (bolp) (insert "\n"))
+        (my-read-k--position-for-direction direction)
+        (setq buffer-read-only t)
+        (set-buffer-modified-p nil)))
     (when-let ((center (and (frame-live-p my-read-k--frame)
                             (my/read-kindle-window my-read-k--frame)
                             (eq (window-buffer

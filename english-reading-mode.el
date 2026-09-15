@@ -1840,24 +1840,42 @@ state and timer prevents its completion hook from moving the PDF again."
               english-reading-mode--pdf-manual-interaction-commands)
     (english-reading-mode--cancel-continuous-for-pdf-interaction)))
 
+(defun english-reading-mode--continuous-epub-next ()
+  "Advance within an EPUB or across empty chapters, then speak once."
+  ;; Completion may already have moved point to the chapter's end.  Asking
+  ;; for a sentence there either signals or returns the previous sentence.
+  (when (and (< (point) (point-max))
+             (english-reading-mode--sentence-bounds-at-point))
+    (english-reading-mode-next-sentence))
+  (skip-chars-forward " \t\n\r")
+  (while (and (not (and (< (point) (point-max))
+                       (english-reading-mode--sentence-bounds-at-point)))
+              (boundp 'nov-documents-index)
+              (boundp 'nov-documents)
+              (< nov-documents-index (1- (length nov-documents))))
+    (let ((previous-index nov-documents-index))
+      (nov-next-document)
+      (unless (> nov-documents-index previous-index)
+        (user-error "EPUB chapter did not advance")))
+    (goto-char (point-min))
+    (skip-chars-forward " \t\n\r"))
+  (unless (and (< (point) (point-max))
+               (english-reading-mode--sentence-bounds-at-point))
+    (user-error "Reached the end of the document"))
+  (english-reading-mode-speak-current-sentence))
+
 (defun english-reading-mode--continuous-default-next ()
   "Advance a PDF/EPUB/text source and speak its next sentence."
   (cond
    ((english-reading-mode--pdf-buffer-p)
     (english-reading-mode--pdf-next-sentence)
     (english-reading-mode-speak-current-sentence))
+   ((derived-mode-p 'nov-mode)
+    (english-reading-mode--continuous-epub-next))
    (t
     (english-reading-mode-next-sentence)
     (cond
      ((english-reading-mode--sentence-bounds-at-point)
-      (english-reading-mode-speak-current-sentence))
-     ((and (derived-mode-p 'nov-mode)
-           (boundp 'nov-documents-index)
-           (boundp 'nov-documents)
-           (< nov-documents-index (1- (length nov-documents))))
-      (nov-next-document)
-      (goto-char (point-min))
-      (skip-chars-forward " \t\n\r")
       (english-reading-mode-speak-current-sentence))
      (t (user-error "Reached the end of the document"))))))
 
@@ -1881,7 +1899,9 @@ responsible for page/chapter boundaries when no sentence follows locally."
        ((eq source-buffer speech-buffer)
         (goto-char (min next-position (point-max)))
         (skip-chars-forward " \t\n\r")
-        (when (english-reading-mode--sentence-bounds-at-point)
+        (when (and (or (not (derived-mode-p 'nov-mode))
+                       (< (point) (point-max)))
+                   (english-reading-mode--sentence-bounds-at-point))
           (english-reading-mode-speak-current-sentence)
           t))
        ((and (english-reading-mode--pdf-buffer-p source-buffer)

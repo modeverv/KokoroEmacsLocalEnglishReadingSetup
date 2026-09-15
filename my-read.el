@@ -42,7 +42,7 @@
   :group 'my-read)
 
 (defcustom my/read-position-directory
-  "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read"
+  "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read-log"
   "Directory where PDF and EPUB reading positions are stored."
   :type 'directory
   :group 'my-read)
@@ -1147,16 +1147,22 @@ The Kindle, PDF, EPUB, EWW, and DIRED sources share one window as tabs."
 The override lasts until changed or the buffer is closed, including EWW
 navigation and redisplay in the same buffer.")
 
-(defun my/read--configure-speech-language ()
-  "Configure speech, preferring the buffer's explicit language selection."
+(defun my/read--configure-speech-language (&optional detected-language)
+  "Configure speech, preferring the buffer's explicit language selection.
+Use DETECTED-LANGUAGE when supplied, otherwise inspect the buffer text."
   (if (or (eq my/read-speech-language-override 'ja)
           (and (null my/read-speech-language-override)
-               (my/read--buffer-contains-japanese-p)))
+               (if detected-language
+                   (equal detected-language "ja")
+                 (my/read--buffer-contains-japanese-p))))
       (setq-local my/read-source-language "ja"
                   kokoro-reader-backend 'macos
                   kokoro-reader-macos-voice my/read-japanese-macos-voice
                   kokoro-reader-macos-rate my/read-japanese-macos-rate)
-    (setq-local my/read-source-language "en")
+    (setq-local my/read-source-language
+                (if (eq my/read-speech-language-override 'en)
+                    "en"
+                  (or detected-language "en")))
     (if (eq my/read-speech-language-override 'en)
         (setq-local kokoro-reader-backend 'kokoro)
       (kill-local-variable 'kokoro-reader-backend))
@@ -1164,29 +1170,31 @@ navigation and redisplay in the same buffer.")
     (kill-local-variable 'kokoro-reader-macos-rate)))
 
 (defun my-read-set-speech-language (language)
-  "Set the current EWW/TEXT/EPUB reading buffer's speech LANGUAGE.
+  "Set the current KINDLE/EWW/TEXT/EPUB reading buffer's speech LANGUAGE.
 LANGUAGE is ja, en, or nil for automatic detection.  Stop current playback
 and discard prefetched audio; press SPC or s to resume at the current point.
-The selection survives EWW navigation in this buffer, until reset or closed."
+The selection survives Kindle page turns and EWW navigation until reset or closed."
   (interactive
    (list (pcase (completing-read "読み上げ言語: " '("ja" "en" "auto") nil t)
            ("ja" 'ja) ("en" 'en) (_ nil))))
   (unless (memq language '(nil ja en))
     (user-error "言語は ja、en、または nil を指定してください"))
   (unless (and (my/read--center-window-active-p)
-               (or (derived-mode-p 'eww-mode 'nov-mode)
+               (or (derived-mode-p 'eww-mode 'nov-mode 'my-read-k-document-mode)
                    (my/read--text-file-buffer-p)))
-    (user-error "my-readのEWW・TEXT・EPUB本文で実行してください"))
+    (user-error "my-readのKINDLE・EWW・TEXT・EPUB本文で実行してください"))
   (english-reading-mode-stop-continuous)
   (setq-local my/read-speech-language-override language)
-  (my/read--configure-speech-language)
+  (if (derived-mode-p 'my-read-k-document-mode)
+      (my-read-k--configure-buffer-language my-read-k--current-result)
+    (my/read--configure-speech-language))
   (when (derived-mode-p 'eww-mode)
     (add-hook 'eww-after-render-hook #'my/read--configure-speech-language nil t))
   (message "読み上げ言語: %s（SPC または s で再開）"
            (pcase language ('ja "日本語") ('en "英語") (_ "自動判定"))))
 
 (defun my-read-use-japanese-speech ()
-  "Read this my-read EWW/TEXT/EPUB buffer using Japanese macOS speech."
+  "Read this my-read KINDLE/EWW/TEXT/EPUB buffer using Japanese macOS speech."
   (interactive)
   (my-read-set-speech-language 'ja))
 
