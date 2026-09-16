@@ -87,7 +87,7 @@ nov.elでEPUBを開き、翻訳対象の1文をハイライトしながら読書
 - PDF／EPUBのページ、表示位置、表示倍率を自動保存・復元
 - PDF／EPUB／Kindle／EWWをorg-noterで統一して記録
 - EWWのURL履歴からWebページを再訪し、arXiv HTMLの数式・図を表示
-- `M-x my-read-change-speed` で日本語音声の速度を数値入力して変更
+- `M-x my-read-change-japanese-speed` / `M-x my-read-change-english-speed` で言語別に速度を変更
 - PDFの選択範囲を永続ハイライトとして保存
 - Kindleでは前後2ページをメモリ上だけにキャッシュ
 - Kindle本文をファイルへ保存しない
@@ -129,17 +129,18 @@ uv sync
 make my-read-speech-build
 ```
 
-Kokoroサーバーは最初の読み上げ時にEmacsから自動起動されます。手動起動とヘルスチェックは次の通りです。
+英語の読み上げは既定でKokoroの女性音声`bf_emma`（イギリス英語、1.0倍）を使います。
+Kokoroサーバーは最初の読み上げ時にEmacsから自動起動します。手動起動とヘルスチェックは次の通りです。
 
 ```sh
 make run
 curl --fail http://127.0.0.1:8000/health
 ```
 
-既定では `127.0.0.1:8000` のみに接続し、モデル `mlx-community/Kokoro-82M-bf16`、音声 `bf_emma`、イギリス英語を使います。
+Kokoro使用時は `127.0.0.1:8000` のみに接続し、モデル `mlx-community/Kokoro-82M-bf16`、音声 `bf_emma`、イギリス英語を使います。
 
-`my-read-speech-bridge`は常駐するmacOSネイティブ音声プロセスです。英語のKokoro
-WAVと日本語の`AVSpeechSynthesizer`音声を同じ順序付きキューで再生し、連続読み上げ
+`my-read-speech-bridge`は常駐するmacOSネイティブ音声プロセスです。英語・日本語の`AVSpeechSynthesizer`音声と、Kokoro使用時の
+WAVを同じ順序付きキューで再生し、連続読み上げ
 では音声を先行合成して文間の待ちを減らします。日本語は既定で最大2文を1区間とし、
 先の6区間まで準備します。`make my-read-k-check`を実行する場合は、テスト
 の前にこのブリッジも自動ビルドされます。
@@ -160,6 +161,7 @@ WAVと日本語の`AVSpeechSynthesizer`音声を同じ順序付きキューで�
       "~/my-read/state"
       my/read-japanese-macos-voice "Kyoko"
       my/read-japanese-macos-rate 540
+      my/read-english-macos-rate 180
       my/read-eww-url "https://arxiv.org/"
       my/read-eww-line-spacing 0.5
       my/read-eww-math-enabled t
@@ -203,16 +205,45 @@ WAVと日本語の`AVSpeechSynthesizer`音声を同じ順序付きキューで�
 `my/read-lookup-dictionary-ids` は通常のLookup設定を変更しません。空リストにすると専用フレーム内のLookupを無効にします。
 
 日本語を含むEPUB・PDF・TEXT・ローカルHTMLはmacOS音声へ自動的に切り替わり、既定では
-`Kyoko`を毎分540語で使います。英語のKokoro設定と速度は変更しません。
+`Kyoko`を毎分540語で使います。英語はKokoroの`bf_emma`を使います。
 
 GitHubの日本語READMEなどが英語音声になる場合は、
 [読み上げ言語の指定](#読み上げ言語の指定)で日本語音声へ切り替えられます。
 
-`M-x my-read-change-speed` で日本語の読み上げ速度を変更できます。
-ミニバッファに `400` などの正の整数を入力して `RET` を押すと、
-開いている日本語の読書バッファと、以後開く文書に反映されます。
-読み上げ中は一度停止し、次の再生から新しい速度を使います。
-変更は現在のEmacsセッション内で有効です。
+日本語のKokoro音声も利用できます。初期設定はApple音声を維持しています。
+`M-x my-read-set-japanese-speech-backend`で`kokoro`を選ぶと、開いている日本語本文も
+女性音声`jf_alpha`へ切り替わります。`macos`を選べばApple音声に戻せます。
+切り替え時は日本語の再生を停止するので、`s`または`SPC`で再開してください。
+
+```elisp
+;; 日本語もKokoroを既定にする場合
+(setq my/read-japanese-speech-backend 'kokoro
+      my/read-japanese-kokoro-voice "jf_alpha"
+      my/read-japanese-kokoro-speed 1.0)
+```
+
+日本語Kokoroの導入手順は[依存関係の設定](README-kokoro-emacs.md#1-install-dependencies)を参照してください。
+
+日本語と英語の速度は個別に設定できます。
+
+| 言語 | 設定変数（初期値） | 変更コマンド |
+| --- | --- | --- |
+| 日本語（Apple） | `my/read-japanese-macos-rate`（540） | `M-x my-read-change-japanese-speed` |
+| 日本語（Kokoro） | `my/read-japanese-kokoro-speed`（1.0倍） | `M-x my-read-change-japanese-speed` |
+| 英語（Kokoro） | `kokoro-reader-speed`（1.0倍） | `M-x my-read-change-english-speed` |
+
+Apple音声は毎分語数を正の整数、Kokoroは言語ごとの速度倍率（0.5〜2.0、通常1.0）を入力すると、
+その言語の開いている読書バッファと、
+以後開く文書に反映されます。対象言語を読み上げ中なら再生と先読みを停止し、
+`s`または`SPC`で再開すると新しい速度を使います。他方の言語の速度は変わりません。
+Apple音声を英語の既定に戻した場合は、同じコマンドで`my/read-english-macos-rate`（毎分語数）を変更します。
+従来の`my-read-change-speed`は日本語用の別名として使えます。
+コマンドの変更は現在のEmacsセッション内で有効です。再起動後も使う値は設定ファイルに記述してください。
+
+```elisp
+(setq my/read-japanese-macos-rate 540
+      kokoro-reader-speed 1.0)
+```
 
 PDFとorg-noterをまだ導入していない環境では、次の設定も追加してください。
 
@@ -337,7 +368,7 @@ PDF Toolsで本文をマウス選択すると、選択文字列とページ上�
 `s`を押すとその位置から連続して読み上げます。同じ文がページ内に複数ある場合は、
 選択位置に最も近いものを使います。
 
-英語はローカルKokoro、日本語を多く含むPDFは自動判定してmacOSの日本語音声
+英語はKokoroの`bf_emma`、日本語を多く含むPDFは自動判定してmacOSの日本語音声
 （既定は`Kyoko`、毎分540語）を使います。PDFのテキストレイヤーがないスキャンPDFは、
 現在の実装ではOCR対象外です。
 
@@ -408,7 +439,8 @@ Emacs Lispから指定する場合の引数はシンボルです。
 
 | コマンド（`M-x`） | 動作 |
 | --- | --- |
-| `my-read-change-speed` | 日本語音声の毎分語数を変更。次の再生から適用 |
+| `my-read-change-japanese-speed` / `my-read-change-speed` | 日本語音声の毎分語数を変更 |
+| `my-read-change-english-speed` | 英語Kokoro音声の速度倍率を変更 |
 | `my-read-restart-japanese-speech` | 音声エンジンを再起動し、現在の再生・先読みを停止 |
 
 `my-read`の起動時にも音声エンジンを再起動します。音声が応答しない場合は

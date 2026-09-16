@@ -25,7 +25,7 @@
   :type 'string)
 
 (defcustom kokoro-reader-server-command
-  '("uv" "run" "python" "kokoro_server.py"
+  '("uv" "run" "--extra" "japanese" "python" "kokoro_server.py"
     "--host" "127.0.0.1" "--port" "8000")
   "Command used to start Kokoro when its health endpoint is unavailable."
   :type '(repeat string))
@@ -84,7 +84,7 @@ with Apple `AVSpeechSynthesizer'.  Both feed the same resident native player."
   "Path to the resident AVSpeechSynthesizer bridge executable."
   :type 'file)
 
-(defcustom kokoro-reader-macos-voice nil
+(defcustom kokoro-reader-macos-voice "Samantha"
   "macOS voice used by the fallback backend, or nil for the system default."
   :type '(choice (const :tag "System default" nil) string))
 

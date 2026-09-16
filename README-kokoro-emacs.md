@@ -1,27 +1,36 @@
 # Kokoro + Emacs local english reading setup
 
-## 1. Install dependencies in the `tomoko` project
+## 1. Install dependencies
+
+Run these commands in the reader checkout. The Emacs launcher enables the
+`japanese` extra so Japanese support survives subsequent server starts.
 
 ```sh
-uv add 'mlx-audio[server]' 'misaki[en]' 'spacy>=3.8,<4'
-uv run python -m spacy download en_core_web_sm
+uv sync --inexact --extra japanese
+uv run --extra japanese python -m spacy download en_core_web_sm
 ```
 
-English reading uses the default dependency set. Japanese Kokoro support is
-optional because `pyopenjtalk` needs a working C++ toolchain:
+On macOS, if building `pyopenjtalk` fails with `fatal error: 'fstream' file not
+found` while the C++ headers exist inside the SDK, supply their include path:
 
 ```sh
-uv sync --extra japanese
+CPLUS_INCLUDE_PATH="$(xcrun --show-sdk-path)/usr/include/c++/v1${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}" uv sync --inexact --extra japanese
 ```
 
-The earlier successful Kokoro CLI environment may already contain some of these.
+`--inexact` preserves the separately installed English spaCy model. The server
+uses Misaki's `pyopenjtalk` frontend for Japanese. On first use, pyopenjtalk
+may download its Open JTalk dictionary; a full UniDic download is not required.
+
+Japanese speech uses `lang_code="j"`, voice `jf_alpha`, and its own speed
+multiplier. In Emacs select `kokoro` with `my-read-set-japanese-speech-backend`;
+select `macos` to return to the Apple voice. English remains `bf_emma`.
 
 ## 2. Start the dedicated server (optional)
 
 Place `kokoro_server.py` in the project root, then run:
 
 ```sh
-uv run python kokoro_server.py --host 127.0.0.1 --port 8000
+uv run --extra japanese python kokoro_server.py --host 127.0.0.1 --port 8000
 ```
 
 Health check:

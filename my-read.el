@@ -399,19 +399,39 @@ more transparent; 1 is fully opaque."
   :type 'string
   :group 'my-read)
 
+(defcustom my/read-japanese-speech-backend 'macos
+  "Japanese speech backend: macos or kokoro.
+Use `my-read-set-japanese-speech-backend' to also update open buffers."
+  :type '(choice (const macos) (const kokoro))
+  :group 'my-read)
+
+(defcustom my/read-japanese-kokoro-voice "jf_alpha"
+  "Japanese Kokoro voice, independent of the English voice."
+  :type 'string
+  :group 'my-read)
+
+(defcustom my/read-japanese-kokoro-speed 1.0
+  "Japanese Kokoro speed multiplier, from 0.5 to 2.0.
+Use `my-read-change-japanese-speed' to update open buffers."
+  :type 'number
+  :group 'my-read)
+
 (defcustom my/read-japanese-macos-voice "Kyoko"
   "macOS voice used when a center-pane EPUB or PDF contains Japanese text.
 
-Japanese EPUB/PDF speech deliberately uses macOS while the optional Kokoro
-Japanese frontend is unavailable, so opening a Japanese document never leaves
-the extracted text configured with an English Kokoro voice."
+Used when `my/read-japanese-speech-backend' is macos."
   :type '(choice (const :tag "System default" nil) string)
   :group 'my-read)
 
 (defcustom my/read-japanese-macos-rate 540
-  "Speaking rate used for Japanese EPUBs and PDFs, in words per minute.
+  "Japanese reading rate in words per minute.
+Use `my-read-change-japanese-speed' to also update open reading buffers."
+  :type 'integer
+  :group 'my-read)
 
-This is three times the normal `kokoro-reader-macos-rate' default of 180."
+(defcustom my/read-english-macos-rate 180
+  "English reading rate in words per minute.
+Use `my-read-change-english-speed' to also update open reading buffers."
   :type 'integer
   :group 'my-read)
 
@@ -1155,10 +1175,18 @@ Use DETECTED-LANGUAGE when supplied, otherwise inspect the buffer text."
                (if detected-language
                    (equal detected-language "ja")
                  (my/read--buffer-contains-japanese-p))))
-      (setq-local my/read-source-language "ja"
-                  kokoro-reader-backend 'macos
-                  kokoro-reader-macos-voice my/read-japanese-macos-voice
-                  kokoro-reader-macos-rate my/read-japanese-macos-rate)
+      (progn
+        (setq-local my/read-source-language "ja"
+                    kokoro-reader-backend my/read-japanese-speech-backend
+                    kokoro-reader-macos-voice my/read-japanese-macos-voice
+                    kokoro-reader-macos-rate my/read-japanese-macos-rate)
+        (if (eq my/read-japanese-speech-backend 'kokoro)
+            (setq-local kokoro-reader-voice my/read-japanese-kokoro-voice
+                        kokoro-reader-lang-code "j"
+                        kokoro-reader-speed my/read-japanese-kokoro-speed)
+          (dolist (variable '(kokoro-reader-voice kokoro-reader-lang-code
+                             kokoro-reader-speed))
+            (kill-local-variable variable))))
     (setq-local my/read-source-language
                 (if (eq my/read-speech-language-override 'en)
                     "en"
@@ -1166,8 +1194,13 @@ Use DETECTED-LANGUAGE when supplied, otherwise inspect the buffer text."
     (if (eq my/read-speech-language-override 'en)
         (setq-local kokoro-reader-backend 'kokoro)
       (kill-local-variable 'kokoro-reader-backend))
+    (dolist (variable '(kokoro-reader-voice kokoro-reader-lang-code
+                       kokoro-reader-speed))
+      (kill-local-variable variable))
     (kill-local-variable 'kokoro-reader-macos-voice)
-    (kill-local-variable 'kokoro-reader-macos-rate)))
+    (if (equal my/read-source-language "en")
+        (setq-local kokoro-reader-macos-rate my/read-english-macos-rate)
+      (kill-local-variable 'kokoro-reader-macos-rate))))
 
 (defun my-read-set-speech-language (language)
   "Set the current KINDLE/EWW/TEXT/EPUB reading buffer's speech LANGUAGE.
@@ -1206,28 +1239,92 @@ The selection survives Kindle page turns and EWW navigation until reset or close
 (add-hook 'english-reading-mode-pdf-text-buffer-hook
           #'my/read--configure-speech-language)
 
-(defun my-read-change-speed (rate)
-  "Set Japanese reading speed to RATE words per minute for this session.
-Prompt for a positive integer, defaulting to the current speed.  Update
-existing Japanese reading buffers as well as the default for new ones.
-Stop active Japanese speech to discard audio queued at the old speed;
-the next playback uses RATE."
+(defun my/read--stop-language-speech (language)
+  "Stop active or warming speech only when it belongs to LANGUAGE."
+  (let ((active-buffers
+         (list (plist-get english-reading-mode--continuous-state :buffer)
+               (and (overlayp kokoro-reader--overlay)
+                    (overlay-buffer kokoro-reader--overlay)))))
+    (when (cl-some (lambda (buffer)
+                     (and (buffer-live-p buffer)
+                          (equal (buffer-local-value 'my/read-source-language buffer)
+                                 language)))
+                   active-buffers)
+      (english-reading-mode-stop-continuous))))
+
+(defun my-read-set-japanese-speech-backend (backend)
+  "Select Japanese BACKEND (kokoro or macos) for this session.
+Stop Japanese speech and update existing Japanese reading buffers.
+Resume with SPC or s.  English speech settings remain unchanged."
   (interactive
-   (list (read-number "日本語の読み上げ速度（毎分語数）: "
-                      my/read-japanese-macos-rate)))
-  (unless (and (integerp rate) (> rate 0))
-    (user-error "速度は正の整数で入力してください"))
-  (when-let* ((buffer (and (overlayp kokoro-reader--overlay)
-                          (overlay-buffer kokoro-reader--overlay))))
-    (with-current-buffer buffer
-      (when (equal my/read-source-language "ja")
-        (kokoro-reader-stop))))
-  (setq my/read-japanese-macos-rate rate)
+   (list (intern (completing-read "日本語の音声エンジン: "
+                                 '("kokoro" "macos") nil t))))
+  (unless (memq backend '(kokoro macos))
+    (user-error "音声エンジンは kokoro または macos を指定してください"))
+  (my/read--stop-language-speech "ja")
+  (setq my/read-japanese-speech-backend backend)
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (equal my/read-source-language "ja")
-        (setq-local kokoro-reader-macos-rate rate))))
-  (message "日本語の読み上げ速度を %d に変更しました（次の再生から適用）" rate))
+        (my/read--configure-speech-language "ja"))))
+  (message "日本語の音声エンジン: %s（SPC または s で再開）" backend))
+
+(defun my/read--change-language-speed (language rate &optional kokoro)
+  "Set LANGUAGE reading speed to positive integer RATE for this session.
+Update open buffers and stop matching speech, including pending warmup.
+With KOKORO, RATE is a multiplier between 0.5 and 2.0."
+  (if kokoro
+      (unless (and (numberp rate) (<= 0.5 rate 2.0))
+        (user-error "Kokoroの速度は0.5〜2.0で入力してください"))
+    (unless (and (integerp rate) (> rate 0))
+      (user-error "速度は正の整数で入力してください")))
+  (my/read--stop-language-speech language)
+  (set-default (cond ((and kokoro (equal language "ja"))
+                      'my/read-japanese-kokoro-speed)
+                     (kokoro 'kokoro-reader-speed)
+             ((equal language "ja") 'my/read-japanese-macos-rate)
+             (t 'my/read-english-macos-rate))
+       rate)
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (equal my/read-source-language language)
+        (if kokoro
+            (setq-local kokoro-reader-speed rate)
+          (setq-local kokoro-reader-macos-rate rate)))))
+  (message "%sの読み上げ速度を %s%s に変更しました（次の再生から適用）"
+           (if (equal language "ja") "日本語" "英語") rate
+           (if kokoro "倍" "語/分")))
+
+(defun my-read-change-japanese-speed (rate)
+  "Set Japanese speed independently of English.
+For Kokoro, RATE is a multiplier from 0.5 to 2.0.  For macOS, RATE is
+positive integer words per minute.  Stop Japanese playback; resume with s."
+  (interactive
+   (list (if (eq my/read-japanese-speech-backend 'kokoro)
+             (read-number "日本語のKokoro速度（0.5〜2.0倍）: "
+                          my/read-japanese-kokoro-speed)
+           (read-number "日本語の読み上げ速度（毎分語数）: "
+                        my/read-japanese-macos-rate))))
+  (my/read--change-language-speed
+   "ja" rate (eq my/read-japanese-speech-backend 'kokoro)))
+
+(defun my-read-change-english-speed (rate)
+  "Set English reading speed for the current session.
+With the default Kokoro backend, RATE is a 0.5 to 2.0 multiplier and
+updates `kokoro-reader-speed'.  With macOS, RATE is words per minute
+and updates `my/read-english-macos-rate'.  Stop active English speech;
+resume with SPC or s.  Japanese speed remains unchanged."
+  (interactive
+   (list (if (eq (default-value 'kokoro-reader-backend) 'kokoro)
+             (read-number "英語のKokoro速度（0.5〜2.0倍）: "
+                          (default-value 'kokoro-reader-speed))
+           (read-number "英語の読み上げ速度（毎分語数）: "
+                        my/read-english-macos-rate))))
+  (my/read--change-language-speed
+   "en" rate (eq (default-value 'kokoro-reader-backend) 'kokoro)))
+
+(defalias 'my-read-change-speed #'my-read-change-japanese-speed
+  "Set Japanese reading speed; compatibility alias for the Japanese command.")
 
 (defun my/read--pdf-view-window-overlay-valid-p (window)
   "Return non-nil when WINDOW has a live PDF Tools image overlay."

@@ -164,7 +164,7 @@ async def voices() -> dict[str, object]:
             "british_male": ["bm_daniel", "bm_george"],
             "american_female": ["af_heart", "af_bella", "af_nova", "af_sky"],
             "american_male": ["am_adam", "am_echo"],
-            "japanese_female": ["jf_nezumi"],
+            "japanese_female": ["jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro"],
             "japanese_male": ["jm_kumo"],
             "mandarin_female": ["zf_xiaoxiao"],
             "mandarin_male": ["zm_yunxi"],

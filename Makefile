@@ -1,5 +1,5 @@
 run:
-	uv run python kokoro_server.py --host 127.0.0.1 --port 8000
+	uv run --extra japanese python kokoro_server.py --host 127.0.0.1 --port 8000
 
 ORG_NOTER_DIR := $(shell find $(HOME)/.emacs.d/elpa -maxdepth 1 -type d -name 'org-noter-*' 2>/dev/null | sort | tail -1)
 PDF_TOOLS_DIR := $(shell find $(HOME)/.emacs.d/elpa -maxdepth 1 -type d -name 'pdf-tools-*' 2>/dev/null | sort | tail -1)
