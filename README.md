@@ -7,6 +7,9 @@ PDFはPDF Tools、EPUBはnov.el、WebページとローカルHTMLはEWW、テキ
 Accessibilityから現在表示中のページだけを取得します。スクリーンショット取得、
 OCR、Kindleファイルの復号は行いません。
 
+追加の[HTTPチャンク読み上げ](docs/http-speech.md)は、独立GUIからサーバーを起動・停止し、
+英語・日本語のWAVを順次受信してEmacs側で連続再生できます。既存の読み上げとは別コマンドで利用します。
+
 専用フレームは、左の読書領域と右側の3段ペインで構成されます。
 
 - 左: タブで切り替えるDIRED、Kindle、PDF、EPUB、TEXT、EWW

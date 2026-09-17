@@ -40,3 +40,15 @@ my-read-k-check: my-read-speech-build my-read-k-test my-read-k-ert
 .PHONY: my-read-irodori-setup
 my-read-irodori-setup:
 	python3 scripts/setup_irodori.py
+
+.PHONY: speech-server speech-gui speech-http-test
+speech-server:
+	.venv/bin/python -m speech_http.server
+
+speech-gui:
+	.venv/bin/python -m speech_http.gui
+
+speech-http-test:
+	.venv/bin/python -m unittest discover -s test -p test_speech_http.py -v
+	/Applications/Emacs-takaxp/Emacs.app/Contents/MacOS/Emacs -Q --batch -L . \
+		-l test/reader-http-speech-tests.el -f ert-run-tests-batch-and-exit
