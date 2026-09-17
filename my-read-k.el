@@ -116,7 +116,8 @@ The bridge currently supports two."
            (setq header-line-format
                  (format " Kindle: attached | %s/%s | Accessibility"
                          (upcase my/read-source-language)
-                         (if (eq kokoro-reader-backend 'kokoro) "Kokoro" "macOS")))
+                         (pcase kokoro-reader-backend
+                           ('kokoro "Kokoro") ('irodori "Irodori") (_ "macOS"))))
            my/read-source-language)))
     (when (frame-live-p my-read-k--frame)
       (set-frame-parameter my-read-k--frame

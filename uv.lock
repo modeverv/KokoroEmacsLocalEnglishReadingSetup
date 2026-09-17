@@ -689,7 +689,7 @@ japanese = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "misaki", extras = ["en", "zh"], specifier = ">=0.9" },
-    { name = "mlx-audio", extras = ["server"], specifier = ">=0.1" },
+    { name = "mlx-audio", extras = ["server"], specifier = ">=0.4.7" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pyopenjtalk", marker = "extra == 'japanese'", specifier = ">=0.4.1" },
     { name = "spacy", specifier = ">=3.8,<4" },

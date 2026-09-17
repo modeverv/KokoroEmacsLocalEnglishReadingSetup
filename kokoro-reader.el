@@ -74,8 +74,9 @@
 (defcustom kokoro-reader-backend 'kokoro
   "Speech backend used for the current buffer.
 `kokoro' renders WAV chunks through the local HTTP server.  `macos' renders
-with Apple `AVSpeechSynthesizer'.  Both feed the same resident native player."
-  :type '(choice (const kokoro) (const macos)))
+with Apple `AVSpeechSynthesizer'.  `irodori' uses the local API to route
+reference-voice synthesis to Irodori. All feed the same resident native player."
+  :type '(choice (const kokoro) (const macos) (const irodori)))
 
 (defcustom kokoro-reader-macos-speech-bridge-program
   (expand-file-name
@@ -465,7 +466,7 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain queued macOS utterances."
 
 (defun kokoro-reader-prefetch-kokoro-texts (texts)
   "Append ordered future Kokoro TEXTS to the resident native queue."
-  (when (eq kokoro-reader-backend 'kokoro)
+  (when (memq kokoro-reader-backend '(kokoro irodori))
     (let* ((wanted (mapcar #'kokoro-reader--kokoro-key
                            (seq-take texts kokoro-reader-kokoro-prefetch-count)))
            (pending
@@ -523,7 +524,8 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain queued macOS utterances."
       (if queued-entry
           (setf (plist-get queued-entry :announced) t)
         (kokoro-reader--enqueue-kokoro-text text t))
-      (message "Kokoro speech queued…"))))
+      (message "%s speech queued…"
+               (if (eq kokoro-reader-backend 'irodori) "Irodori" "Kokoro")))))
 
 (defun kokoro-reader--macos-key (text)
   "Return the resident AVSpeechSynthesizer queue key for TEXT."

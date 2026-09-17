@@ -36,3 +36,7 @@ my-read-k-ert:
 		-f ert-run-tests-batch-and-exit
 
 my-read-k-check: my-read-speech-build my-read-k-test my-read-k-ert
+
+.PHONY: my-read-irodori-setup
+my-read-irodori-setup:
+	python3 scripts/setup_irodori.py

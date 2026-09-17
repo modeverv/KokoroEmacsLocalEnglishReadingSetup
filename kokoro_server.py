@@ -17,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Literal
 
+import irodori_backend
+
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -179,7 +181,7 @@ async def voices() -> dict[str, object]:
 
 @app.post("/v1/audio/speech")
 async def speech(payload: SpeechRequest) -> Response:
-    if payload.model != MODEL_ID:
+    if payload.model not in (MODEL_ID, "irodori-tts"):
         raise HTTPException(
             status_code=400,
             detail=f"This server has only {MODEL_ID!r} loaded",
@@ -201,14 +203,16 @@ async def speech(payload: SpeechRequest) -> Response:
     loop = asyncio.get_running_loop()
 
     try:
-        wav = await loop.run_in_executor(
-            _executor,
-            _synthesize_wav,
-            text,
-            payload.voice,
-            payload.speed,
-            payload.lang_code,
-        )
+        if payload.model == "irodori-tts":
+            wav = await loop.run_in_executor(
+                _executor, irodori_backend.synthesize,
+                text, payload.voice, payload.speed,
+            )
+        else:
+            wav = await loop.run_in_executor(
+                _executor, _synthesize_wav, text, payload.voice,
+                payload.speed, payload.lang_code,
+            )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -217,7 +221,7 @@ async def speech(payload: SpeechRequest) -> Response:
         media_type="audio/wav",
         headers={
             "Content-Disposition": 'inline; filename="speech.wav"',
-            "X-Kokoro-Model": MODEL_ID,
+            "X-Kokoro-Model": payload.model,
             "X-Kokoro-Voice": payload.voice,
         },
     )

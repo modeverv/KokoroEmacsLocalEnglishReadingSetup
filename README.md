@@ -224,12 +224,18 @@ GitHubの日本語READMEなどが英語音声になる場合は、
 
 日本語Kokoroの導入手順は[依存関係の設定](README-kokoro-emacs.md#1-install-dependencies)を参照してください。
 
+Irodoriの参照音声方式も追加しています。
+`M-x my-read-set-japanese-speech-backend`で`irodori`を選ぶと、
+`assets/asuka.wav`をもとに日本語を読み上げます。
+[導入・設定・切り戻し](README-irodori.md)を参照してください。
+
 日本語と英語の速度は個別に設定できます。
 
 | 言語 | 設定変数（初期値） | 変更コマンド |
 | --- | --- | --- |
 | 日本語（Apple） | `my/read-japanese-macos-rate`（540） | `M-x my-read-change-japanese-speed` |
 | 日本語（Kokoro） | `my/read-japanese-kokoro-speed`（1.0倍） | `M-x my-read-change-japanese-speed` |
+| 日本語（Irodori） | `my/read-japanese-irodori-speed`（1.0倍） | `M-x my-read-change-japanese-speed` |
 | 英語（Kokoro） | `kokoro-reader-speed`（1.0倍） | `M-x my-read-change-english-speed` |
 
 Apple音声は毎分語数を正の整数、Kokoroは言語ごとの速度倍率（0.5〜2.0、通常1.0）を入力すると、

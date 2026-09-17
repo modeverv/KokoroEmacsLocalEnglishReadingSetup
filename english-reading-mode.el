@@ -1511,7 +1511,26 @@ continuous playback, and prefetch advancing through it."
              (beginning-of-line)
              (when (looking-at "[ \t]*#+\\(?:[ \t]+\\|$\\)")
                (cons (line-beginning-position) (line-end-position)))))
-      (bounds-of-thing-at-point 'sentence)))
+      (if (not (derived-mode-p 'nov-mode))
+          (bounds-of-thing-at-point 'sentence)
+        (save-excursion
+          ;; Japanese dialogue also uses ideographic spaces between sentences.
+          ;; At such a space thing-at-point may return the *previous* sentence.
+          (skip-chars-forward " \t\n\r　 ")
+          (when (< (point) (point-max))
+            (let ((origin (point))
+                  (bounds (bounds-of-thing-at-point 'sentence)))
+              (if (and bounds (> (cdr bounds) origin))
+                  bounds
+                ;; For !? inside Japanese quotes, backward-sentence can stop
+                ;; after point and thing-at-point returns nil. Read the rest
+                ;; of this rendered line rather than lose the whole chapter.
+                ;; Both playback and prefetch must use these same bounds.
+                (let ((end (line-end-position)))
+                  (goto-char end)
+                  (skip-chars-backward " \t\r　 " origin)
+                  (when (< origin (point))
+                    (cons origin (point)))))))))))
 
 (defun english-reading-mode--sentence-bounds ()
   "Return the sentence at point, or signal a user error."
@@ -1847,9 +1866,10 @@ state and timer prevents its completion hook from moving the PDF again."
   (when (and (< (point) (point-max))
              (english-reading-mode--sentence-bounds-at-point))
     (english-reading-mode-next-sentence))
-  (skip-chars-forward " \t\n\r")
-  (while (and (not (and (< (point) (point-max))
-                       (english-reading-mode--sentence-bounds-at-point)))
+  (skip-chars-forward " \t\n\r　 ")
+  ;; Failure to identify a sentence is not evidence that the chapter ended.
+  ;; Only an exhausted buffer may advance the EPUB spine.
+  (while (and (= (point) (point-max))
               (boundp 'nov-documents-index)
               (boundp 'nov-documents)
               (< nov-documents-index (1- (length nov-documents))))
@@ -1858,10 +1878,11 @@ state and timer prevents its completion hook from moving the PDF again."
       (unless (> nov-documents-index previous-index)
         (user-error "EPUB chapter did not advance")))
     (goto-char (point-min))
-    (skip-chars-forward " \t\n\r"))
-  (unless (and (< (point) (point-max))
-               (english-reading-mode--sentence-bounds-at-point))
+    (skip-chars-forward " \t\n\r　 "))
+  (when (= (point) (point-max))
     (user-error "Reached the end of the document"))
+  (unless (english-reading-mode--sentence-bounds-at-point)
+    (user-error "Cannot identify EPUB speech at position %d" (point)))
   (english-reading-mode-speak-current-sentence))
 
 (defun english-reading-mode--continuous-default-next ()
@@ -1898,7 +1919,7 @@ responsible for page/chapter boundaries when no sentence follows locally."
       (cond
        ((eq source-buffer speech-buffer)
         (goto-char (min next-position (point-max)))
-        (skip-chars-forward " \t\n\r")
+        (skip-chars-forward " \t\n\r　 ")
         (when (and (or (not (derived-mode-p 'nov-mode))
                        (< (point) (point-max)))
                    (english-reading-mode--sentence-bounds-at-point))
@@ -2056,7 +2077,7 @@ does without changing the displayed page."
                (let ((kokoro-reader-macos-prefetch-count
                       english-reading-mode-macos-prefetch-chunk-count))
                  (kokoro-reader-prefetch-macos-texts texts))))
-            ('kokoro
+            ((or 'kokoro 'irodori)
              (when (fboundp 'kokoro-reader-prefetch-kokoro-texts)
                (let ((kokoro-reader-kokoro-prefetch-count
                       english-reading-mode-macos-prefetch-chunk-count))
@@ -2085,7 +2106,7 @@ does without changing the displayed page."
          (plist-get english-reading-mode--active-speech :buffer)))
     (when (and (buffer-live-p speech-buffer)
                (with-current-buffer speech-buffer
-                 (memq kokoro-reader-backend '(macos kokoro))))
+                 (memq kokoro-reader-backend '(macos kokoro irodori))))
       (setq english-reading-mode--macos-prefetch-monitor-timer
             (run-with-timer english-reading-mode-macos-prefetch-check-interval
                             english-reading-mode-macos-prefetch-check-interval
@@ -2197,7 +2218,7 @@ does without changing the displayed page."
          (resident-native-p
           (and (buffer-live-p speech-buffer)
                (with-current-buffer speech-buffer
-                 (memq kokoro-reader-backend '(macos kokoro)))
+                 (memq kokoro-reader-backend '(macos kokoro irodori)))
                (fboundp 'kokoro-reader--ensure-macos-bridge))))
     (if resident-native-p
         (progn
