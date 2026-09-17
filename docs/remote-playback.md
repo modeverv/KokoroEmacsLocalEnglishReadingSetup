@@ -209,3 +209,17 @@ make speech-playback-test speech-http-test
 Emacs側では `*HTTP Playback Errors*`（制御接続）と `*HTTP Speech Errors*`（生成・転送）、
 生成側では `~/Library/Caches/ReaderSpeechServer/8765/server.log` を確認してください。
 再生サーバー停止中は自動起動・別端末への代替再生をせず、読み上げを止めます。
+
+### 接続時にHTTP 409になる場合
+
+再生サーバーは一度に一つのEmacsだけが操作します。別のGUI/SSH Emacsの接続が残っている場合は、
+そのEmacsで `(reader-http-speech-set-playback-server nil)` を評価して解放してください。
+読み上げを停止するだけでは制御接続は残ります。
+また、CLI版とGUIアプリを同じポートで重複起動しないでください。
+macOSではループバックと全インターフェースへの待ち受けが併存し、接続先が意図と異なることがあります。
+`lsof -nP -iTCP:8768` で確認し、不要な検証用サーバーを終了します。
+
+HTTP 401は再生側の認証トークン不一致、404は接続先ポートなどの誤りを確認します。
+生成側の `unknown playback target` は `READER_SPEECH_PLAYBACK_TARGETS` の未登録です。
+環境変数を設定して生成サーバーを再起動してください。Emacsから自動起動する場合も、
+`init.el` の `setenv` で同じ転送先設定を渡します。

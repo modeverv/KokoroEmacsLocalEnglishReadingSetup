@@ -51,6 +51,14 @@ def main():
     args = parser.parse_args()
     try:
         asyncio.run(run(args.endpoint))
+    except aiohttp.WSServerHandshakeError as exc:
+        reason = {
+            409: "playback server is controlled by another Emacs; disconnect its playback session first",
+            401: "authentication failed; check READER_PLAYBACK_TOKEN against the playback app",
+            404: "wrong endpoint; use the playback server port (normally 8768), not the synthesis server",
+        }.get(exc.status, "check the playback server endpoint and logs")
+        print(f"Playback connection failed: HTTP {exc.status}: {reason}", file=sys.stderr)
+        sys.exit(1)
     except Exception as exc:
         print(f"Playback connection failed: {type(exc).__name__}", file=sys.stderr)
         sys.exit(1)
