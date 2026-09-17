@@ -48,7 +48,11 @@ Kokoro/Irodoriは既存のMLX環境・モデル、macOS音声は `/usr/bin/say` 
 ネイティブアプリのビルドにはAppleのCommand Line Toolsが必要です。
 `make speech-app-build` でビルドでき、`make speech-gui` は未ビルド・ソース更新時に自動ビルドします。
 アプリはこのチェックアウトと `.venv` を参照するランチャーです。
+Emacsを起動せず、Finderからこの `.app` を開いて「サーバースタート」だけで利用できます。
+アプリ画面にLAN接続先を表示します。このMacのPython環境を使用するため、別Macへ `.app` だけを
+コピーして使う配布形式ではありません。
 別の場所へリポジトリを移動した場合は `make speech-app-build` で再ビルドしてください。
+本と音声波形の[アプリアイコン・生成記録](../speech-http-app/ICON.md)を同梱しています。
 
 ## 通常のEmacs読書を接続
 
@@ -158,6 +162,34 @@ SSHトンネルを使う場合もローカルの同ポートに別サービス�
 LAN外で使用する際はHTTPSプロキシ等で暗号化してください。
 
 ## 検証
+
+別のLANマシンへ `scripts/check_speech_server.py` をコピーし、Python 3だけで確認できます。
+
+```sh
+python3 check_speech_server.py http://192.168.11.30:8765 --backend kokoro --language en
+python3 check_speech_server.py http://192.168.11.30:8765 --backend kokoro --language ja
+python3 check_speech_server.py http://192.168.11.30:8765 --backend irodori --language ja
+```
+
+IPアドレスはアプリに表示された現在のアドレスを使います。正常時はWAV形式・順序・完了を検証して
+`ok: true` と音声秒数を出力します。この確認スクリプトはサーバーを自動起動しないため、
+GUIだけで起動したサーバーの検証にも使えます。
+
+2026-09-17に実サーバーで以下を確認しました。
+
+| 方式 | 言語・声 | 実WAV生成 |
+|---|---|---|
+| Kokoro | 英語 / bf_emma | 成功、4.22秒 |
+| Kokoro | 日本語 / jf_alpha | 成功、5.53秒 |
+| Irodori | 日本語 / asuka | 成功、4.72秒 |
+| macOS | 日本語 / Kyoko | LANアドレスへのPOSTで成功、2.19秒 |
+
+Irodoriは現在日本語のみ、参照音声は `assets/asuka.wav` です。英語はKokoroまたはmacOSを使います。
+待受は `*:8765`。同じMacからLANアドレス `192.168.11.30` 経由のHTTP/WAV取得は成功しました。
+登録済みの別LANマシン3台はSSH接続がタイムアウトしたため、別マシンからの到達確認は未完了です。
+同じMacのLANアドレスに接続できることだけでは、別端末側の経路・ファイアウォールまでは検証できません。
+Emacsの読み上げを停止してGUIだけでサーバーを起動した後も、LANアドレス経由でWAV取得に成功しました。
+サーバーの親プロセスはlaunchd（PID 1）で、起動・音声生成はEmacsのプロセスに依存しません。
 
 `make speech-http-test` はHTTP配信・WAV連結・停止・起動制御・Emacsの設定反映を検証します。
 2026-09-17に、ネイティブGUIの起動・停止、サーバー停止状態からEmacsの通常の読み上げによる

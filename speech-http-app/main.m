@@ -1,4 +1,7 @@
 #import <Cocoa/Cocoa.h>
+#include <ifaddrs.h>
+#include <arpa/inet.h>
+#include <net/if.h>
 
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property NSWindow *window;
@@ -7,10 +10,30 @@
 @property NSButton *startButton;
 @property NSButton *stopButton;
 @property BOOL busy;
+@property NSString *pendingAction;
 @property NSString *root;
 @end
 
 @implementation AppDelegate
+- (NSString *)lanAddress {
+    struct ifaddrs *addresses = NULL;
+    NSString *address = @"このMacのLANアドレス";
+    if (getifaddrs(&addresses) == 0) {
+        for (struct ifaddrs *item = addresses; item; item = item->ifa_next) {
+            if (!item->ifa_addr || item->ifa_addr->sa_family != AF_INET ||
+                !(item->ifa_flags & IFF_UP) || (item->ifa_flags & IFF_LOOPBACK) ||
+                strncmp(item->ifa_name, "en", 2) != 0) continue;
+            char buffer[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &((struct sockaddr_in *)item->ifa_addr)->sin_addr,
+                          buffer, sizeof(buffer))) {
+                address = [NSString stringWithUTF8String:buffer];
+                break;
+            }
+        }
+        freeifaddrs(addresses);
+    }
+    return address;
+}
 - (NSTextField *)label:(NSString *)text size:(CGFloat)size {
     NSTextField *label = [NSTextField labelWithString:text];
     label.font = [NSFont systemFontOfSize:size];
@@ -27,7 +50,7 @@
     [appMenu addItemWithTitle:@"Reader Speech Server を終了" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
     NSApp.mainMenu = menu;
-    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 540, 340)
+    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 570, 405)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
         backing:NSBackingStoreBuffered defer:NO];
     self.window.title = @"Reader Speech Server";
@@ -37,7 +60,14 @@
     stack.alignment = NSLayoutAttributeLeading;
     stack.spacing = 18;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [stack addArrangedSubview:[self label:@"読み上げサーバー" size:26]];
+    NSImage *icon = [[NSImage alloc] initWithContentsOfFile:[[NSBundle mainBundle] pathForResource:@"SpeechServer" ofType:@"icns"]];
+    if (icon) NSApp.applicationIconImage = icon;
+    NSImageView *image = [NSImageView imageViewWithImage:icon ?: [NSImage imageNamed:NSImageNameApplicationIcon]];
+    [image.widthAnchor constraintEqualToConstant:64].active = YES;
+    [image.heightAnchor constraintEqualToConstant:64].active = YES;
+    NSStackView *heading = [NSStackView stackViewWithViews:@[image, [self label:@"読み上げサーバー" size:26]]];
+    heading.spacing = 16;
+    [stack addArrangedSubview:heading];
     [stack addArrangedSubview:[self label:@"英語・日本語の音声をEmacsや外部アプリへ配信します。" size:13]];
     self.status = [self label:@"状態を確認中…" size:18];
     [stack addArrangedSubview:self.status];
@@ -51,6 +81,7 @@
     [stack addArrangedSubview:buttons];
     self.detail = [self label:@"待受: 0.0.0.0:8765\nEmacs接続先: http://127.0.0.1:8765" size:13];
     [stack addArrangedSubview:self.detail];
+    [stack addArrangedSubview:[self label:@"英語: Kokoro / macOS　日本語: Kokoro / Irodori / macOS" size:12]];
     [stack addArrangedSubview:[self label:@"アプリを閉じても配信は継続します。停止には「停止」を使います。\nEmacsで読み上げると、停止中のサーバーは自動起動します。" size:12]];
     [self.window.contentView addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
@@ -65,7 +96,10 @@
     [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(refresh:) userInfo:nil repeats:YES];
 }
 - (void)runAction:(NSString *)action {
-    if (self.busy) return;
+    if (self.busy) {
+        if (![action isEqualToString:@"status"]) self.pendingAction = action;
+        return;
+    }
     self.busy = YES;
     if (![action isEqualToString:@"status"]) {
         self.startButton.enabled = NO;
@@ -103,7 +137,12 @@
                 self.status.stringValue = running ? @"● サーバー稼働中" : @"○ サーバー停止中";
                 self.startButton.enabled = !running;
                 self.stopButton.enabled = running;
-                self.detail.stringValue = [NSString stringWithFormat:@"待受: %@:8765\nEmacs接続先: http://127.0.0.1:8765", state[@"host"] ?: @"0.0.0.0"];
+                self.detail.stringValue = [NSString stringWithFormat:@"待受: %@:8765\nこのMac: http://127.0.0.1:8765\nLAN接続: http://%@:8765", state[@"host"] ?: @"0.0.0.0", [self lanAddress]];
+            }
+            if (self.pendingAction) {
+                NSString *pending = self.pendingAction;
+                self.pendingAction = nil;
+                [self runAction:pending];
             }
         });
     });
