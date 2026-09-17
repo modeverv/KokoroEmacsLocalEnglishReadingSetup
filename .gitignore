@@ -7,3 +7,4 @@ __pycache__/
 /*.elc
 /assets/asuka.wav
 /speech-http-app/build/
+/playback-app/build/

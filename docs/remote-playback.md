@@ -15,6 +15,40 @@ macOS・Windows・Linuxで利用できるライブラリを使用しています
 実機で確認したOSはmacOSです。Windows/Linuxの実オーディオ出力は未検証です。
 Kindleの本文取得には、Emacs側のMacにKindle.appとAccessibilityで読めるGUIセッションが必要です。
 
+## macOSの単体アプリ（Intel / Apple Silicon）
+
+`Reader Playback Server.app` はmacOS Monterey（12）以降を対象にしたUniversalアプリです。
+Intel版とApple Silicon版のPython 3.12・PortAudio・必要なライブラリを同梱し、
+利用先でPython、Homebrew、Emacs、音声モデルをインストールする必要はありません。
+
+1. `ReaderPlaybackServer-macOS12-universal.zip` を再生するMacへコピーして展開します。
+2. `Reader Playback Server.app` をApplicationsなど任意の場所へ移動して開きます。
+3. SSH経由なら「このMacのみ」、LAN直接接続なら「LANから接続」を選択します。
+4. 「サーバースタート」を押します。既定ポートは8768です。
+5. 以下の手順で生成サーバーとEmacsに再生先を登録します。
+
+音声出力デバイスは空欄でシステム既定を使います。「停止」またはアプリ終了でサーバーも停止します。
+認証トークンは任意で、設定した場合はEmacsの `READER_PLAYBACK_TOKEN` に同じ値を設定します。
+設定値・トークンは終了時に保存しません。ログは `~/Library/Logs/ReaderPlayback/server.log` です。
+
+開発用のアドホック署名を付けていますが、Appleの公証は未実施です。
+転送先で確認を求められた場合は、macOSの「セキュリティとプライバシー」からこのアプリの起動を許可してください。
+
+ソースから作るには、ビルドするMacにXcode Command Line Tools、Python 3.11以降、uvが必要です。
+初回は両CPUのランタイムと依存パッケージをダウンロードします。
+
+```sh
+make speech-playback-app
+```
+
+成果物は `playback-app/build/` に作成します。`compatibility-report.json` に全Mach-OのCPU・最低OS・リンク先を記録します。
+ビルドはmacOS 12を指定し、外部Python/Homebrewへの絶対参照や、macOS 12より新しいOSを要求するバイナリを拒否します。
+
+確認済み: Apple Silicon上で、作業フォルダー外へ移動したアプリのGUI起動・停止、WAV実デバイス出力、
+再生開始・終了通知、署名の検証。同梱46スライスの静的互換性検査も成功しました。
+**Intel Mac / Monterey実機では未検証です。** 静的検査だけで、古いOSの全実行時動作までは保証できません。
+音声生成は引き続き別の生成サーバーで行うため、Intel側にMLXは不要です。
+
 ## 手元の再生サーバーを導入
 
 このリポジトリ、または `speech_http/` と `requirements-playback.txt` を手元に置きます。

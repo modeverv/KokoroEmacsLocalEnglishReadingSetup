@@ -69,6 +69,10 @@ speech-playback:
 speech-playback-setup:
 	uv sync --locked --inexact --extra playback
 
+.PHONY: speech-playback-app
+speech-playback-app:
+	python3 scripts/build_playback_app.py
+
 speech-playback-test:
 	.venv/bin/python -m unittest discover -s test -p test_playback.py -v
 	/Applications/Emacs-takaxp/Emacs.app/Contents/MacOS/Emacs -Q --batch -L . \
