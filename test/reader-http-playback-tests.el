@@ -83,3 +83,9 @@
            (request (json-read-from-string (reader-http-playback--request entry))))
       (should (equal (alist-get 'endpoint (alist-get 'playback request))
                      "http://forward:18768")))))
+
+(ert-deftest reader-http-playback-settings-defined-on-load ()
+  ;; Do not let-bind the option here: that would hide a missing definition.
+  (should (boundp 'reader-http-speech-playback-delivery-endpoint))
+  (let ((reader-http-speech-transport-mode t))
+    (should (reader-http-speech-transport--key '("startup")))))

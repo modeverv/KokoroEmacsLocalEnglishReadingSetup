@@ -223,3 +223,22 @@ macOSではループバックと全インターフェースへの待ち受けが
 HTTP 401は再生側の認証トークン不一致、404は接続先ポートなどの誤りを確認します。
 旧サーバーで `unknown playback target` が出る場合は生成サーバーを更新し、一度再起動してください。
 更新後はEmacsのURL指定だけで転送でき、`READER_SPEECH_PLAYBACK_TARGETS` は不要です。
+
+### 更新後に変数が未定義になる場合
+
+`Symbol’s value as variable is void: reader-http-speech-playback-delivery-endpoint` は、
+更新前のコードがメモリや古い `.elc` に残っている場合に起きます。
+Readerの初回読み込みを次のようにして、更新時は新しいソースを優先してください。
+
+```elisp
+(let ((load-prefer-newer t))
+  (require 'my-read)
+  (require 'reader-http-speech-transport))
+```
+
+実行中のEmacsは `require` だけでは再読み込みしません。読み上げを止めて、次を評価します。
+
+```elisp
+(load "~/Sync/emacs.d/reader/reader-http-playback.el" nil t t)
+(load "~/Sync/emacs.d/reader/reader-http-speech-transport.el" nil t t)
+```
