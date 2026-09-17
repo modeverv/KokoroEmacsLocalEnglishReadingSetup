@@ -131,6 +131,19 @@ class ProtocolTests(unittest.TestCase):
                 process.stdout.close()
                 process.stderr.close()
 
+    def test_download_for_resident_player_preserves_all_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = str(Path(directory) / "resident.wav")
+            with patch.dict("os.environ", READER_SPEECH_TOKEN="test-secret"):
+                client.download(self.endpoint, {"text": "First. Second."}, output)
+            with wave.open(output, "rb") as wav:
+                self.assertEqual(wav.getnframes(), 480)
+                self.assertEqual(wav.readframes(480), b'\x01\x00' * 480)
+            with patch.dict("os.environ", READER_SPEECH_TOKEN="test-secret"):
+                with self.assertRaisesRegex(RuntimeError, "synthesis failure"):
+                    client.download(self.endpoint, {"text": "fail"}, output)
+            self.assertFalse(Path(output).exists())
+
 
 class ValidationTests(unittest.TestCase):
     def test_splitting_preserves_content_and_bounds(self):

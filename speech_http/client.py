@@ -126,16 +126,47 @@ def play(endpoint, payload, prebuffer=8, player="ffplay"):
             signal.signal(signum, handler)
 
 
+def download(endpoint, payload, output):
+    """Collect ordered PCM into a WAV for a resident player's reserved slot.
+
+The caller must only load the file after this process exits successfully.
+"""
+    chunks = queue.Queue(maxsize=8)
+    threading.Thread(target=receive, args=(endpoint, payload, chunks,
+                     os.getenv("READER_SPEECH_TOKEN", "")), daemon=True).start()
+    try:
+        with wave.open(output, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(RATE)
+            while True:
+                item = chunks.get()
+                if isinstance(item, Exception):
+                    raise item
+                if item is None:
+                    break
+                wav.writeframesraw(item)
+    except BaseException:
+        if os.path.exists(output):
+            os.unlink(output)
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--endpoint", default="http://127.0.0.1:8765")
     parser.add_argument("--prebuffer", type=float, default=8)
     parser.add_argument("--player", default="ffplay")
+    parser.add_argument("--output", help="Save received chunks as one WAV instead of playing")
     args = parser.parse_args()
     if not 0 < args.prebuffer <= 120:
         parser.error("prebuffer must be >0 and <=120 seconds")
     try:
-        play(args.endpoint, json.load(sys.stdin), args.prebuffer, args.player)
+        payload = json.load(sys.stdin)
+        if args.output:
+            download(args.endpoint, payload, args.output)
+        else:
+            play(args.endpoint, payload, args.prebuffer, args.player)
     except KeyboardInterrupt:
         sys.exit(130)
     except Exception as exc:
