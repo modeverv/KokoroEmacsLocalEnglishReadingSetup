@@ -18,6 +18,84 @@ OCR、Kindleファイルの復号は行いません。
 - 右中央: カーソル位置、または読み上げ中の1文の翻訳
 - 右下: カーソル位置の単語を自動検索するLookup
 
+## HTTP音声サーバー・ネイティブアプリ
+
+<img src="speech-http-app/icon.png" alt="Reader Speech Serverのアイコン" width="96">
+
+**Reader Speech Server**は、Emacsなしでも起動できるmacOSアプリです。
+「サーバースタート」「停止」ボタンで音声生成サーバーを操作し、画面にLAN接続先を表示します。
+Webブラウザーは不要です。EmacsやLAN内のプログラムから本文・言語・音声・速度を送り、
+WAVチャンクを順番に受け取れます。
+
+| 言語 | 音声エンジン | 既定の声 |
+| --- | --- | --- |
+| 英語 | Kokoro | `bf_emma`（イギリス英語） |
+| 日本語 | macOS（日本語の既定） | `Kyoko` |
+| 日本語 | Kokoro | `jf_alpha` |
+| 日本語 | Irodori | `asuka`（参照音声が必要） |
+
+英語はmacOS音声も指定できます。Irodoriは現在日本語のみです。
+日本語Kokoroは `uv sync --extra japanese`、Irodoriは[専用のセットアップ](README-irodori.md)が必要です。
+Irodoriの参照音声 `assets/asuka.wav` はリポジトリに含まれません。
+
+### Emacsなしで起動する
+
+Apple Silicon Macで、このリポジトリのディレクトリから実行します。
+Python・uvとApple Command Line Toolsを先に導入してください。
+
+```sh
+uv sync
+brew install ffmpeg
+make speech-gui
+```
+
+初回はアプリを自動ビルドします。以後はFinderで
+`speech-http-app/build/Reader Speech Server.app` を開いて起動できます。
+アプリはこのリポジトリと `.venv` を参照するため、`.app` だけを別Macへコピーする配布形式ではありません。
+GUIやEmacsを終了してもサーバーは動き続けます。停止にはGUIの「停止」を使います。
+
+### 通常のEmacs読み上げを接続する
+
+下記のReader導入・Emacsの `load-path` 設定後、設定ファイルへ追加します。
+
+```elisp
+(require 'reader-http-speech-transport)
+(reader-http-speech-transport-mode 1)
+```
+
+通常の `s` / `SPC` と先読みがHTTP経由になります。ローカルサーバーが停止中なら自動起動します。
+生成したWAVはEmacs側の常駐音声ブリッジで順番に再生し、ハイライトやページ送りも維持します。
+`my-read-set-speech-language` と言語別の速度変更関数の設定は次のリクエストに反映されます。
+macOS音声は語/分、Kokoro/Irodoriは速度倍率を送ります。
+
+### LAN・外部プログラムから使う
+
+既定の待受は **`0.0.0.0:8765`**、同じMacからの接続先は `http://127.0.0.1:8765` です。
+別端末ではアプリに表示されたサーバーのLANアドレスを使います。
+Emacsの接続先も変更できます。
+
+```elisp
+(setq reader-http-speech-endpoint "http://server-host:8765")
+```
+
+リモートサーバーは接続先のMacで起動してください。Emacsの自動起動はローカル接続専用です。
+音声生成APIの例:
+
+```sh
+curl -N http://127.0.0.1:8765/v1/speech/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"こんにちは。音声サーバーのテストです。","language":"ja","backend":"macos","rate":300}'
+```
+
+応答はNDJSONです。`audio` イベントに順序番号とBase64形式のWAVが入り、最後に `done` が届きます。
+WAVは24kHz・モノラル・PCM16です。文章単位の生成と先読みで待ち時間を減らしますが、
+合成が再生に追いつかない場合は待ちが発生します。
+現在のサーバーはmacOS/Apple Silicon用です。
+
+EmacsなしのGUI起動と、同じMacからLANアドレス経由の音声取得を確認済みです。
+別のLAN端末からの疎通確認は未完了です。
+[詳しい起動手順・API・認証・検証結果](docs/http-speech.md)を参照してください。
+
 ## 動作画面
 
 実際に動作中のmy-readフレームを撮影したものです。左側の
@@ -107,6 +185,8 @@ nov.elでEPUBを開き、翻訳対象の1文をハイライトしながら読書
 - Python 3.11以上3.14未満
 - [`uv`](https://docs.astral.sh/uv/)
 - Swift 6以降
+- HTTP音声サーバーには `ffmpeg`、独立再生クライアントには `ffplay`（`brew install ffmpeg`）
+- ネイティブ音声サーバーアプリのビルドにはApple Command Line Tools
 - macOSの `/usr/bin/curl`、`/usr/bin/say`、`/usr/bin/afplay`
 - ローカル翻訳を使う場合はOllamaと `translategemma:4b`
 - Emacsパッケージ `google-translate`、`lookup`、`org-noter`、`pdf-tools`
@@ -134,14 +214,16 @@ make my-read-speech-build
 ```
 
 英語の読み上げは既定でKokoroの女性音声`bf_emma`（イギリス英語、1.0倍）を使います。
-Kokoroサーバーは最初の読み上げ時にEmacsから自動起動します。手動起動とヘルスチェックは次の通りです。
+HTTP転送モードでは上記の8765番サーバーが音声を生成します。
+HTTP転送モードを使わない従来方式では、Kokoroサーバーを最初の読み上げ時にEmacsから自動起動します。
+従来方式の手動起動とヘルスチェックは次の通りです。
 
 ```sh
 make run
 curl --fail http://127.0.0.1:8000/health
 ```
 
-Kokoro使用時は `127.0.0.1:8000` のみに接続し、モデル `mlx-community/Kokoro-82M-bf16`、音声 `bf_emma`、イギリス英語を使います。
+従来方式のKokoro接続先は `127.0.0.1:8000` です。モデルは `mlx-community/Kokoro-82M-bf16`、音声は `bf_emma`、イギリス英語を使います。
 
 `my-read-speech-bridge`は常駐するmacOSネイティブ音声プロセスです。英語・日本語の`AVSpeechSynthesizer`音声と、Kokoro使用時の
 WAVを同じ順序付きキューで再生し、連続読み上げ
@@ -660,10 +742,26 @@ make my-read-k-check
 
 `make my-read-k-test` はKindle.app AccessibilityブリッジのSwiftテスト、`make my-read-k-ert` はEmacs ERTテストを実行します。
 
+HTTPサーバー・クライアントとEmacsの設定反映は、次で検証できます。
+
+```sh
+make speech-http-test
+```
+
+2026-09-17時点でHTTP関連はPython 18件・ERT 6件が成功しました。
+既存Readerの `make my-read-k-ert` は213件中206件成功・7件失敗で、全体のテスト成功には至っていません。
+実音声とLAN接続の確認範囲は[HTTPサーバーの検証記録](docs/http-speech.md#検証)に記載しています。
+
 ## ファイル構成
 
 | ファイル | 役割 |
 | --- | --- |
+| `speech_http/` | HTTP音声生成、WAV受信・再生、launchdサービス管理 |
+| `reader-http-speech-transport.el` | 通常のReader読み上げ・先読みをHTTPへ接続 |
+| `reader-http-speech.el` | 独立した文字列の読み上げ・GUI起動コマンド |
+| `speech-http-app/` | ネイティブGUIアプリのソースとアイコン |
+| `scripts/build_speech_app.py` | macOSアプリのビルド |
+| `scripts/check_speech_server.py` | LAN端末からの音声生成・WAV検証 |
 | `kokoro_server.py` | ローカルKokoro HTTPサーバー |
 | `kokoro-reader.el` | 非同期音声生成・再生・ハイライト |
 | `macos-speech-bridge/main.m` | Kokoro WAVとmacOS音声を順序付きで再生する常駐ネイティブブリッジ |
