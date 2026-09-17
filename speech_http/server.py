@@ -102,10 +102,11 @@ def synthesize(text, options):
 class SpeechServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, synthesizer=synthesize, token=""):
+    def __init__(self, address, synthesizer=synthesize, token="", playback_targets=None):
         super().__init__(address, Handler)
         self.synthesizer = synthesizer
         self.token = token
+        self.playback_targets = playback_targets or {}
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="speech-model")
         self.slots = threading.BoundedSemaphore(4)
 
@@ -139,7 +140,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path != "/v1/speech/stream":
+        if self.path not in ("/v1/speech/stream", "/v1/speech/deliver"):
             return self.reply(404, {"error": "not found"})
         if self.server.token and self.headers.get("Authorization") != "Bearer " + self.server.token:
             return self.reply(401, {"error": "unauthorized"})
@@ -147,7 +148,12 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= MAX_BODY:
                 raise ValueError("invalid Content-Length")
-            options = validate(json.loads(self.rfile.read(length)))
+            data = json.loads(self.rfile.read(length))
+            options = validate(data)
+            delivery = None
+            if self.path == "/v1/speech/deliver":
+                from speech_http.delivery import validate_delivery
+                delivery = validate_delivery(data.get("playback"), self.server.playback_targets)
         except (ValueError, UnicodeError) as exc:
             return self.reply(400, {"error": str(exc)})
         if not self.server.slots.acquire(blocking=False):
@@ -159,10 +165,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
             self.event({"type": "start", "protocol": 1, "sample_rate": RATE})
+            count = 0
             for index, text in enumerate(split_text(options["text"])):
+                if delivery:
+                    from speech_http.delivery import upload
+                    upload(delivery, "check")
                 wav = self.server.worker.submit(self.server.synthesizer, text, options).result()
-                self.event({"type": "audio", "index": index,
-                            "wav": base64.b64encode(wav).decode("ascii")})
+                if delivery:
+                    upload(delivery, str(index), wav, "audio/wav")
+                    self.event({"type": "delivered", "index": index})
+                else:
+                    self.event({"type": "audio", "index": index,
+                                "wav": base64.b64encode(wav).decode("ascii")})
+                count += 1
+            if delivery:
+                upload(delivery, "done", json.dumps({"count": count}).encode())
             self.event({"type": "done"})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             pass
@@ -184,7 +201,10 @@ def main():
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    with SpeechServer((args.host, args.port), token=os.getenv("READER_SPEECH_TOKEN", "")) as server:
+    from speech_http.delivery import targets_from_json
+    targets = targets_from_json(os.getenv("READER_SPEECH_PLAYBACK_TARGETS", "{}"))
+    with SpeechServer((args.host, args.port), token=os.getenv("READER_SPEECH_TOKEN", ""),
+                      playback_targets=targets) as server:
         print(f"Speech server http://{args.host}:{args.port}", flush=True)
         try:
             server.serve_forever()

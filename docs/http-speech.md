@@ -3,6 +3,9 @@
 Emacsの本文・言語・音声・速度をHTTPで送り、生成されたWAVチャンクを順番に再生します。
 GUIはmacOSのネイティブAppKitアプリです。Web GUIと8766番の管理HTTPサーバーは廃止しました。
 
+Emacsと別端末で音を出す場合は、[生成・再生サーバーの分離](remote-playback.md)を利用できます。
+既存の `/v1/speech/stream` は要求元へWAVを返し、追加の `/v1/speech/deliver` は登録済みの再生先へ直接転送します。
+
 ## 起動と停止
 
 通常はサーバーを先に起動する必要はありません。Emacsから読み上げを始めると、

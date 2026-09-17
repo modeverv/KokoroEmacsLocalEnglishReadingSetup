@@ -31,7 +31,7 @@ my-read-k-ert:
 	/Applications/Emacs-takaxp/Emacs.app/Contents/MacOS/Emacs -Q --batch -L . \
 		-L $(ORG_NOTER_DIR) \
 		-L $(PDF_TOOLS_DIR) -L $(TABLIST_DIR) -L $(MARKDOWN_MODE_DIR) \
-		--eval "(setq native-comp-jit-compilation nil native-comp-enable-subr-trampolines nil)" \
+		--eval "(setq load-prefer-newer t native-comp-jit-compilation nil native-comp-enable-subr-trampolines nil)" \
 		-l test/my-read-k-tests.el -l test/my-read-k2-tests.el \
 		-f ert-run-tests-batch-and-exit
 
@@ -51,11 +51,26 @@ speech-gui:
 speech-http-test:
 	.venv/bin/python -m unittest discover -s test -p test_speech_http.py -v
 	/Applications/Emacs-takaxp/Emacs.app/Contents/MacOS/Emacs -Q --batch -L . \
+		--eval "(setq load-prefer-newer t)" \
 		-l test/reader-http-speech-tests.el -f ert-run-tests-batch-and-exit
 	/Applications/Emacs-takaxp/Emacs.app/Contents/MacOS/Emacs -Q --batch -L . \
 		-L $(ORG_NOTER_DIR) -L $(PDF_TOOLS_DIR) -L $(TABLIST_DIR) -L $(MARKDOWN_MODE_DIR) \
+		--eval "(setq load-prefer-newer t)" \
 		-l test/reader-http-settings-tests.el -f ert-run-tests-batch-and-exit
 
 .PHONY: speech-app-build
 speech-app-build:
 	.venv/bin/python scripts/build_speech_app.py
+
+.PHONY: speech-playback speech-playback-setup speech-playback-test
+speech-playback:
+	.venv/bin/python -m speech_http.playback
+
+speech-playback-setup:
+	uv sync --locked --inexact --extra playback
+
+speech-playback-test:
+	.venv/bin/python -m unittest discover -s test -p test_playback.py -v
+	/Applications/Emacs-takaxp/Emacs.app/Contents/MacOS/Emacs -Q --batch -L . \
+		--eval "(setq load-prefer-newer t)" \
+		-l test/reader-http-playback-tests.el -f ert-run-tests-batch-and-exit

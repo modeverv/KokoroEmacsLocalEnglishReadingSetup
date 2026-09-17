@@ -152,12 +152,37 @@ The caller must only load the file after this process exits successfully.
         raise
 
 
+def deliver(endpoint, payload):
+    """Wait for delivery acknowledgement, never report it as playback finish."""
+    headers = {"Content-Type": "application/json"}
+    if token := os.getenv("READER_SPEECH_TOKEN", ""):
+        headers["Authorization"] = "Bearer " + token
+    request = urllib.request.Request(endpoint.rstrip("/") + "/v1/speech/deliver",
+                                     data=json.dumps(payload).encode(), headers=headers)
+    count, started = 0, False
+    with urllib.request.urlopen(request, timeout=300) as response:
+        for line in response:
+            event = json.loads(line)
+            if event.get("type") == "start" and not started and event.get("protocol") == 1:
+                started = True
+            elif event.get("type") == "delivered" and started and event.get("index") == count:
+                count += 1
+            elif event.get("type") == "done" and started and count:
+                return
+            elif event.get("type") == "error":
+                raise RuntimeError(event.get("message", "delivery failed"))
+            else:
+                raise RuntimeError("invalid delivery response")
+    raise RuntimeError("generation connection closed before delivery completed")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--endpoint", default="http://127.0.0.1:8765")
     parser.add_argument("--prebuffer", type=float, default=8)
     parser.add_argument("--player", default="ffplay")
     parser.add_argument("--output", help="Save received chunks as one WAV instead of playing")
+    parser.add_argument("--deliver", action="store_true", help="Send audio directly to the playback server")
     parser.add_argument("--auto-start", action="store_true", help="Start the local service when unavailable")
     parser.add_argument("--listen-host", default="0.0.0.0")
     args = parser.parse_args()
@@ -168,7 +193,9 @@ def main():
         if args.auto_start:
             from speech_http.service import ensure
             ensure(args.endpoint, args.listen_host)
-        if args.output:
+        if args.deliver:
+            deliver(args.endpoint, payload)
+        elif args.output:
             download(args.endpoint, payload, args.output)
         else:
             play(args.endpoint, payload, args.prebuffer, args.player)

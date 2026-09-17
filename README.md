@@ -20,6 +20,11 @@ OCR、Kindleファイルの復号は行いません。
 
 ## HTTP音声サーバー・ネイティブアプリ
 
+**SSH先で読書し、音は手元へ：** 音声生成と再生を別サーバーに分離できます。
+Emacs → 生成サーバー → 再生サーバーへWAVを送り、実際の再生終了をEmacsへ返します。
+手元の再生サーバーにはKindleや音声モデルは不要です。
+[クロスプラットフォーム再生サーバーの導入・SSH接続手順](docs/remote-playback.md)を参照してください。
+
 <img src="speech-http-app/icon.png" alt="Reader Speech Serverのアイコン" width="96">
 
 **Reader Speech Server**は、Emacsなしでも起動できるmacOSアプリです。
@@ -748,8 +753,10 @@ HTTPサーバー・クライアントとEmacsの設定反映は、次で検証�
 make speech-http-test
 ```
 
-2026-09-17時点でHTTP関連はPython 18件・ERT 6件が成功しました。
-既存Readerの `make my-read-k-ert` は213件中206件成功・7件失敗で、全体のテスト成功には至っていません。
+2026-09-18時点でHTTP・分離再生関連はPython 27件・ERT 11件が成功しました。
+分離再生は `make speech-playback-test` で検証できます。
+既存Readerの `make my-read-k-ert` は最新ソースを優先して213件中211件成功・2件失敗でした。
+残る失敗はAccessibilityブリッジ設定と読書位置の保存先設定で、全体のテスト成功には至っていません。
 実音声とLAN接続の確認範囲は[HTTPサーバーの検証記録](docs/http-speech.md#検証)に記載しています。
 
 ## ファイル構成
@@ -759,6 +766,9 @@ make speech-http-test
 | `speech_http/` | HTTP音声生成、WAV受信・再生、launchdサービス管理 |
 | `reader-http-speech-transport.el` | 通常のReader読み上げ・先読みをHTTPへ接続 |
 | `reader-http-speech.el` | 独立した文字列の読み上げ・GUI起動コマンド |
+| `reader-http-playback.el` | 手元の再生サーバーへの接続・再生完了通知 |
+| `speech_http/playback.py` | モデル不要のHTTP/WebSocket再生サーバー |
+| `requirements-playback.txt` | 再生専用のクロスプラットフォーム依存関係 |
 | `speech-http-app/` | ネイティブGUIアプリのソースとアイコン |
 | `scripts/build_speech_app.py` | macOSアプリのビルド |
 | `scripts/check_speech_server.py` | LAN端末からの音声生成・WAV検証 |
