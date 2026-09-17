@@ -25,7 +25,7 @@ Intel版とApple Silicon版のPython 3.12・PortAudio・必要なライブラリ
 2. `Reader Playback Server.app` をApplicationsなど任意の場所へ移動して開きます。
 3. SSH経由なら「このMacのみ」、LAN直接接続なら「LANから接続」を選択します。
 4. 「サーバースタート」を押します。既定ポートは8768です。
-5. 以下の手順で生成サーバーとEmacsに再生先を登録します。
+5. 以下の手順でEmacsに再生先URLを設定します。生成サーバーへの事前登録は不要です。
 
 音声出力デバイスは空欄でシステム既定を使います。「停止」またはアプリ終了でサーバーも停止します。
 認証トークンは任意で、設定した場合はEmacsの `READER_PLAYBACK_TOKEN` に同じ値を設定します。
@@ -94,17 +94,7 @@ SSH先の `127.0.0.1:18768` が手元の再生サーバーにつながります�
 このポートは、SSH先のEmacsからも生成サーバーからも使います。
 生成サーバーが別のホストにある場合は、そのホストから到達できる転送経路も必要です。
 
-SSH先の生成サーバーへ、再生先の名前とURLを登録します。
-
-```sh
-export READER_SPEECH_PLAYBACK_TARGETS='{"desktop":"http://127.0.0.1:18768"}'
-# 既存サーバーが稼働中なら、読み上げを止めて設定を再読み込みします。
-.venv/bin/python -m speech_http.service stop
-make speech-server
-```
-
-この環境変数はlaunchdのサービス定義へ引き継がれます。既に稼働しているサーバーには、
-環境変数を設定しただけでは反映されないため再起動してください。
+生成サーバーは通常どおり起動します。転送先の環境変数設定や、転送先変更のたびの再起動は不要です。
 WebSocket制御用のaiohttpもEmacs側のPythonに導入します。
 既存Reader環境なら `make speech-playback-setup`、制御専用環境なら `pip install 'aiohttp>=3.10,<4'` を使えます。
 
@@ -113,7 +103,7 @@ SSH先のEmacsで設定します。
 ```elisp
 (require 'reader-http-speech-transport)
 (setq reader-http-speech-endpoint "http://127.0.0.1:8765")
-(reader-http-speech-set-playback-server "http://127.0.0.1:18768" "desktop")
+(reader-http-speech-set-playback-server "http://127.0.0.1:18768")
 ```
 
 通常の `SPC` / `s` で読み上げます。音声は手元で鳴り、実際の再生終了がEmacsへ届いて文送りが進みます。
@@ -133,8 +123,15 @@ Emacs側での従来の再生へ戻すには、同じコマンドでURLを空欄
 ## LANで直接接続する
 
 再生サーバーを `--host 0.0.0.0` で起動し、上記URLを手元のLANアドレスに置き換えます。
-生成サーバー側の `desktop` のURLと、Emacs側の再生URLは、各ホストから同じ再生サーバーへ
-到達するよう設定します。SSH経由とLAN経由など、URL表記が異なっても構いません。
+Emacsで指定したURLを生成リクエストにも含めます。両ホストから到達できるURLを指定してください。
+異なるURLが必要な場合は、第3引数に生成サーバーから見たURLを指定します。
+
+```elisp
+(reader-http-speech-set-playback-server
+ "http://127.0.0.1:8768" nil "http://192.168.1.20:8768")
+```
+
+第2引数の転送先名は旧設定との互換用です。新しい生成サーバーはリクエストのURLを優先します。
 
 再生制御を認証する場合は、再生サーバーとEmacsのプロセス環境へ同じ `READER_PLAYBACK_TOKEN` を設定します。
 実行中のEmacsでは `(setenv "READER_PLAYBACK_TOKEN" "設定したトークン")` の後、再生先を選び直してください。
@@ -157,7 +154,7 @@ HTTP/WSをLAN外へ直接公開せず、SSHトンネルまたはHTTPS/WSSを利�
   "backend": "macos",
   "rate": 300,
   "playback": {
-    "target": "desktop",
+    "endpoint": "http://127.0.0.1:8768",
     "session": "readyで受け取ったセッションID",
     "delivery_token": "readyで受け取った一時トークン",
     "id": 1
@@ -182,7 +179,11 @@ WAVを含みません。この `done` は**転送完了**であり、再生終�
 停止は出力をabortし、全予約と遅延通知を破棄します。同じ接続でIDを再利用せず、
 停止後の古いWAVや重複・順序違いのチャンクは拒否します。制御接続の切断も再生を停止します。
 生成モデルの計算中断は行いませんが、その結果を古い再生キューへ入れることはありません。
-生成先URLはリクエストで自由指定できず、サーバー管理者が登録した名前だけを使います。
+転送先はリクエストの `playback.endpoint` で指定します。HTTP(S)のホスト・ポートのみを受け付け、
+認証情報・パス・クエリを含むURLやHTTPリダイレクトを拒否します。生成前に、転送先でセッションと予約IDを確認します。
+生成APIへのアクセス権があるクライアントは転送先を指定できるため、共有ネットワークでは
+既存の `READER_SPEECH_TOKEN` で生成APIを認証してください。
+旧クライアントの `playback.target` と `READER_SPEECH_PLAYBACK_TARGETS` も引き続き利用できます。
 
 再生側の上限は予約32件、PCMバッファ64MiB、WAV転送1回16MiBです。
 生成が再生に追いつかない場合は待ちが発生します。先読みはその待ちを減らすためのもので、
@@ -220,6 +221,5 @@ macOSではループバックと全インターフェースへの待ち受けが
 `lsof -nP -iTCP:8768` で確認し、不要な検証用サーバーを終了します。
 
 HTTP 401は再生側の認証トークン不一致、404は接続先ポートなどの誤りを確認します。
-生成側の `unknown playback target` は `READER_SPEECH_PLAYBACK_TARGETS` の未登録です。
-環境変数を設定して生成サーバーを再起動してください。Emacsから自動起動する場合も、
-`init.el` の `setenv` で同じ転送先設定を渡します。
+旧サーバーで `unknown playback target` が出る場合は生成サーバーを更新し、一度再起動してください。
+更新後はEmacsのURL指定だけで転送でき、`READER_SPEECH_PLAYBACK_TARGETS` は不要です。

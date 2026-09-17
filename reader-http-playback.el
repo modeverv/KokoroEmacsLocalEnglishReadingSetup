@@ -9,6 +9,9 @@
 (defcustom reader-http-speech-playback-target "desktop"
   "Target name configured on the generation server."
   :type 'string :group 'reader-http-speech)
+(defcustom reader-http-speech-playback-delivery-endpoint nil
+  "Playback origin reachable from the generator; nil uses the control endpoint."
+  :type '(choice (const nil) string) :group 'reader-http-speech)
 (defvar reader-http-playback--session nil)
 (defvar reader-http-playback--delivery-token nil)
 
@@ -16,12 +19,13 @@
   (and (bound-and-true-p reader-http-speech-transport-mode)
        reader-http-speech-playback-endpoint))
 
-(defun reader-http-speech-set-playback-server (endpoint &optional target)
-  "Stop reading and select playback ENDPOINT and generation-side TARGET.
+(defun reader-http-speech-set-playback-server (endpoint &optional target delivery-endpoint)
+  "Stop reading and select playback ENDPOINT.
+DELIVERY-ENDPOINT overrides the URL seen by the generator.
+TARGET is retained for compatibility with older configurations.
 An empty ENDPOINT restores playback on the Emacs host."
   (interactive (list (read-string "再生サーバーURL（空欄でローカル再生）: "
-                                  reader-http-speech-playback-endpoint)
-                     (read-string "生成サーバー側の再生先名: " reader-http-speech-playback-target)))
+                                  reader-http-speech-playback-endpoint)))
   (when (fboundp 'english-reading-mode-stop-continuous)
     (english-reading-mode-stop-continuous))
   (kokoro-reader-stop)
@@ -31,7 +35,9 @@ An empty ENDPOINT restores playback on the Emacs host."
         reader-http-playback--session nil
         reader-http-playback--delivery-token nil
         reader-http-speech-playback-endpoint (unless (string-empty-p (or endpoint "")) endpoint)
-        reader-http-speech-playback-target (or target reader-http-speech-playback-target))
+        reader-http-speech-playback-target (or target reader-http-speech-playback-target)
+        reader-http-speech-playback-delivery-endpoint
+        (unless (string-empty-p (or delivery-endpoint "")) delivery-endpoint))
   (when reader-http-speech-playback-endpoint
     (require 'reader-http-speech-transport)
     (unless reader-http-speech-transport-mode (reader-http-speech-transport-mode 1)))
@@ -107,7 +113,9 @@ An empty ENDPOINT restores playback on the Emacs host."
     (user-error "再生サーバーのキュー予約に失敗しました"))
   (let ((json-object-type 'alist) (json-array-type 'list))
     (json-encode
-     (cons `(playback . ((target . ,reader-http-speech-playback-target)
+     (cons `(playback . ((endpoint . ,(or reader-http-speech-playback-delivery-endpoint
+                                          reader-http-speech-playback-endpoint))
+                        (target . ,reader-http-speech-playback-target)
                         (session . ,reader-http-playback--session)
                         (delivery_token . ,reader-http-playback--delivery-token)
                         (id . ,(plist-get entry :id))))

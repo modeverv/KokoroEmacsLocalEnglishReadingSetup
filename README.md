@@ -23,6 +23,7 @@ OCR、Kindleファイルの復号は行いません。
 **SSH先で読書し、音は手元へ：** 音声生成と再生を別サーバーに分離できます。
 Emacs → 生成サーバー → 再生サーバーへWAVを送り、実際の再生終了をEmacsへ返します。
 手元の再生サーバーにはKindleや音声モデルは不要です。
+転送先はEmacsでURLを指定するだけで、生成サーバーへの事前登録は不要です。
 macOS版はIntel／Apple Silicon・Monterey（12）以降を対象とする単体GUIアプリを
 `make speech-playback-app` で作成できます。Pythonも同梱します（Intel／Monterey実機は未検証）。
 [クロスプラットフォーム再生サーバーの導入・SSH接続手順](docs/remote-playback.md)を参照してください。

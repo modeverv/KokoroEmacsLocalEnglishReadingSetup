@@ -94,6 +94,15 @@ class QueueTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             targets_from_json('{"desktop":"file:///etc/passwd"}')
 
+    def test_request_endpoint_validation(self):
+        data = dict(endpoint="http://127.0.0.1:8768/", session="a" * 32,
+                    delivery_token="b" * 64, id=1)
+        self.assertEqual(validate_delivery(data, {})["endpoint"], "http://127.0.0.1:8768")
+        for endpoint in (None, "file:///tmp/a", "http://user:pass@host", "http://host/path",
+                         "http://host/?q=1", "http://host/#x", "http://host:99999", "http://host\n"):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                validate_delivery(dict(data, endpoint=endpoint), {})
+
 
 class FakeDevice:
     """A deterministic output-clock simulator, never opens speakers in tests."""
@@ -163,6 +172,20 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([started["event"], finished["event"]], ["started", "finished"])
         self.assertGreaterEqual(finished["device_time"] - started["device_time"], .19)
         self.assertLessEqual(finished["device_time"], time.monotonic())
+
+    async def test_request_endpoint_without_registration(self):
+        self.generator.playback_targets = {}
+        await self.ws.send_json(dict(command="hold"))
+        await self.reserve()
+        data = self.delivery()
+        data.pop("target")
+        data["endpoint"] = str(self.player.make_url(""))
+        await asyncio.to_thread(deliver, f"http://127.0.0.1:{self.generator.server_port}",
+                                dict(text="Direct.", language="en", playback=data))
+        self.assertEqual((await self.ws.receive_json(timeout=2))["event"], "loaded")
+        await self.ws.send_json(dict(command="play"))
+        self.assertEqual((await self.ws.receive_json(timeout=2))["event"], "started")
+        self.assertEqual((await self.ws.receive_json(timeout=2))["event"], "finished")
 
     async def test_stop_rejects_late_upload_and_frees_session(self):
         await self.reserve()

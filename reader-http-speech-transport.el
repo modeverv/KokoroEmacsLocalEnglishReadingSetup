@@ -45,6 +45,7 @@
   "Include the HTTP endpoint in KEY without shifting existing key fields."
   (if reader-http-speech-transport-mode
       (append key (list 'http reader-http-speech-endpoint reader-http-speech-playback-endpoint
+                        reader-http-speech-playback-delivery-endpoint
                         reader-http-speech-playback-target
                         (and (boundp 'my/read-source-language) my/read-source-language)
                         (and (boundp 'my/read-speech-language-override) my/read-speech-language-override)))
