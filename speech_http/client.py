@@ -158,11 +158,16 @@ def main():
     parser.add_argument("--prebuffer", type=float, default=8)
     parser.add_argument("--player", default="ffplay")
     parser.add_argument("--output", help="Save received chunks as one WAV instead of playing")
+    parser.add_argument("--auto-start", action="store_true", help="Start the local service when unavailable")
+    parser.add_argument("--listen-host", default="0.0.0.0")
     args = parser.parse_args()
     if not 0 < args.prebuffer <= 120:
         parser.error("prebuffer must be >0 and <=120 seconds")
     try:
         payload = json.load(sys.stdin)
+        if args.auto_start:
+            from speech_http.service import ensure
+            ensure(args.endpoint, args.listen_host)
         if args.output:
             download(args.endpoint, payload, args.output)
         else:

@@ -42,7 +42,14 @@ def validate(data):
     voice = data.get("voice", defaults[backend])
     if not isinstance(voice, str) or len(voice) > 100 or voice.startswith("-"):
         raise ValueError("invalid voice")
-    return dict(text=text.strip(), language=language, backend=backend, speed=speed, voice=voice)
+    rate = data.get("rate")
+    if rate is not None and (backend != "macos" or type(rate) is not int or rate <= 0):
+        raise ValueError("rate must be a positive integer for the macos backend")
+    lang_code = data.get("lang_code", "b" if language == "en" else "j")
+    if lang_code not in (("a", "b") if language == "en" else ("j", "ja")):
+        raise ValueError("lang_code does not match language")
+    return dict(text=text.strip(), language=language, backend=backend, speed=speed, voice=voice,
+                rate=rate, lang_code=lang_code)
 
 
 def split_text(text, limit=240):
@@ -66,7 +73,7 @@ def synthesize(text, options):
         with tempfile.TemporaryDirectory(prefix="reader-speech-") as directory:
             source, output = Path(directory) / "text.txt", Path(directory) / "speech.wav"
             source.write_text(text, encoding="utf-8")
-            subprocess.run(["/usr/bin/say", "-v", voice, "-r", str(round(250 * speed)),
+            subprocess.run(["/usr/bin/say", "-v", voice, "-r", str(options.get("rate") or round(250 * speed)),
                             "-f", str(source), "-o", str(output), "--file-format=WAVE",
                             "--data-format=LEI16@24000"], check=True, capture_output=True, timeout=180)
             wav = output.read_bytes()
@@ -76,7 +83,7 @@ def synthesize(text, options):
     else:
         import kokoro_server
         wav = kokoro_server._synthesize_wav(text, voice, speed,
-                                          "b" if options["language"] == "en" else "j")
+                                          options["lang_code"])
     # Every backend has the same wire format, independent of native model output.
     pcm = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "s16le",
                           "-ar", str(RATE), "-ac", "1", "pipe:1"], input=wav,
@@ -125,7 +132,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self.reply(200, {"ok": True, "protocol": 1, "sample_rate": RATE, "pid": os.getpid()})
+            self.reply(200, {"ok": True, "service": "reader-speech", "protocol": 1,
+                             "sample_rate": RATE, "pid": os.getpid(),
+                             "host": self.server.server_address[0], "port": self.server.server_port})
         else:
             self.reply(404, {"error": "not found"})
 
@@ -172,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     with SpeechServer((args.host, args.port), token=os.getenv("READER_SPEECH_TOKEN", "")) as server:

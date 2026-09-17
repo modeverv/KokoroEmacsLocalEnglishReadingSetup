@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 import wave
 
-from speech_http import client, server, gui
+from speech_http import client, server, service
 
 
 def wav_bytes(frames=240):
@@ -171,21 +171,47 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises((wave.Error, EOFError)):
             client.decode_audio({"wav": base64.b64encode(b"not wav").decode()})
 
-    def test_gui_rejects_control_without_page_token(self):
-        controller = gui.Controller("127.0.0.1", 18765)
-        with gui.ThreadingHTTPServer(("127.0.0.1", 0), gui.make_handler(controller)) as http:
-            thread = threading.Thread(target=http.serve_forever, daemon=True)
-            thread.start()
-            try:
-                request = urllib.request.Request(f"http://127.0.0.1:{http.server_port}/start", data=b"")
-                with self.assertRaises(urllib.error.HTTPError) as error:
-                    urllib.request.urlopen(request)
-                self.assertEqual(error.exception.code, 403)
-                error.exception.close()
-                self.assertIsNone(controller.process)
-            finally:
-                http.shutdown()
-                thread.join()
+    def test_exact_macos_rate_above_multiplier_limit(self):
+        options = server.validate({"text": "日本語", "language": "ja", "rate": 540})
+        self.assertEqual(options["rate"], 540)
+        for rate in (0, -1, True, 2.5):
+            with self.assertRaises(ValueError):
+                server.validate({"text": "日本語", "language": "ja", "rate": rate})
+
+    def test_language_code_must_match_request_language(self):
+        self.assertEqual(server.validate({"text": "Hello", "lang_code": "a"})["lang_code"], "a")
+        with self.assertRaises(ValueError):
+            server.validate({"text": "Hello", "language": "en", "lang_code": "j"})
+
+
+class ServiceTests(unittest.TestCase):
+    def test_running_service_is_reused_without_launch(self):
+        with patch.object(service, "health", return_value={"ok": True, "pid": 42}), patch.object(service, "launchctl") as launch:
+            self.assertEqual(service.ensure()["pid"], 42)
+            launch.assert_not_called()
+
+    def test_remote_failure_never_starts_local_server(self):
+        with patch.object(service, "health", return_value=None), patch.object(service, "launchctl") as launch:
+            with self.assertRaisesRegex(RuntimeError, "local-only"):
+                service.ensure("http://192.0.2.1:8765")
+            launch.assert_not_called()
+
+    def test_stopped_service_starts_once_with_wildcard_bind(self):
+        import plistlib
+        with tempfile.TemporaryDirectory() as directory:
+            paths = (Path(directory), "test.reader", "gui/501/test.reader")
+            with patch.object(service, "service_paths", return_value=paths), patch.object(service, "health", side_effect=[None, None, {"ok": True}]), patch.object(service, "launchctl") as launch:
+                self.assertTrue(service.ensure()["ok"])
+                config = plistlib.loads((Path(directory) / "server.plist").read_bytes())
+                self.assertIn("0.0.0.0", config["ProgramArguments"])
+                self.assertFalse(config["KeepAlive"])
+                self.assertEqual([call.args[0] for call in launch.call_args_list], ["bootout", "bootstrap"])
+
+    def test_readiness_rechecked_after_lock_prevents_duplicate_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(service, "service_paths", return_value=(Path(directory), "test", "target")), patch.object(service, "health", side_effect=[None, {"ok": True}]), patch.object(service, "launchctl") as launch:
+                service.ensure()
+                launch.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -5,3 +5,4 @@ __pycache__/
 /macos-speech-bridge/my-read-speech-bridge
 /*.elc
 /assets/asuka.wav
+/speech-http-app/build/

@@ -43,7 +43,7 @@ my-read-irodori-setup:
 
 .PHONY: speech-server speech-gui speech-http-test
 speech-server:
-	.venv/bin/python -m speech_http.server
+	.venv/bin/python -m speech_http.service start
 
 speech-gui:
 	.venv/bin/python -m speech_http.gui
@@ -52,3 +52,10 @@ speech-http-test:
 	.venv/bin/python -m unittest discover -s test -p test_speech_http.py -v
 	/Applications/Emacs-takaxp/Emacs.app/Contents/MacOS/Emacs -Q --batch -L . \
 		-l test/reader-http-speech-tests.el -f ert-run-tests-batch-and-exit
+	/Applications/Emacs-takaxp/Emacs.app/Contents/MacOS/Emacs -Q --batch -L . \
+		-L $(ORG_NOTER_DIR) -L $(PDF_TOOLS_DIR) -L $(TABLIST_DIR) -L $(MARKDOWN_MODE_DIR) \
+		-l test/reader-http-settings-tests.el -f ert-run-tests-batch-and-exit
+
+.PHONY: speech-app-build
+speech-app-build:
+	.venv/bin/python scripts/build_speech_app.py

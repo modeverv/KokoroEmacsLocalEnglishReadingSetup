@@ -12,7 +12,8 @@
     (let ((payload (json-read-from-string (reader-http-speech-transport--payload "日本語です。"))))
       (should (equal (alist-get 'language payload) "ja"))
       (should (equal (alist-get 'voice payload) "Kyoko"))
-      (should (= (alist-get 'speed payload) 1.2)))))
+      (should (= (alist-get 'rate payload) 300))
+      (should (= (alist-get 'speed payload) 1.0)))))
 
 (ert-deftest reader-http-transport-reserves-file-instead-of-local-synthesis ()
   (let ((reader-http-speech-transport-mode t)

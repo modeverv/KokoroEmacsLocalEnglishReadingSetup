@@ -7,26 +7,39 @@
 (defvar reader-http-speech-transport-mode nil)
 
 (defun reader-http-speech-transport--payload (text)
-  "Capture the current reader's language, voice and speed for TEXT."
+  "Capture the reader's explicit language, voice and exact speed for TEXT."
   (let* ((backend (symbol-name kokoro-reader-backend))
-         (japanese (or (eq kokoro-reader-backend 'irodori)
-                       (member kokoro-reader-lang-code '("j" "ja"))
-                       (and (eq kokoro-reader-backend 'macos)
-                            (string-match-p "Kyoko" kokoro-reader-macos-voice))))
+         (language
+          (cond ((and (boundp 'my/read-speech-language-override)
+                      (memq my/read-speech-language-override '(ja en)))
+                 (symbol-name my/read-speech-language-override))
+                ((and (boundp 'my/read-source-language)
+                      (member my/read-source-language '("ja" "en")))
+                 my/read-source-language)
+                ((or (eq kokoro-reader-backend 'irodori)
+                     (member kokoro-reader-lang-code '("j" "ja"))
+                     (and (eq kokoro-reader-backend 'macos)
+                          (string-match-p "Kyoko" (or kokoro-reader-macos-voice "")))) "ja")
+                (t "en")))
          (voice (if (eq kokoro-reader-backend 'macos)
-                    (replace-regexp-in-string " (.*)\\'" "" kokoro-reader-macos-voice)
+                    (replace-regexp-in-string " (.*)\\'" "" (or kokoro-reader-macos-voice
+                                                                          (if (equal language "ja") "Kyoko" "Samantha")))
                   kokoro-reader-voice))
-         (speed (if (eq kokoro-reader-backend 'macos)
-                    (/ kokoro-reader-macos-rate 250.0)
-                  kokoro-reader-speed)))
-    (json-encode `((text . ,(kokoro-reader--speech-text text))
-                   (language . ,(if japanese "ja" "en"))
-                   (backend . ,backend) (voice . ,voice) (speed . ,speed)))))
+         (payload `((text . ,(kokoro-reader--speech-text text))
+                    (language . ,language) (backend . ,backend) (voice . ,voice)
+                    (lang_code . ,(if (equal language "ja") "j"
+                                    (if (member kokoro-reader-lang-code '("a" "b")) kokoro-reader-lang-code "b")))
+                    (speed . ,(if (eq kokoro-reader-backend 'macos) 1.0 kokoro-reader-speed)))))
+    (when (eq kokoro-reader-backend 'macos)
+      (push `(rate . ,kokoro-reader-macos-rate) payload))
+    (json-encode payload)))
 
 (defun reader-http-speech-transport--key (key)
   "Include the HTTP endpoint in KEY without shifting existing key fields."
   (if reader-http-speech-transport-mode
-      (append key (list 'http reader-http-speech-endpoint))
+      (append key (list 'http reader-http-speech-endpoint
+                        (and (boundp 'my/read-source-language) my/read-source-language)
+                        (and (boundp 'my/read-speech-language-override) my/read-speech-language-override)))
     key))
 
 (defun reader-http-speech-transport--enqueue (original text &optional announced)
@@ -67,6 +80,7 @@
              :coding 'utf-8-unix :noquery t
              :command (list reader-http-speech-python "-m" "speech_http.client"
                             "--endpoint" (plist-get entry :endpoint)
+                            "--auto-start" "--listen-host" reader-http-speech-listen-host
                             "--output" (plist-get entry :audio-file))
              :sentinel
              (lambda (proc _event)
@@ -74,7 +88,14 @@
                  (when (and (not (zerop (process-exit-status proc)))
                             (buffer-live-p stderr-buffer))
                    (with-current-buffer (get-buffer-create "*HTTP Speech Errors*")
-                     (insert-buffer-substring stderr-buffer)))
+                     (insert-buffer-substring stderr-buffer))
+                   ;; A failed request must not advance reading or automatically
+                   ;; relaunch a server the user just stopped in the app.
+                   (when (kokoro-reader--macos-entry-for-id (plist-get entry :id))
+                     (if (fboundp 'english-reading-mode-stop-continuous)
+                         (english-reading-mode-stop-continuous)
+                       (kokoro-reader-stop))
+                     (message "HTTP speech stopped; see *HTTP Speech Errors*")))
                  (kokoro-reader--kokoro-request-finished proc entry stderr-buffer))))))
       (setf (plist-get entry :process) process)
       (push process kokoro-reader--kokoro-request-processes)

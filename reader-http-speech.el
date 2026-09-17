@@ -3,6 +3,7 @@
 (require 'json)
 (require 'subr-x)
 (require 'thingatpt)
+(declare-function reader-http-speech-transport--payload "reader-http-speech-transport" (text))
 
 (defgroup reader-http-speech nil "Independent HTTP speech playback." :group 'multimedia)
 (defconst reader-http-speech--directory
@@ -13,6 +14,9 @@
   :type 'file)
 (defcustom reader-http-speech-endpoint "http://127.0.0.1:8765"
   "Speech server URL; may point to another machine or an SSH tunnel."
+  :type 'string)
+(defcustom reader-http-speech-listen-host "0.0.0.0"
+  "Bind address when automatically starting the local server."
   :type 'string)
 (defcustom reader-http-speech-prebuffer 8
   "Seconds of received audio to accumulate before playback."
@@ -52,11 +56,19 @@
   (unless (member language '("en" "ja")) (user-error "Use en or ja"))
   (unless (<= 1 (length (string-trim text)) 24000)
     (user-error "Select between 1 and 24000 characters"))
-  `((text . ,text) (language . ,language)
+  (if (fboundp 'my/read--configure-speech-language)
+      (progn
+        (require 'reader-http-speech-transport)
+        (with-temp-buffer
+          (setq-local my/read-speech-language-override (intern language))
+          (my/read--configure-speech-language language)
+          (let ((json-object-type 'alist) (json-key-type 'symbol))
+            (json-read-from-string (reader-http-speech-transport--payload text)))))
+    `((text . ,text) (language . ,language)
     (backend . ,(if (equal language "ja") reader-http-speech-japanese-backend
                   reader-http-speech-english-backend))
     (speed . ,(if (equal language "ja") reader-http-speech-japanese-speed
-                reader-http-speech-english-speed))))
+                reader-http-speech-english-speed)))))
 
 (defun reader-http-speech-speak (text language)
   "Request TEXT in LANGUAGE (en or ja) and play buffered WAV chunks locally."
@@ -79,6 +91,7 @@
              :connection-type 'pipe :coding 'utf-8-unix :noquery t
              :command (list reader-http-speech-python "-m" "speech_http.client"
                             "--endpoint" reader-http-speech-endpoint
+                            "--auto-start" "--listen-host" reader-http-speech-listen-host
                             "--prebuffer" (number-to-string reader-http-speech-prebuffer)
                             "--player" reader-http-speech-player)
              :sentinel
@@ -122,15 +135,12 @@ In EPUB this reads the current chapter.  For PDF, select extracted text."
   (reader-http-speech-speak (or (thing-at-point 'sentence t) "") reader-http-speech-language))
 
 (defun reader-http-speech-open-gui ()
-  "Open the local server start/stop GUI, independent of reading buffers."
+  "Open the native macOS server application."
   (interactive)
-  (unless (process-live-p reader-http-speech--gui-process)
-    (let ((default-directory reader-http-speech--directory))
-      (setq reader-http-speech--gui-process
-            (make-process :name "reader-speech-gui" :noquery nil
-                          :buffer "*Speech Server GUI*"
-                          :command (list reader-http-speech-python "-m" "speech_http.gui" "--no-browser")))))
-  (run-at-time 1 nil #'browse-url "http://127.0.0.1:8766"))
+  (let ((default-directory reader-http-speech--directory))
+    (make-process :name "reader-speech-app-launcher" :noquery t
+                  :buffer "*Speech Server GUI*"
+                  :command (list reader-http-speech-python "-m" "speech_http.gui"))))
 
 (defvar reader-http-speech-mode-map
   (let ((map (make-sparse-keymap)))
