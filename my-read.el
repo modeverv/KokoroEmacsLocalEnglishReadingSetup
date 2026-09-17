@@ -1205,9 +1205,7 @@ Use DETECTED-LANGUAGE when supplied, otherwise inspect the buffer text."
                 (if (eq my/read-speech-language-override 'en)
                     "en"
                   (or detected-language "en")))
-    (if (eq my/read-speech-language-override 'en)
-        (setq-local kokoro-reader-backend 'kokoro)
-      (kill-local-variable 'kokoro-reader-backend))
+    (kill-local-variable 'kokoro-reader-backend)
     (dolist (variable '(kokoro-reader-model kokoro-reader-voice kokoro-reader-lang-code
                        kokoro-reader-speed))
       (kill-local-variable variable))
@@ -1272,7 +1270,8 @@ Stop Japanese speech and update existing Japanese reading buffers.
 Resume with SPC or s.  English speech settings remain unchanged."
   (interactive
    (list (intern (completing-read "日本語の音声エンジン: "
-                                 '("kokoro" "irodori" "macos") nil t))))
+                                 '("kokoro" "irodori" "macos") nil t nil nil
+                                 (symbol-name my/read-japanese-speech-backend)))))
   (unless (memq backend '(kokoro irodori macos))
     (user-error "音声エンジンは kokoro、irodori または macos を指定してください"))
   (my/read--stop-language-speech "ja")
@@ -1282,6 +1281,24 @@ Resume with SPC or s.  English speech settings remain unchanged."
       (when (equal my/read-source-language "ja")
         (my/read--configure-speech-language "ja"))))
   (message "日本語の音声エンジン: %s（SPC または s で再開）" backend))
+
+(defun my-read-set-english-speech-backend (backend)
+  "Select English BACKEND (kokoro or macos) for this session.
+Stop English speech and update existing English reading buffers.
+Resume with SPC or s.  Japanese speech settings remain unchanged."
+  (interactive
+   (list (intern (completing-read "英語の音声エンジン: "
+                                 '("kokoro" "macos") nil t nil nil
+                                 (symbol-name (default-value 'kokoro-reader-backend))))))
+  (unless (memq backend '(kokoro macos))
+    (user-error "音声エンジンは kokoro または macos を指定してください"))
+  (my/read--stop-language-speech "en")
+  (set-default 'kokoro-reader-backend backend)
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (equal my/read-source-language "en")
+        (my/read--configure-speech-language "en"))))
+  (message "英語の音声エンジン: %s（SPC または s で再開）" backend))
 
 (defun my/read--change-language-speed (language rate &optional kokoro)
   "Set LANGUAGE reading speed to positive integer RATE for this session.

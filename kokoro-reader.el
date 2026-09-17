@@ -308,10 +308,28 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain queued macOS utterances."
                   (length text)))
     text))
 
+(defun kokoro-reader--speech-text (text)
+  "Filter TEXT for the selected engine without modifying the source buffer."
+  (cond
+   ((and (eq kokoro-reader-backend 'macos)
+         (stringp kokoro-reader-macos-voice)
+         (string-match-p "\\`Kyoko\\(?: (.*)\\)?\\'"
+                         kokoro-reader-macos-voice))
+    ;; An opening quote left after stripping a closing quote can still cause
+    ;; a leading pause.  Normalize whitespace after removing speech-only marks
+    ;; so playback and prefetch also agree on quote/newline-only prefixes.
+    (string-trim
+     (replace-regexp-in-string
+      "[ \t\n\r　]+" " "
+      (replace-regexp-in-string "[「」）]" "" text t t))))
+   ((eq kokoro-reader-backend 'irodori)
+    (string-trim (replace-regexp-in-string "」" "" text t t)))
+   (t text)))
+
 (defun kokoro-reader--payload (text)
   (json-serialize
    `((model . ,kokoro-reader-model)
-     (input . ,text)
+     (input . ,(kokoro-reader--speech-text text))
      (voice . ,kokoro-reader-voice)
      (speed . ,(float kokoro-reader-speed))
      (lang_code . ,kokoro-reader-lang-code)
@@ -320,7 +338,7 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain queued macOS utterances."
 
 (defun kokoro-reader--kokoro-key (text)
   "Return the resident queue key for Kokoro TEXT in the current buffer."
-  (list 'kokoro text kokoro-reader-model kokoro-reader-voice
+  (list 'kokoro (kokoro-reader--speech-text text) kokoro-reader-model kokoro-reader-voice
         kokoro-reader-speed kokoro-reader-lang-code kokoro-reader-volume
         kokoro-reader-endpoint))
 
@@ -467,6 +485,8 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain queued macOS utterances."
 (defun kokoro-reader-prefetch-kokoro-texts (texts)
   "Append ordered future Kokoro TEXTS to the resident native queue."
   (when (memq kokoro-reader-backend '(kokoro irodori))
+    (setq texts (seq-remove #'string-empty-p
+                            (mapcar #'kokoro-reader--speech-text texts)))
     (let* ((wanted (mapcar #'kokoro-reader--kokoro-key
                            (seq-take texts kokoro-reader-kokoro-prefetch-count)))
            (pending
@@ -507,7 +527,7 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain queued macOS utterances."
 
 (defun kokoro-reader--speak-bounds-kokoro (beg end)
   "Speak BEG through END using Kokoro and the resident native player."
-  (let* ((text (kokoro-reader--text beg end))
+  (let* ((text (kokoro-reader--speech-text (kokoro-reader--text beg end)))
          (key (kokoro-reader--kokoro-key text))
          (queued-entry
           (and kokoro-reader--macos-current-entry
@@ -516,20 +536,23 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain queued macOS utterances."
                (not (plist-get kokoro-reader--macos-current-entry :announced))
                (equal key (plist-get kokoro-reader--macos-current-entry :key))
                kokoro-reader--macos-current-entry)))
-    (unless queued-entry
-      (kokoro-reader-stop))
-    (let ((overlay (make-overlay beg end (current-buffer) nil t)))
-      (overlay-put overlay 'face 'highlight)
-      (setq kokoro-reader--overlay overlay)
-      (if queued-entry
-          (setf (plist-get queued-entry :announced) t)
-        (kokoro-reader--enqueue-kokoro-text text t))
-      (message "%s speech queued…"
-               (if (eq kokoro-reader-backend 'irodori) "Irodori" "Kokoro")))))
+    (if (string-empty-p text)
+        'skipped
+      (unless queued-entry
+        (kokoro-reader-stop))
+      (let ((overlay (make-overlay beg end (current-buffer) nil t)))
+        (overlay-put overlay 'face 'highlight)
+        (setq kokoro-reader--overlay overlay)
+        (if queued-entry
+            (setf (plist-get queued-entry :announced) t)
+          (kokoro-reader--enqueue-kokoro-text text t))
+        (message "%s speech queued…"
+                 (if (eq kokoro-reader-backend 'irodori) "Irodori" "Kokoro"))))))
 
 (defun kokoro-reader--macos-key (text)
   "Return the resident AVSpeechSynthesizer queue key for TEXT."
-  (list text kokoro-reader-macos-voice kokoro-reader-macos-rate
+  (list (kokoro-reader--speech-text text)
+        kokoro-reader-macos-voice kokoro-reader-macos-rate
         kokoro-reader-volume))
 
 (defun kokoro-reader--macos-entry-for-id (id)
@@ -640,7 +663,7 @@ ANNOUNCED means the normal speech wrapper already owns its visual context."
                       :announced announced :queued nil :started nil))
          (command `((command . "enqueue")
                     (id . ,id)
-                    (text . ,text)
+                    (text . ,(kokoro-reader--speech-text text))
                     (voice . ,kokoro-reader-macos-voice)
                     (rate . ,kokoro-reader-macos-rate)
                     (volume . ,kokoro-reader-volume))))
@@ -666,6 +689,8 @@ ANNOUNCED means the normal speech wrapper already owns its visual context."
   "Append ordered future TEXTS to the resident AVSpeechSynthesizer queue."
   (when (and kokoro-reader-macos-prefetch-enabled
              (eq kokoro-reader-backend 'macos))
+    (setq texts (seq-remove #'string-empty-p
+                            (mapcar #'kokoro-reader--speech-text texts)))
     (let* ((wanted (mapcar #'kokoro-reader--macos-key
                            (seq-take texts kokoro-reader-macos-prefetch-count)))
            (pending (seq-remove
@@ -707,23 +732,25 @@ ANNOUNCED means the normal speech wrapper already owns its visual context."
 
 (defun kokoro-reader--speak-bounds-macos (beg end)
   "Speak BEG through END through the resident AVSpeechSynthesizer queue."
-  (let* ((text (kokoro-reader--text beg end))
+  (let* ((text (kokoro-reader--speech-text (kokoro-reader--text beg end)))
          (key (kokoro-reader--macos-key text))
          (queued-entry
           (and kokoro-reader--macos-current-entry
                (not (plist-get kokoro-reader--macos-current-entry :announced))
                (equal key (plist-get kokoro-reader--macos-current-entry :key))
                kokoro-reader--macos-current-entry)))
-    (unless queued-entry
-      (kokoro-reader-stop))
-    (let ((overlay (make-overlay beg end (current-buffer) nil t)))
-      (overlay-put overlay 'face 'highlight)
-      (setq kokoro-reader--overlay overlay)
-      (if queued-entry
-          (setf (plist-get queued-entry :announced) t)
-        (kokoro-reader--enqueue-macos-text text t))
-      (message "macOS speech queued with %s…"
-               (or kokoro-reader-macos-voice "the system voice")))))
+    (if (string-empty-p text)
+        'skipped
+      (unless queued-entry
+        (kokoro-reader-stop))
+      (let ((overlay (make-overlay beg end (current-buffer) nil t)))
+        (overlay-put overlay 'face 'highlight)
+        (setq kokoro-reader--overlay overlay)
+        (if queued-entry
+            (setf (plist-get queued-entry :announced) t)
+          (kokoro-reader--enqueue-macos-text text t))
+        (message "macOS speech queued with %s…"
+                 (or kokoro-reader-macos-voice "the system voice"))))))
 
 (defun kokoro-reader--speak-bounds (beg end)
   "Speak BEG through END with the buffer's configured backend."

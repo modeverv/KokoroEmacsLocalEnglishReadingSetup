@@ -25,6 +25,10 @@ Tomokoの`v1/server/shared/inference/tts/irodori_mlx.py`で使われた構成を
 ## Emacs
 
 `M-x my-read-set-japanese-speech-backend`で`irodori`を選択し、本文で`s`を押します。
+
+閉じかぎ括弧`」`はEmacs側で音声送信前に除去します。表示本文は変更せず、
+先読みにも同じ処理を適用します。除去後に空になる区間は送信せず、
+連続読み上げでは音声の完了を待たずに次へ進みます。
 `M-x my-read-change-japanese-speed`は0.5〜2.0倍を受け付けます。
 Apple音声へ戻すときは同じバックエンド選択で`macos`、Kokoroは`kokoro`を選びます。
 英語の音声と速度には影響しません。

@@ -1782,26 +1782,31 @@ period proves that synthesis failed before playback started."
   "Track Kokoro ORIGINAL-FUNCTION for BEG..END when this mode is active."
   (if (not english-reading-mode)
       (apply original-function beg end arguments)
-    (let ((context (english-reading-mode--make-context beg end)))
+    (let ((context (english-reading-mode--make-context beg end)) result)
       ;; ORIGINAL-FUNCTION creates Kokoro's request process.  Only after that
       ;; succeeds do we publish the new speech context.  `j' moves point after
       ;; this wrapper returns, so listeners lock to the old/current sentence
       ;; before point advances.
       (condition-case err
           (prog1
-              (apply original-function beg end arguments)
-            ;; Playback, scrolling and highlight rendering are deliberately
-            ;; separate.  In particular, SVG generation must not delay audio.
-            (english-reading-mode--pdf-center-continuous-speech context)
-            (setq english-reading-mode--active-speech context
-                  english-reading-mode--speech-start-time (current-time)
-                  english-reading-mode--speech-player-seen-p nil)
-            (english-reading-mode--schedule-pdf-highlight context)
-            (run-hook-with-args 'english-reading-mode-speech-start-hook context)
-            ;; Do not infer completion from a request sentinel: Kokoro switches
-            ;; from curl -> afplay at that boundary.  Poll the actual request/player
-            ;; process variables and finish only when BOTH are no longer alive.
-            (english-reading-mode--start-watch context))
+              (setq result (apply original-function beg end arguments))
+            (if (eq result 'skipped)
+                (progn
+                  (setq context (plist-put context :skipped t)
+                        english-reading-mode--active-speech context)
+                  (english-reading-mode--finish context))
+              ;; Playback, scrolling and highlight rendering are deliberately
+              ;; separate.  In particular, SVG generation must not delay audio.
+              (english-reading-mode--pdf-center-continuous-speech context)
+              (setq english-reading-mode--active-speech context
+                    english-reading-mode--speech-start-time (current-time)
+                    english-reading-mode--speech-player-seen-p nil)
+              (english-reading-mode--schedule-pdf-highlight context)
+              (run-hook-with-args 'english-reading-mode-speech-start-hook context)
+              ;; Do not infer completion from a request sentinel: Kokoro switches
+              ;; from curl -> afplay at that boundary.  Poll the actual request/player
+              ;; process variables and finish only when BOTH are no longer alive.
+              (english-reading-mode--start-watch context)))
         (error
          (signal (car err) (cdr err)))))))
 
@@ -2007,8 +2012,13 @@ limited to one page so its cache key matches normal playback."
                   ;; chunk.  Testing the combined chunk first incorrectly turns
                   ;; table cells such as "○" into "○ 共有ロック" and shifts
                   ;; every prefetched key away from actual playback.
-                  (if (not (string-match-p
-                            "[[:alpha:]].*[[:alpha:]]" sentence-text))
+                  ;; Only PDF playback skips isolated labels.  EPUB playback
+                  ;; counts a trailing quote as a sentence unit when chunking;
+                  ;; dropping it here changes the next chunk and cancels audio
+                  ;; already queued in the resident player.
+                  (if (and page-range
+                           (not (string-match-p
+                                 "[[:alpha:]].*[[:alpha:]]" sentence-text)))
                       (goto-char (min (1+ finish) (point-max)))
                     (setq chunk
                           (english-reading-mode--macos-continuous-bounds
@@ -2127,6 +2137,11 @@ does without changing the displayed page."
                       :next-speech-buffer (plist-get context :buffer))
            :next-speech-position (plist-get context :end)))
     (cond
+     ;; No player event will arrive for a filtered-out chunk. Advance even
+     ;; if the following prefetched utterance has already started.
+     ((plist-get context :skipped)
+      (setq english-reading-mode--continuous-timer
+            (run-at-time 0 nil #'english-reading-mode--continuous-next)))
      ;; AVSpeechSynthesizer owns the handoff when another utterance is already
      ;; queued.  Its didStart callback advances the text/PDF context exactly
      ;; when that queued voice begins.
@@ -2134,9 +2149,9 @@ does without changing the displayed page."
            (kokoro-reader-macos-has-pending-p))
       nil)
      (english-reading-mode--exact-player-finish-p
-        ;; The player's sentinel has already cleared the old process and audio
-        ;; state, so a ready chunk can start synchronously.  Avoiding an
-        ;; otherwise zero-delay timer removes one event-loop turn.
+      ;; The player's sentinel has already cleared the old process and audio
+      ;; state, so a ready chunk can start synchronously.  Avoiding an
+      ;; otherwise zero-delay timer removes one event-loop turn.
       (english-reading-mode--continuous-next))
      (t
       ;; Synthesis-failure and compatibility paths may finish from a polling

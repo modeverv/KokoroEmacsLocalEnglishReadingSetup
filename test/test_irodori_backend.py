@@ -17,8 +17,9 @@ class IrodoriMLXTests(unittest.TestCase):
             SimpleNamespace(audio=np.ones(120) * 0.1, sample_rate=24000),
         ]
         with patch.object(backend, 'ensure_model', return_value=model), patch.object(backend.Path, 'is_file', return_value=True):
-            wav = backend.synthesize('日本語です。', 'asuka', 2.0)
+            wav = backend.synthesize('「日本語です。」次の文です。」', 'asuka', 2.0)
         kwargs = model.generate.call_args.kwargs
+        self.assertEqual(kwargs['text'], '「日本語です。」次の文です。」')
         self.assertEqual(kwargs['ref_audio'], str(backend.ROOT / 'assets/asuka.wav'))
         self.assertEqual(kwargs['duration_scale'], 0.5)
         with wave.open(io.BytesIO(wav)) as audio:

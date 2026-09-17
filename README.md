@@ -446,8 +446,13 @@ Emacs Lispから指定する場合の引数はシンボルです。
 | コマンド（`M-x`） | 動作 |
 | --- | --- |
 | `my-read-change-japanese-speed` / `my-read-change-speed` | 日本語音声の毎分語数を変更 |
-| `my-read-change-english-speed` | 英語Kokoro音声の速度倍率を変更 |
+| `my-read-change-english-speed` | 英語音声の速度を変更（Kokoroは倍率、macOSは毎分語数） |
+| `my-read-set-japanese-speech-backend` | 日本語の音声エンジンを選択（kokoro / irodori / macos） |
+| `my-read-set-english-speech-backend` | 英語の音声エンジンを選択（kokoro / macos） |
 | `my-read-restart-japanese-speech` | 音声エンジンを再起動し、現在の再生・先読みを停止 |
+
+バックエンドの選択は現在のEmacsセッションに適用され、開いている同じ言語の本文にも反映されます。
+変更した言語の読み上げは停止するため、`SPC`または`s`で再開してください。
 
 `my-read`の起動時にも音声エンジンを再起動します。音声が応答しない場合は
 上記の再起動コマンドを使い、その後`SPC`または`s`で読み上げを再開できます。
