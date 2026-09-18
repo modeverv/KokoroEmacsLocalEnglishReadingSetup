@@ -773,31 +773,31 @@ Swiftビルドの回避経路は[開発ガイド](DEVELOPMENT.md#検証)を参�
 | ファイル | 役割 |
 | --- | --- |
 | `speech_http/` | HTTP音声生成、WAV受信・再生、launchdサービス管理 |
-| `reader-http-speech-transport.el` | 通常のReader読み上げ・先読みをHTTPへ接続 |
-| `reader-http-speech.el` | 独立した文字列の読み上げ・GUI起動コマンド |
-| `reader-http-playback.el` | 手元の再生サーバーへの接続・再生完了通知 |
+| `my-read/speech/http/reader-http-speech-transport.el` | 通常のReader読み上げ・先読みをHTTPへ接続 |
+| `my-read/speech/http/reader-http-speech.el` | 独立した文字列の読み上げ・GUI起動コマンド |
+| `my-read/speech/playback/reader-http-playback.el` | 手元の再生サーバーへの接続・再生完了通知 |
 | `speech_http/playback.py` | モデル不要のHTTP/WebSocket再生サーバー |
 | `requirements-playback.txt` | 再生専用のクロスプラットフォーム依存関係 |
 | `speech-http-app/` | ネイティブGUIアプリのソースとアイコン |
 | `scripts/build_speech_app.py` | macOSアプリのビルド |
 | `scripts/check_speech_server.py` | LAN端末からの音声生成・WAV検証 |
 | `kokoro_server.py` | ローカルKokoro HTTPサーバー |
-| `kokoro-reader.el` | 非同期音声生成・再生・ハイライト |
+| `my-read/speech/synthesis/kokoro-reader.el` | 非同期音声生成・再生・ハイライト |
 | `macos-speech-bridge/main.m` | Kokoro WAVとmacOS音声を順序付きで再生する常駐ネイティブブリッジ |
-| `english-reading-mode.el` | 公開コマンド、keymap、minor-modeの有効化・終了 |
-| `english-reading-speech.el` / `english-reading-prefetch.el` | 発話context、連続読み上げ、実再生完了、音声先読み |
-| `english-reading-state.el` | 読み上げ設定、公開hook、sessionと文書bufferの状態宣言 |
-| `reader-document.el` / `reader-document-text.el` / `reader-document-epub.el` | 文書操作API、TEXT/Markdown、EPUBの文・位置・章送り |
-| `english-reading-pdf.el` / `english-reading-pdf-view.el` | PDF抽出・仮想cursorと、highlight・scroll表示 |
-| `my-read.el` / `my-read-core.el` | 起動・終了、workspace所有関係、共通window API |
-| `my-read-ui.el` / `my-read-pdf.el` / `my-read-eww.el` | frameと固定タブ、PDF/EWWのworkspace統合 |
-| `my-read-position.el` / `reader-state-file.el` | 読書位置の保存復元とatomicな状態ファイルI/O |
-| `my-read-translation.el` / `my-read-lookup.el` / `my-read-vocabulary.el` | 翻訳、辞書pane、Org語彙保存 |
-| `my-read-speech-settings.el` | 言語別backend・voice・速度とbufferへの反映 |
-| `my-read-eww-math.el` | EWWのarXiv数式を非同期・並列変換し、SVGをキャッシュ |
-| `my-read-org-noter.el` | PDF／EPUB／Kindle／EWWのorg-noter統合と保存先管理 |
-| `my-read-k.el` | Kindle本文バッファ、ページ移動、メモリキャッシュ |
-| `my-read-k2.el` | Kindle.app Accessibilityバックエンド |
+| `my-read/core/english-reading-mode.el` | 公開コマンド、keymap、minor-modeの有効化・終了 |
+| `my-read/speech/playback/english-reading-speech.el` / `my-read/speech/prefetch/english-reading-prefetch.el` | 発話context、連続読み上げ、実再生完了、音声先読み |
+| `my-read/core/english-reading-state.el` | 読み上げ設定、公開hook、sessionと文書bufferの状態宣言 |
+| `my-read/document/reader-document.el` / `my-read/document/text/reader-document-text.el` / `my-read/document/epub/reader-document-epub.el` | 文書操作API、TEXT/Markdown、EPUBの文・位置・章送り |
+| `my-read/document/pdf/english-reading-pdf.el` / `my-read/document/pdf/english-reading-pdf-view.el` | PDF抽出・仮想cursorと、highlight・scroll表示 |
+| `my-read/core/my-read.el` / `my-read/core/my-read-core.el` | 起動・終了、workspace所有関係、共通window API |
+| `my-read/ui/my-read-ui.el` / `my-read/document/pdf/my-read-pdf.el` / `my-read/document/eww/my-read-eww.el` | frameと固定タブ、PDF/EWWのworkspace統合 |
+| `my-read/position/my-read-position.el` / `my-read/position/reader-state-file.el` | 読書位置の保存復元とatomicな状態ファイルI/O |
+| `my-read/translation/my-read-translation.el` / `my-read/lookup/my-read-lookup.el` / `my-read/vocabulary/my-read-vocabulary.el` | 翻訳、辞書pane、Org語彙保存 |
+| `my-read/speech/backend-selection/my-read-speech-settings.el` | 言語別backend・voice・速度とbufferへの反映 |
+| `my-read/integrations/my-read-eww-math.el` | EWWのarXiv数式を非同期・並列変換し、SVGをキャッシュ |
+| `my-read/notes/my-read-org-noter.el` | PDF／EPUB／Kindle／EWWのorg-noter統合と保存先管理 |
+| `my-read/document/kindle/my-read-k.el` | Kindle本文バッファ、ページ移動、メモリキャッシュ |
+| `my-read/document/kindle/my-read-k2.el` | Kindle.app Accessibilityバックエンド |
 | `my-read-k2/bridge/` | macOS Accessibilityを読むSwiftブリッジ |
 | `key.md` | my-readとorg-noterのキーバインド・競合方針 |
 | `test/my-read-k-tests.el` | 共有Reader UIのERTテスト |
@@ -812,3 +812,5 @@ Swiftビルドの回避経路は[開発ガイド](DEVELOPMENT.md#検証)を参�
 ## ライセンス
 
 [MIT License](LICENSE)
+
+ソースは概念別の [my-read/](my-read/README.md) 配下にあります。ルートの同名Elispは既存設定との互換入口です。

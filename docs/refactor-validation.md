@@ -96,3 +96,25 @@ target警告が出ました。Elispの新規warningやテストskipへ置き換�
 
 更新の反映にはReader終了後のEmacs再起動を推奨します。実行中のsessionへ大規模な
 require/hookの差し替えは行っていません。
+
+## 概念別ディレクトリへの移行（同日追補）
+
+29個のElisp実装を `my-read/` のCore・UI・Document・Speech・Translation・Lookup・
+Notes・Vocabulary・Position・Integrationsへ移動しました。
+DocumentにはPDF/EPUB/EWW/TEXT/Kindle、Speechにはbackend selection/synthesis/HTTP/
+prefetch/playbackの実ディレクトリがあります。
+ルートには11個の公開互換入口と `reader-load-path.el` を置き、実装は複製していません。
+Python/Swift/native/GUI runtimeの配置・起動コマンドは維持しました。
+
+- 構文検査と厳格compile: 実装29 + 互換入口11 + bootstrap1 = 41ファイル、警告0。
+- Reader ERT: 234/234。HTTP/settings/playback ERT: 13/13。
+  ソースと、ディレクトリ構造を保つ別出力先のbytecodeの双方で成功。
+- Python: `test/` 33/33、`scripts/` 3/3。
+- 新規検証: 定義元のconcept path、runtime資産のroot、別working directoryの
+  新しいEmacsからの絶対パスload（Reader/Kokoro/HTTP transport）。
+- PDF Toolsのページ取得マクロがcompile時に展開されるケースに合わせ、既存3テストで
+  `image-mode-window-get` も置換。ページ移動・選択・位置保存のassertionは維持。
+- 古いルートの実装bytecodeを削除し、新構成で手元のbytecodeを再生成。
+- 今回Swift/native実装は未変更。実機のGUI・音声再生・Kindle AX・LAN操作は未再確認。
+
+反映には `M-x my-read-end` 後にEmacsを再起動してください。

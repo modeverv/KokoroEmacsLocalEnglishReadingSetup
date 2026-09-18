@@ -3,13 +3,23 @@
 全体の責務とcallback所有関係は [docs/architecture.md](docs/architecture.md)、
 設定・状態変数は [docs/state-inventory.md](docs/state-inventory.md) を参照してください。
 
+## ディレクトリとロード
+
+実装は [my-read/](my-read/README.md) の概念別ディレクトリに置きます。
+新しい概念のディレクトリを追加したら `reader-load-path.el` の一覧へ登録してください。
+既存ディレクトリにファイルを追加するとcompile検証には自動で含まれます。
+ルートの互換入口に業務ロジックを追加しないでください。
+
+compile出力は元のディレクトリ構造を保ちます。切り離したbytecodeのテストでも
+runtime資産はcheckout側のbootstrapで解決し、compiled側のmoduleを優先します。
+
 ## Document backendを追加する
 
 1. `reader-document` をrequireし、backend名・current-buffer predicate・操作plistを登録します。
 2. 表示テキストをそのまま読む媒体は `text` を親にして、相違する操作だけ実装します。
 3. ページ/章境界は `:continue`、位置は `:location` / `:restore`、抽出bufferを持つ場合は
    `:owns-speech` / `:resume` / `:speech-range` を実装します。
-4. Readerの固定タブに追加する場合は `my-read-ui.el` のtab登録・表示名・frame parameterを
+4. Readerの固定タブに追加する場合は `my-read/ui/my-read-ui.el` のtab登録・表示名・frame parameterを
    追加します。文取得や媒体位置の分岐をUIやSpeechへ書き戻さないでください。
 5. fake bufferでdispatch、終端、前後移動、位置復元、文書切替を検証します。
 
@@ -32,7 +42,7 @@ file-based keyとの互換性を別途設計します。未対応操作は `read
 ## Speech backendを追加する
 
 Readerの操作は `:speak` → `kokoro-reader--speak-bounds` に合流します。新しい合成backendは
-`kokoro-reader.el` のqueue/payload境界、言語別設定は `my-read-speech-settings.el`、HTTP経由の
+`my-read/speech/synthesis/kokoro-reader.el` のqueue/payload境界、言語別設定は `my-read/speech/backend-selection/my-read-speech-settings.el`、HTTP経由の
 合成は `speech_http/server.py` に実装します。新しい合成方式をReaderの文送りに混ぜません。
 
 守る契約:
@@ -48,7 +58,7 @@ HTTPの認証/timeout/不正応答は既存のerror bufferと停止経路へ伝�
 
 ## Translation backendを追加する
 
-`my-read-translation.el` のrequest生成とresponse解析へ追加します。Googleの既定値と
+`my-read/translation/my-read-translation.el` のrequest生成とresponse解析へ追加します。Googleの既定値と
 明示指定したlocal backendからのfallback契約を維持します。request sentinelはprocessと
 文書のidentityを確認し、停止時はprocess変数を先に無効化します。
 
@@ -57,8 +67,8 @@ HTTPの認証/timeout/不正応答は既存のerror bufferと停止経路へ伝�
 - interactive commandと設定の名前を安易に変更しません。内部関数は `--` を使用します。
 - キーは各minor-modeのmapに置き、Readerのpane predicateを維持します。
 - 文書ごとの位置・言語・cacheはbuffer-local、windowとtabの所有関係はframe parameterです。
-- 出力装置を共有する単一音声sessionは `english-reading-state.el`、接続queueは
-  `kokoro-reader.el`、Kindleの接続とページcacheは `my-read-k.el` が所有します。
+- 出力装置を共有する単一音声sessionは `my-read/core/english-reading-state.el`、接続queueは
+  `my-read/speech/synthesis/kokoro-reader.el`、Kindleの接続とページcacheは `my-read/document/kindle/my-read-k.el` が所有します。
 - 遅延読み上げ処理は `english-reading-mode--session-timer` を使用し、既存generationを
   無視した `run-at-time` を追加しません。
 - import cycleの代わりにhook・document operation・`declare-function` を使います。

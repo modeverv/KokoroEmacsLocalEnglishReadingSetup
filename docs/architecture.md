@@ -3,6 +3,37 @@
 Readerは **Document → Sentence → Reading State → Speech / Translation / Notes**
 を中心とします。公開コマンドと設定名を維持したまま、2026-09-18に責務を分離しました。
 
+## ディレクトリ構成
+
+実装の入口は [my-read/](../my-read/README.md) です。概念とディレクトリを対応させています。
+
+```text
+my-read/
+├── core/                       # 起動・終了、Reading State、公開mode
+├── ui/                         # frame・window・tab・paneのキー
+├── document/                   # 文書操作API
+│   ├── pdf/                    # 抽出・仮想cursor・表示
+│   ├── epub/                   # 文境界・章送り
+│   ├── eww/                    # HTML・履歴・文書adapter
+│   ├── text/                   # TEXT / Markdown
+│   └── kindle/                 # 本文・AX接続・ページcache
+├── speech/
+│   ├── backend-selection/      # 言語別backend・voice・rate
+│   ├── synthesis/              # 合成要求・常駐bridgeとのqueue境界
+│   ├── http/                   # HTTPコマンド・transport
+│   ├── prefetch/               # 先読み・補充
+│   └── playback/               # 再生session・文送り・remote再生
+├── translation/                # 翻訳要求・表示・追従
+├── lookup/                     # 辞書pane・追従
+├── notes/                      # org-noter連携
+├── vocabulary/                 # 語彙capture・Orgへのmerge
+├── position/                   # 位置保存・復元・atomic file I/O
+└── integrations/               # EWW数式・独立した旧TTS補助
+```
+
+ルートの互換入口は `reader-load-path.el` を読み、各ディレクトリの実装へ委譲します。
+実行時のPython・Swift・native bridgeの基準位置は `reader-root-directory` です。
+
 ## 全体構成
 
 ```mermaid
@@ -37,27 +68,27 @@ flowchart TD
 
 | モジュール | 所有する責務とAPI |
 | --- | --- |
-| `my-read.el` | `my-read`, `my-read-end`、frame削除時の終了処理 |
-| `my-read-core.el` | frame/windowの所有関係、読書ウィンドウの文取得 |
-| `my-read-ui.el` | 固定タブ、レイアウト、pane限定キー、各機能の初期化 |
-| `my-read-pdf.el` | PDF Toolsの表示修復・roll設定・PDFだけを閉じる操作 |
-| `my-read-eww.el` | EWW描画・履歴・ローカルHTML・EWWの文書メタデータ |
-| `my-read-position.el` | save/restoreのタイミング、レコードのmerge、保存先設定 |
-| `my-read-translation.el` | Google/local選択、curl、翻訳表示、音声中の対象固定 |
-| `my-read-lookup.el` | 私有辞書module、Lookup follower、辞書pane操作 |
-| `my-read-vocabulary.el` | 語彙の収集、意味・例文の取得、Orgへのmerge |
-| `my-read-speech-settings.el` | 言語判定、手動override、言語別backend/voice/rate |
-| `my-read-org-noter.el` | 既存org-noterへの文書別位置adapterとsession追従 |
-| `my-read-eww-math.el` | LaTeX/MathML変換、process並列数、世代付き画像cache |
-| `english-reading-state.el` | 読み上げ設定、公開hook、音声sessionとPDF buffer-local状態 |
-| `english-reading-mode.el` | 既存interactive command、keymap、minor-mode lifecycle |
-| `english-reading-speech.el` | context、連続読み上げ、実再生完了、session timer |
-| `english-reading-prefetch.el` | 発話と同じ分割規則による先読み、定期補充 |
-| `english-reading-pdf.el` | pdftotext、仮想cursor、ページ境界、PDF文書操作 |
-| `english-reading-pdf-view.el` | bbox照合、画像overlay、roll/recenter、遅延highlight |
-| `reader-document-text.el` | sentence bounds、Markdown見出し、text位置・metadata |
-| `reader-document-epub.el` | 日本語対話の文境界、EPUB spine横断、章と位置の復元 |
-| `english-reader-tts.el` | 既存の独立した外部TTS補助。通常Readerとは別の互換経路 |
+| `my-read/core/my-read.el` | `my-read`, `my-read-end`、frame削除時の終了処理 |
+| `my-read/core/my-read-core.el` | frame/windowの所有関係、読書ウィンドウの文取得 |
+| `my-read/ui/my-read-ui.el` | 固定タブ、レイアウト、pane限定キー、各機能の初期化 |
+| `my-read/document/pdf/my-read-pdf.el` | PDF Toolsの表示修復・roll設定・PDFだけを閉じる操作 |
+| `my-read/document/eww/my-read-eww.el` | EWW描画・履歴・ローカルHTML・EWWの文書メタデータ |
+| `my-read/position/my-read-position.el` | save/restoreのタイミング、レコードのmerge、保存先設定 |
+| `my-read/translation/my-read-translation.el` | Google/local選択、curl、翻訳表示、音声中の対象固定 |
+| `my-read/lookup/my-read-lookup.el` | 私有辞書module、Lookup follower、辞書pane操作 |
+| `my-read/vocabulary/my-read-vocabulary.el` | 語彙の収集、意味・例文の取得、Orgへのmerge |
+| `my-read/speech/backend-selection/my-read-speech-settings.el` | 言語判定、手動override、言語別backend/voice/rate |
+| `my-read/notes/my-read-org-noter.el` | 既存org-noterへの文書別位置adapterとsession追従 |
+| `my-read/integrations/my-read-eww-math.el` | LaTeX/MathML変換、process並列数、世代付き画像cache |
+| `my-read/core/english-reading-state.el` | 読み上げ設定、公開hook、音声sessionとPDF buffer-local状態 |
+| `my-read/core/english-reading-mode.el` | 既存interactive command、keymap、minor-mode lifecycle |
+| `my-read/speech/playback/english-reading-speech.el` | context、連続読み上げ、実再生完了、session timer |
+| `my-read/speech/prefetch/english-reading-prefetch.el` | 発話と同じ分割規則による先読み、定期補充 |
+| `my-read/document/pdf/english-reading-pdf.el` | pdftotext、仮想cursor、ページ境界、PDF文書操作 |
+| `my-read/document/pdf/english-reading-pdf-view.el` | bbox照合、画像overlay、roll/recenter、遅延highlight |
+| `my-read/document/text/reader-document-text.el` | sentence bounds、Markdown見出し、text位置・metadata |
+| `my-read/document/epub/reader-document-epub.el` | 日本語対話の文境界、EPUB spine横断、章と位置の復元 |
+| `my-read/integrations/english-reader-tts.el` | 既存の独立した外部TTS補助。通常Readerとは別の互換経路 |
 
 ## Reading Coreと文書API
 
@@ -84,13 +115,13 @@ Persistenceは中身を解釈せず保存します。現行のversion 1と保存
 | `:location`, `:restore`, `:persistent-type` | 保存・復元、保存対象かどうか |
 | `:refresh` | Kindleのように再取得を必要とする媒体の任意操作 |
 
-UIに固定タブを追加する変更は `my-read-ui.el`、文書の読取りや位置処理の変更はbackendに
+UIに固定タブを追加する変更は `my-read/ui/my-read-ui.el`、文書の読取りや位置処理の変更はbackendに
 置きます。PDF/EWWのcloseはframeとorg-noterのwindow所有を扱うためworkspace側の
 adapterに残します。org-noter固有のlocation型も同ファイルの既存adapterで維持します。
 
 ## Speech architectureとremote playback
 
-`english-reading-speech.el` は発話contextと文送りを所有し、`kokoro-reader.el` の既存
+`my-read/speech/playback/english-reading-speech.el` は発話contextと文送りを所有し、`my-read/speech/synthesis/kokoro-reader.el` の既存
 開始/停止advice・player finish hookを利用します。backendの声・速度設定は発話元bufferに
 適用します。合成と実再生の完了は区別し、HTTP完了から直接次の文へ進めません。
 
@@ -105,8 +136,8 @@ sentence / chunk
   → next document chunk
 ```
 
-`reader-http-speech.el` は独立したHTTP発話コマンドと設定、transportは通常Readerの
-先読みqueueへの接続、`reader-http-playback.el` はremote sessionとdelivery capabilityを
+`my-read/speech/http/reader-http-speech.el` は独立したHTTP発話コマンドと設定、transportは通常Readerの
+先読みqueueへの接続、`my-read/speech/playback/reader-http-playback.el` はremote sessionとdelivery capabilityを
 担当します。`speech_http/server.py` と `delivery.py` は合成と転送、`playback.py` と
 `playback_queue.py` は受信順序・重複・cancel・device clockに基づく完了を扱います。
 `remote_bridge.py` はEmacsからのJSON LinesをWebSocketへ接続します。
@@ -157,7 +188,7 @@ filter出力は新しい接続のfragmentへ混ぜません。
 
 ## Persistenceと互換性
 
-`reader-state-file.el` が検証付きreadと同じディレクトリでのatomic rename、mode 600、
+`my-read/position/reader-state-file.el` が検証付きreadと同じディレクトリでのatomic rename、mode 600、
 失敗時のtemporary file除去を共通化します。不正な既存データは `:invalid` として保護し、
 自動で上書きしません。読書位置は現行の `read-log/read-positions.el`、noterは `read` を
 既定とし、既存ユーザー設定が優先します。保存先の自動移動は行いません。

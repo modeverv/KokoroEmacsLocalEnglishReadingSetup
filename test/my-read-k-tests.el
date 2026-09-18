@@ -66,7 +66,11 @@
           (setq-local major-mode 'pdf-view-mode)
           (setq-local buffer-file-name source)
           (setq-local pdf-view-display-size 2.5)
-          (cl-letf (((symbol-function 'pdf-view-current-page)
+          ;; PDF Tools expands current-page to image-mode-window-get when compiled.
+          (cl-letf (((symbol-function 'image-mode-window-get)
+                     (lambda (property &optional _window)
+                       (when (eq property 'page) 12)))
+                    ((symbol-function 'pdf-view-current-page)
                      (lambda () 12)))
             (my/read-position-save-buffer buffer))
           (let* ((data (my/read-position--read-data))
@@ -1791,7 +1795,11 @@
             (setq-local english-reading-mode--pdf-text-point 1)
             (setq-local pdf-view-active-region
                         '(1 (0.1 0.85 0.5 0.9)))
-            (cl-letf (((symbol-function 'pdf-view-current-page)
+            ;; PDF Tools expands current-page to image-mode-window-get when compiled.
+            (cl-letf (((symbol-function 'image-mode-window-get)
+                       (lambda (property &optional _window)
+                         (when (eq property 'page) 1)))
+                      ((symbol-function 'pdf-view-current-page)
                        (lambda () 1))
                       ((symbol-function 'pdf-view-active-region-p)
                        (lambda () t))
@@ -1929,7 +1937,11 @@
                           (english-reading-mode--pdf-page-ranges)))
             (setq-local english-reading-mode--pdf-page 1)
             (setq-local english-reading-mode--pdf-text-point 1)
-            (cl-letf (((symbol-function 'pdf-view-current-page)
+            ;; PDF Tools expands current-page to image-mode-window-get when compiled.
+            (cl-letf (((symbol-function 'image-mode-window-get)
+                       (lambda (property &optional _window)
+                         (when (eq property 'page) shown-page)))
+                      ((symbol-function 'pdf-view-current-page)
                        (lambda () shown-page))
                       ((symbol-function 'pdf-view-goto-page)
                        (lambda (page) (setq shown-page page))))

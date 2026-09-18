@@ -4,6 +4,15 @@
   (file-name-directory (directory-file-name
                         (file-name-directory (or load-file-name buffer-file-name)))))
 
+;; Anchor runtime assets to the checkout even when testing a detached bytecode tree.
+(load (expand-file-name "reader-load-path.el" reader-test--root) nil t t)
+(when-let* ((compiled (getenv "READER_TEST_COMPILED_DIR"))
+            ((not (equal compiled ""))))
+  (let ((compiled-paths (let ((load-path nil))
+                          (reader-add-load-path compiled)
+                          load-path)))
+    (setq load-path (append compiled-paths load-path))))
+
 (defun reader-test--load-source (arguments)
   "Resolve checkout libraries in load ARGUMENTS to their source files.
 External dependencies keep their normal compiled loading behavior."
@@ -12,8 +21,7 @@ External dependencies keep their normal compiled loading behavior."
                    (file-name-sans-extension name) name))
          (source (locate-file base load-path '(".el"))))
     (when (and source
-               (equal (file-truename (file-name-directory source))
-                      (file-truename reader-test--root)))
+               (file-in-directory-p source reader-test--root))
       (setcar arguments source))
     arguments))
 

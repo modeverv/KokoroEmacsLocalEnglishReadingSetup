@@ -11,10 +11,17 @@
 (let* ((root (file-name-directory
               (directory-file-name (file-name-directory load-file-name))))
        (output (or (getenv "READER_COMPILE_DIR") (make-temp-file "reader-compile-" t)))
-       (files (directory-files root t "\\.el\\'"))
+       (files (append (directory-files root t "\\.el\\'")
+                      (directory-files-recursively
+                       (expand-file-name "my-read" root) "\\.el\\'")))
        (byte-compile-dest-file-function
         (lambda (source)
-          (expand-file-name (concat (file-name-base source) ".elc") output)))
+          (let ((destination
+                 (expand-file-name
+                  (concat (file-name-sans-extension (file-relative-name source root)) ".elc")
+                  output)))
+            (make-directory (file-name-directory destination) t)
+            destination)))
        failed)
   (add-to-list 'load-path root)
   (load (expand-file-name "test/reader-test-source.el" root) nil t)

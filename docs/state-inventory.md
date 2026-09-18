@@ -6,7 +6,7 @@
 所有者・解放タイミングは [architecture.md](architecture.md#状態とライフサイクル) を参照してください。
 値やキー構造は既存のまま維持し、設定変数のrenameは行っていません。
 
-## english-reader-tts.el
+## my-read/integrations/english-reader-tts.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -14,7 +14,7 @@
 | `defcustom` | `english-reader-tts-rate` |
 | `defvar` | `english-reader-tts-process` |
 
-## english-reading-state.el
+## my-read/core/english-reading-state.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -68,7 +68,7 @@
 | `defvar` | `english-reading-mode-speech-prepare-hook` |
 | `defvar` | `english-reading-mode-speech-highlight-hook` |
 
-## kokoro-reader.el
+## my-read/speech/synthesis/kokoro-reader.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -111,14 +111,14 @@
 | `defvar` | `kokoro-reader-macos-queued-start-hook` |
 | `defvar` | `kokoro-reader-player-finish-hook` |
 
-## my-read-core.el
+## my-read/core/my-read-core.el
 
 | 宣言 | 名前 |
 | --- | --- |
 | `defvar-local` | `my/read-center-tab-frame` |
 | `defvar-local` | `my/read-center-tab-placeholder-type` |
 
-## my-read-eww-math.el
+## my-read/integrations/my-read-eww-math.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -145,7 +145,7 @@
 | `defvar` | `my/read-eww-math--missing-program-warning-shown` |
 | `defvar` | `my/read-eww-math--render-target-buffer` |
 
-## my-read-eww.el
+## my-read/document/eww/my-read-eww.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -162,7 +162,7 @@
 | `defvar-local` | `my/read--eww-image-background-installed-p` |
 | `defvar-local` | `my/read-eww-history-page-p` |
 
-## my-read-k.el
+## my-read/document/kindle/my-read-k.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -200,14 +200,14 @@
 | `defvar` | `my-read-k--back-queue` |
 | `defvar` | `my-read-k--back-source-fingerprint` |
 
-## my-read-k2.el
+## my-read/document/kindle/my-read-k2.el
 
 | 宣言 | 名前 |
 | --- | --- |
 | `defcustom` | `my-read-k2-bridge-program` |
 | `defcustom` | `my-read-k2-book-name` |
 
-## my-read-lookup.el
+## my-read/lookup/my-read-lookup.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -220,7 +220,7 @@
 | `defvar` | `my/read--lookup-module` |
 | `defvar` | `my/read--lookup-module-signature` |
 
-## my-read-org-noter.el
+## my-read/notes/my-read-org-noter.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -228,13 +228,13 @@
 | `defcustom` | `my/read-org-noter-file-name` |
 | `defvar` | `my/read-org-noter--sync-timer` |
 
-## my-read-pdf.el
+## my-read/document/pdf/my-read-pdf.el
 
 | 宣言 | 名前 |
 | --- | --- |
 | `defcustom` | `my/read-pdf-continuous-scroll` |
 
-## my-read-position.el
+## my-read/position/my-read-position.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -244,7 +244,7 @@
 | `defvar-local` | `my/read-position--restoring-p` |
 | `defvar-local` | `my/read-position--save-timer` |
 
-## my-read-speech-settings.el
+## my-read/speech/backend-selection/my-read-speech-settings.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -258,7 +258,7 @@
 | `defvar-local` | `my/read-source-language` |
 | `defvar-local` | `my/read-speech-language-override` |
 
-## my-read-translation.el
+## my-read/translation/my-read-translation.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -276,7 +276,7 @@
 | `defvar` | `my/read-kokoro-context` |
 | `defvar` | `my/read-speech-translation-suppressed-context` |
 
-## my-read-ui.el
+## my-read/ui/my-read-ui.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -285,7 +285,7 @@
 | `defcustom` | `my/read-frame-name` |
 | `defvar` | `my-read-center-tab-mode-map` |
 
-## my-read-vocabulary.el
+## my-read/vocabulary/my-read-vocabulary.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -294,13 +294,13 @@
 | `defcustom` | `my/read-vocab-english-dictionary-title-regexp` |
 | `defcustom` | `my/read-vocab-japanese-dictionary-title-regexp` |
 
-## reader-document.el
+## my-read/document/reader-document.el
 
 | 宣言 | 名前 |
 | --- | --- |
 | `defvar` | `reader-document--backends` |
 
-## reader-http-playback.el
+## my-read/speech/playback/reader-http-playback.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -310,13 +310,13 @@
 | `defvar` | `reader-http-playback--session` |
 | `defvar` | `reader-http-playback--delivery-token` |
 
-## reader-http-speech-transport.el
+## my-read/speech/http/reader-http-speech-transport.el
 
 | 宣言 | 名前 |
 | --- | --- |
 | `defvar` | `reader-http-speech-transport-mode` |
 
-## reader-http-speech.el
+## my-read/speech/http/reader-http-speech.el
 
 | 宣言 | 名前 |
 | --- | --- |
@@ -334,3 +334,8 @@
 | `defvar` | `reader-http-speech--gui-process` |
 | `defvar` | `reader-http-speech-finished-hook` |
 | `defvar` | `reader-http-speech-mode-map` |
+
+## reader-load-path.el
+
+`reader-root-directory` はruntime資産の基準位置、`reader-module-directories` は概念別の検索先です。
+どちらも `defconst` であり、読書sessionの可変状態を所有しません。

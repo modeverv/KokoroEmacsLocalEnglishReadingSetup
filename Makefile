@@ -31,13 +31,13 @@ my-read-k-test:
 		-Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib
 
 my-read-k-ert:
-	$(EMACS) -Q --batch -L . -L $(READER_ELISP_DIR) \
+	READER_TEST_COMPILED_DIR="$(if $(READER_TEST_COMPILED),$(abspath $(READER_ELISP_DIR)))" $(EMACS) -Q --batch -L . -L "$(READER_ELISP_DIR)" \
 		-L $(ORG_NOTER_DIR) \
 		-L $(PDF_TOOLS_DIR) -L $(TABLIST_DIR) -L $(MARKDOWN_MODE_DIR) \
 		--eval "(setq load-prefer-newer t native-comp-jit-compilation nil native-comp-enable-subr-trampolines nil)" \
 		-l test/reader-test-source.el \
 		-l test/my-read-k-tests.el -l test/my-read-k2-tests.el \
-		-l test/reader-document-tests.el \
+		-l test/reader-document-tests.el -l test/reader-layout-tests.el \
 		-f ert-run-tests-batch-and-exit
 
 my-read-k-check: my-read-speech-build my-read-k-test my-read-k-ert
@@ -55,11 +55,11 @@ speech-gui:
 
 speech-http-test:
 	.venv/bin/python -m unittest discover -s test -p test_speech_http.py -v
-	$(EMACS) -Q --batch -L . -L $(READER_ELISP_DIR) \
+	READER_TEST_COMPILED_DIR="$(if $(READER_TEST_COMPILED),$(abspath $(READER_ELISP_DIR)))" $(EMACS) -Q --batch -L . -L "$(READER_ELISP_DIR)" \
 		--eval "(setq load-prefer-newer t)" \
 		-l test/reader-test-source.el \
 		-l test/reader-http-speech-tests.el -f ert-run-tests-batch-and-exit
-	$(EMACS) -Q --batch -L . -L $(READER_ELISP_DIR) \
+	READER_TEST_COMPILED_DIR="$(if $(READER_TEST_COMPILED),$(abspath $(READER_ELISP_DIR)))" $(EMACS) -Q --batch -L . -L "$(READER_ELISP_DIR)" \
 		-L $(ORG_NOTER_DIR) -L $(PDF_TOOLS_DIR) -L $(TABLIST_DIR) -L $(MARKDOWN_MODE_DIR) \
 		--eval "(setq load-prefer-newer t)" \
 		-l test/reader-test-source.el \
@@ -82,7 +82,7 @@ speech-playback-app:
 
 speech-playback-test:
 	.venv/bin/python -m unittest discover -s test -p test_playback.py -v
-	$(EMACS) -Q --batch -L . -L $(READER_ELISP_DIR) \
+	READER_TEST_COMPILED_DIR="$(if $(READER_TEST_COMPILED),$(abspath $(READER_ELISP_DIR)))" $(EMACS) -Q --batch -L . -L "$(READER_ELISP_DIR)" \
 		--eval "(setq load-prefer-newer t)" \
 		-l test/reader-test-source.el \
 		-l test/reader-http-playback-tests.el -f ert-run-tests-batch-and-exit

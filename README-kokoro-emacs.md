@@ -77,18 +77,12 @@ is intentionally kept running for the next request.
 
 ## 3. Install the Emacs client
 
-Copy `kokoro-reader.el` somewhere on `load-path`, for example:
-
-```sh
-mkdir -p ~/.emacs.d/lisp
-cp kokoro-reader.el english-reading-*.el reader-document*.el ~/.emacs.d/lisp/
-```
-
-Keep these modules together; `english-reading-mode.el` loads its document,
-PDF, speech, and prefetch modules. Add this to `init.el`:
+Keep the checkout together: the root entry files load the implementation under
+`my-read/`, and runtime assets remain relative to the checkout root. Add the
+checkout directory to `load-path` (adjust this example to your location):
 
 ```elisp
-(add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
+(add-to-list 'load-path (expand-file-name "~/Sync/emacs.d/reader"))
 (require 'kokoro-reader)
 (require 'english-reading-mode)
 
