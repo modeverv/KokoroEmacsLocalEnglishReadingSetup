@@ -1,11 +1,13 @@
 """Shared on-demand macOS service lifecycle for Emacs and the native app.
 
 The launchd job is registered in the current login session, not installed as
-a login item. launchd owns the server even after the GUI or Emacs exits.
+a login item. Emacs explicitly stops its local service on normal exit;
+the GUI can leave it running independently.
 """
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import fcntl
 import json
 import os
@@ -52,13 +54,31 @@ def launchctl(*arguments, check=True):
     return result
 
 
+@contextmanager
+def control_lock(directory, timeout=20):
+    """Bound startup/shutdown lock waits, including concurrent Emacs helpers."""
+    with (directory / "control.lock").open("a") as lock:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Speech server startup/stop is still busy; try again")
+                time.sleep(.1)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def ensure(endpoint="http://127.0.0.1:8765", host="0.0.0.0", timeout=20):
     if result := health(endpoint):
         return result
     port = local_port(endpoint)
     directory, label, target = service_paths(port)
-    with (directory / "control.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with control_lock(directory):
         if result := health(endpoint):
             return result
         # A stale registered job is replaced only while the speech service is down.
@@ -87,8 +107,7 @@ def ensure(endpoint="http://127.0.0.1:8765", host="0.0.0.0", timeout=20):
 def stop(endpoint="http://127.0.0.1:8765"):
     port = local_port(endpoint)
     directory, _label, target = service_paths(port)
-    with (directory / "control.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with control_lock(directory):
         registered = launchctl("print", target, check=False).returncode == 0
         if not registered:
             if health(endpoint):

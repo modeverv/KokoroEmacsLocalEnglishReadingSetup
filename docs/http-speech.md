@@ -25,7 +25,13 @@ GUIは次のいずれかで開きます。
 
 GUIには「サーバースタート」「停止」と稼働状態を表示します。
 Emacsの自動起動とGUIは、同じlaunchdサービスを操作します。
-GUIやEmacsを終了してもサーバーは継続します。停止時は読み上げを止めてからGUIの「停止」を使います。
+GUIを閉じてもサーバーは継続します。Emacsを通常終了すると、そのEmacsから利用したローカルの
+launchd音声サーバーを停止します。共有サーバーとして残す場合は
+`(setq reader-http-speech-stop-server-on-exit nil)` を設定してください。
+リモート接続先や、ターミナルから直接起動したサーバーは終了しません。
+復旧には `M-x reader-http-speech-restart-server`、停止には
+`M-x reader-http-speech-stop-server` を使えます。
+HTTP 503（同時受付の混雑）は最大30秒待って再試行し、途中まで受信した音声は再送しません。
 停止後でもEmacsで新しく読み上げると再度自動起動します。
 ログイン項目には登録せず、次回ログイン後は最初の読み上げで起動します。
 
@@ -122,7 +128,7 @@ curl -N http://127.0.0.1:8765/v1/speech/stream \
 | パラメーター | 内容 |
 |---|---|
 | `text` | 本文、1〜24,000文字 |
-| `language` | `ja` / `en` |
+| `language` | `auto` / `ja` / `en`（省略時は従来どおり `en`） |
 | `backend` | `macos` / `kokoro` / `irodori`。既定は日本語macos、英語kokoro |
 | `voice` | 省略時はKyoko / bf_emma / jf_alpha / asukaを言語と方式に応じて選択 |
 | `rate` | macOS専用の正の整数（語/分）。指定時はspeedより優先 |
@@ -151,6 +157,44 @@ printf '%s' '{"text":"Hello. A speech test.","language":"en","speed":1.2}' \
 入力エラーは400、認証エラーは401、受付上限超過は503。
 HTTP 200後の合成失敗は `error` イベントを返し、`done` 前の切断も失敗として扱います。
 
+### 英語・日本語の自動判定
+
+`language: "auto"` は本文全体を一度判定してから生成します。ひらがな・カタカナ・漢字が
+あれば日本語、それ以外で英字があれば英語です。半角カナ・全角英字も判定します。
+数字・記号だけなら `fallback_language`（`en` / `ja`、既定 `en`）を使います。
+判定のための文字正規化は本文を変更しません。混在文は日本語優先、ローマ字日本語は英語扱いです。
+これは英語・日本語の2択用で、他言語の識別は行いません。
+
+```json
+{"text":"日本語のAPI説明です。","language":"auto"}
+```
+
+既定は英語がKokoro / bf_emma / 1.0倍、日本語がmacOS / Kyoko / 250語毎分です。
+声や速度を言語別に指定する場合:
+
+```json
+{
+  "text": "Hello. This is a reading test.",
+  "language": "auto",
+  "fallback_language": "en",
+  "language_options": {
+    "en": {"backend": "kokoro", "voice": "bf_emma", "speed": 1.0},
+    "ja": {"backend": "macos", "voice": "Kyoko", "rate": 540}
+  }
+}
+```
+
+`auto` では `voice` / `rate` / `lang_code` を上位に置かず、`language_options.en` / `.ja` に
+入れてください。誤った言語の設定の使い回しはHTTP 400で防ぎます。共通の `backend` / `speed`
+は上位にも指定でき、言語別設定が優先します。判定後の設定にも既存の検証が適用されます。
+`ja` / `en` の明示指定は本文に関係なく優先し、従来の声・速度の指定方法を維持します。
+
+`/v1/speech/stream` と `/v1/speech/deliver` の両方で利用できます。先頭の `start` イベントに
+判定後の `language`・`backend`・`voice`・`speed`・`rate` を返します。
+`rate` が `null` のmacOS音声は、従来どおり `250 × speed` の毎分語数を使います。
+Emacsの通常読み上げは引き続きEmacs側で選んだ `ja` / `en` を送ります。
+この追加で既存の翻訳・速度変更・先読み設定が自動的に切り替わることはありません。
+
 ## 別マシンへの移動
 
 ```elisp
@@ -165,6 +209,18 @@ SSHトンネルを使う場合もローカルの同ポートに別サービス�
 差し替え、HTTP/WAV仕様を維持すればEmacs側を変更せず使えます。
 任意の `READER_SPEECH_TOKEN` をサーバー起動時とクライアントに設定するとBearer認証を使えます。
 LAN外で使用する際はHTTPSプロキシ等で暗号化してください。
+
+## 連続読み上げの生成待ち対策
+
+macOS音声は短い文を最大240文字までまとめて生成し、`say` の起動回数を減らします。
+同時に2件まで生成できる専用ワーカーを使い、Kokoro/Irodoriのモデル処理は従来どおり直列です。
+すでに24kHz・モノラルPCM16のWAVは再変換せず、そのまま転送します。
+Emacsの表示・ハイライト区間と読み上げ速度は変更しません。
+
+ネイティブ再生は、先読みが空になったらプレイヤーを一時停止してから再開準備を待ちます。
+これにより再生開始通知より先に音声だけが流れることを防ぎます。
+macOSの音声デバイスが使える環境では `make speech-native-test` で、
+先読み切れの後も開始・終了通知が順番に揃うことを無音PCMで検証できます。
 
 ## 検証
 

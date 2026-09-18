@@ -151,8 +151,8 @@ class PlaybackService:
                 data = await request.json()
                 if self.session is not session:
                     raise ValueError("session closed")
-                session["queue"].complete(id, data["count"])
-                await session["ws"].send_json(dict(event="loaded", id=id))
+                duration = session["queue"].complete(id, data["count"])
+                await session["ws"].send_json(dict(event="loaded", id=id, duration=duration))
             else:
                 pcm = decode_wav(await request.read())
                 if self.session is not session:
@@ -165,7 +165,7 @@ class PlaybackService:
     def app(self):
         app = web.Application(client_max_size=16 * 1024 * 1024)
         async def health(_request):
-            return web.json_response({"ok": True, "service": "reader-playback", "protocol": 1})
+            return web.json_response({"ok": True, "service": "reader-playback", "protocol": 1, "pid": os.getpid()})
 
         app.router.add_get("/health", health)
         app.router.add_get("/v1/control", self.control)

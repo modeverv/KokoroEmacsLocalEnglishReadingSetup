@@ -2,6 +2,7 @@
 
 (declare-function my-read-k2--open-unified-workspace "my-read-k2")
 (require 'my-read-ui)
+(autoload 'reader-diagnose "reader-diagnose" nil t)
 
 ;;;###autoload
 (defun my-read ()

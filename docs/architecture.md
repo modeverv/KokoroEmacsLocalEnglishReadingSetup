@@ -127,7 +127,7 @@ adapterに残します。org-noter固有のlocation型も同ファイルの既�
 
 ```text
 sentence / chunk
-  → kokoro-reader queue (id, normalized text, voice, rate, volume)
+  → reader-speech-queue (id, normalized text, voice, rate, volume)
   → synthesis (local API or reader-http-speech-transport)
   → ordered playback reservation / chunks
   → actual audio device
@@ -142,8 +142,21 @@ sentence / chunk
 `playback_queue.py` は受信順序・重複・cancel・device clockに基づく完了を扱います。
 `remote_bridge.py` はEmacsからのJSON LinesをWebSocketへ接続します。
 
-`companion-implementations/macos-speech-bridge/main.m` の常駐再生、`companion-implementations/speech-http-app/` と `companion-implementations/playback-app/` のGUI、
-Swift Accessibilityブリッジは、既存の分離が有効なため書き換えていません。
+queueの変更は `reader-speech-queue.el` に集約します。HTTP transportは操作plistを登録し、
+`kokoro-reader` の内部関数をadviceで差し替えません。要求は送信時の接続先とcallbackを保持します。
+
+| API | 責務 |
+| --- | --- |
+| `reader-speech-queue-submit` | 順序を予約し、生成要求を受け付ける |
+| `reader-speech-queue-attach-process` / `request-finished` | 要求processの所有・生成完了（再生完了とは別） |
+| `reader-speech-queue-cancel` | 全要求を無効化してprocess・一時音声を解放 |
+| `reader-speech-queue-notify` | ready / loaded / started / finishedを処理 |
+| `reader-speech-queue-snapshot` | 本文を含まない件数・待機状態・先読み秒数 |
+
+ネイティブbridgeとリモートplayerの `loaded` 通知には音声長を含めます。
+先読み秒数は「現在の再生区間を除き、次から途切れず準備済みの区間」の合計です。
+旧playerが長さを返さなければ不明と表示します。`M-x reader-diagnose` はこのsnapshotと
+非同期のhealth確認を表示し、診断のためにサービスの起動・停止やqueueの変更を行いません。
 詳細なwire protocolは [http-speech.md](http-speech.md) と
 [remote-playback.md](remote-playback.md) を参照してください。
 
@@ -168,7 +181,7 @@ Vocabularyは文書APIでtitle/sourceを取得し、既存のOrgキー・meaning
 | 文書buffer | sentence設定、言語override、PDF抽出・bbox、position timer | mode終了/killで解放、保存timerはframe終了でも取消 |
 | frame | tab/source/window parameter、翻訳overlayとutility buffer | frame削除で保存・overlay除去・一時buffer削除 |
 | 単一音声session | active context、continuous plist、watch/warmup/prefetch timer | stopでgeneration更新・timer取消・queue破棄 |
-| 常駐音声接続 | process、JSON fragment、予約queue/id | 切断・再起動時に接続のidentityで古いeventを拒否 |
+| 常駐音声接続 / reader-speech-queue | process、JSON fragment / 予約queue・要求process・id | 切断・再起動時に接続のidentityで古いeventを拒否 |
 | Kindle接続 | process、request id/callback、page generation、前後cache | detach/reconnectでcallback・cacheを破棄 |
 | 翻訳/Lookup follower | 選択中target、idle timer、私有module | 最後のReader frameを閉じると停止 |
 | EWW数式 | buffer-local process queue/generation | 再描画/kill時に世代を変え、古い結果を拒否 |

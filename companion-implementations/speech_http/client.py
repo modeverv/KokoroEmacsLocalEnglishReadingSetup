@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import wave
@@ -29,6 +30,29 @@ def decode_audio(event):
         return pcm
 
 
+def open_speech_request(request, timeout=300, busy_timeout=30):
+    """Retry only rejected requests, never an accepted/partly delivered stream."""
+    deadline = time.monotonic() + busy_timeout
+    delay = .2
+    while True:
+        try:
+            return urllib.request.urlopen(request, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = json.loads(exc.read(4096)).get("error")
+                if isinstance(detail, str):
+                    exc.msg = detail
+            except (ValueError, OSError, AttributeError):
+                pass
+            finally:
+                exc.close()
+            remaining = deadline - time.monotonic()
+            if exc.code != 503 or remaining <= 0:
+                raise
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 2)
+
+
 def receive(endpoint, payload, target, token="", timeout=300):
     """A bounded queue provides backpressure; explicit done detects truncated HTTP."""
     try:
@@ -39,7 +63,7 @@ def receive(endpoint, payload, target, token="", timeout=300):
                                          data=json.dumps(payload).encode(), headers=headers)
         expected = 0
         started = False
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with open_speech_request(request, timeout=timeout) as response:
             for line in response:
                 event = json.loads(line)
                 kind = event.get("type")
@@ -160,7 +184,7 @@ def deliver(endpoint, payload):
     request = urllib.request.Request(endpoint.rstrip("/") + "/v1/speech/deliver",
                                      data=json.dumps(payload).encode(), headers=headers)
     count, started = 0, False
-    with urllib.request.urlopen(request, timeout=300) as response:
+    with open_speech_request(request) as response:
         for line in response:
             event = json.loads(line)
             if event.get("type") == "start" and not started and event.get("protocol") == 1:

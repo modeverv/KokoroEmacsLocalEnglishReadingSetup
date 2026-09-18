@@ -40,3 +40,5 @@ External dependencies keep their normal compiled loading behavior."
 
 (provide 'reader-test-source)
 ;;; reader-test-source.el ends here
+
+(add-to-list 'load-path (expand-file-name "test" reader-test--root))

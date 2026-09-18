@@ -98,18 +98,35 @@
 | `defvar` | `kokoro-reader--server-health-timer` |
 | `defvar` | `kokoro-reader--audio-file` |
 | `defvar` | `kokoro-reader--overlay` |
-| `defvar` | `kokoro-reader--macos-prefetch-queue` |
 | `defvar` | `kokoro-reader--macos-bridge-process` |
 | `defvar` | `kokoro-reader--macos-bridge-fragment` |
 | `defvar` | `kokoro-reader--macos-bridge-ready-p` |
+| `defvar` | `kokoro-reader-macos-queued-start-hook` |
+| `defvar` | `kokoro-reader-player-finish-hook` |
+
+## my-read/speech/synthesis/reader-speech-queue.el
+
+旧queue変数名は互換性のため維持します。変更はこのmoduleのAPIに集約します。
+
+| 宣言 | 名前 |
+| --- | --- |
+| `defvar` | `kokoro-reader--macos-prefetch-queue` |
 | `defvar` | `kokoro-reader--macos-next-id` |
 | `defvar` | `kokoro-reader--macos-current-entry` |
 | `defvar` | `kokoro-reader--kokoro-pending-entries` |
 | `defvar` | `kokoro-reader--kokoro-request-processes` |
 | `defvar` | `kokoro-reader--kokoro-api-ready-p` |
 | `defvar` | `kokoro-reader--kokoro-health-pending-p` |
-| `defvar` | `kokoro-reader-macos-queued-start-hook` |
-| `defvar` | `kokoro-reader-player-finish-hook` |
+| `defvar` | `reader-speech-queue--generation` |
+| `defvar` | `reader-speech-queue-transport` |
+| `defvar` | `reader-speech-queue-connect-functions` |
+| `defvar` | `reader-speech-queue-event-functions` |
+| `defvar` | `reader-speech-queue-last-error` |
+
+## my-read/core/reader-diagnose.el
+
+診断buffer内のsource・snapshot・health・probe process・generationはbuffer-localです。
+更新時に古いprobeを取り消し、古いgenerationの応答は破棄します。
 
 ## my-read/core/my-read-core.el
 

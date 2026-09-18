@@ -3,21 +3,40 @@ from __future__ import annotations
 
 import argparse
 import base64
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import io
 import json
 import os
 import re
+import select
+import socket
 import subprocess
 import tempfile
 import threading
 import wave
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 RATE = 24000
 MAX_BODY = 100_000
 MAX_TEXT = 24_000
+
+
+SPEECH_OPTIONS = {"backend", "voice", "speed", "rate", "lang_code"}
+JAPANESE = re.compile(r"[\u3041-\u3096\u309d-\u309f\u30a1-\u30fa\u30fd-\u30ff"
+                      r"\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+                      r"\U00020000-\U000323af]")
+
+
+def detect_language(text, fallback="en"):
+    """Classify Japanese/English only; normalize for detection, never speech text."""
+    normalized = unicodedata.normalize("NFKC", text)
+    if JAPANESE.search(normalized):
+        return "ja"
+    if re.search(r"[A-Za-z]", normalized):
+        return "en"
+    return fallback
 
 
 def validate(data):
@@ -27,8 +46,22 @@ def validate(data):
     if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
         raise ValueError(f"text must contain 1..{MAX_TEXT} characters")
     language = data.get("language", "en")
-    if language not in ("en", "ja"):
-        raise ValueError("language must be en or ja")
+    if language not in ("en", "ja", "auto"):
+        raise ValueError("language must be en, ja or auto")
+    if language == "auto":
+        fallback = data.get("fallback_language", "en")
+        if fallback not in ("en", "ja"):
+            raise ValueError("fallback_language must be en or ja")
+        language = detect_language(text, fallback)
+        if any(key in data for key in ("voice", "rate", "lang_code")):
+            raise ValueError("With language auto, put voice/rate/lang_code in language_options.en or .ja")
+        profiles = data.get("language_options", {})
+        if not isinstance(profiles, dict) or any(key not in ("en", "ja") for key in profiles):
+            raise ValueError("language_options must be an object with en/ja keys")
+        for profile in profiles.values():
+            if not isinstance(profile, dict) or any(key not in SPEECH_OPTIONS for key in profile):
+                raise ValueError("language_options allows only backend, voice, speed, rate and lang_code")
+        data = dict(data, **profiles.get(language, {}))
     backend = data.get("backend", "kokoro" if language == "en" else "macos")
     if backend not in ("kokoro", "macos", "irodori"):
         raise ValueError("backend must be kokoro, macos or irodori")
@@ -66,8 +99,54 @@ def split_text(text, limit=240):
             yield sentence
 
 
+def synthesis_chunks(options, limit=240):
+    """Amortize macOS process startup across adjacent short sentences.
+
+Model backends retain sentence-sized jobs. Reader requests already contain
+bounded visual chunks; batching here does not change their playback IDs.
+"""
+    pending = ""
+    for text in split_text(options["text"], limit):
+        if options["backend"] != "macos":
+            yield text
+            continue
+        if pending and len(pending) + 1 + len(text) > limit:
+            yield pending
+            pending = ""
+        pending = pending + " " + text if pending else text
+    if pending:
+        yield pending
+
+
+def canonical_wav(wav):
+    """Keep canonical WAVs directly; only launch ffmpeg for conversion."""
+    try:
+        with wave.open(io.BytesIO(wav), "rb") as reader:
+            frames = reader.getnframes()
+            if (reader.getnchannels(), reader.getsampwidth(), reader.getframerate(),
+                    reader.getcomptype()) == (1, 2, RATE, "NONE"):
+                pcm = reader.readframes(frames)
+                if not frames or len(pcm) != frames * 2:
+                    raise ValueError("backend returned empty or truncated audio")
+                return wav
+    except (wave.Error, EOFError):
+        pass
+    pcm = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "s16le",
+                          "-ar", str(RATE), "-ac", "1", "pipe:1"], input=wav,
+                         capture_output=True, check=True, timeout=60).stdout
+    if not pcm:
+        raise RuntimeError("backend returned empty audio")
+    output = io.BytesIO()
+    with wave.open(output, "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(RATE)
+        writer.writeframes(pcm)
+    return output.getvalue()
+
+
 def synthesize(text, options):
-    """Run exclusively on the persistent model worker; return canonical PCM WAV."""
+    """Return canonical PCM WAV; model backends run on their serial worker."""
     backend, voice, speed = (options[k] for k in ("backend", "voice", "speed"))
     if backend == "macos":
         with tempfile.TemporaryDirectory(prefix="reader-speech-") as directory:
@@ -84,19 +163,7 @@ def synthesize(text, options):
         import kokoro_server
         wav = kokoro_server._synthesize_wav(text, voice, speed,
                                           options["lang_code"])
-    # Every backend has the same wire format, independent of native model output.
-    pcm = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "s16le",
-                          "-ar", str(RATE), "-ac", "1", "pipe:1"], input=wav,
-                         capture_output=True, check=True, timeout=60).stdout
-    if not pcm:
-        raise RuntimeError("backend returned empty audio")
-    output = io.BytesIO()
-    with wave.open(output, "wb") as writer:
-        writer.setnchannels(1)
-        writer.setsampwidth(2)
-        writer.setframerate(RATE)
-        writer.writeframes(pcm)
-    return output.getvalue()
+    return canonical_wav(wav)
 
 
 class SpeechServer(ThreadingHTTPServer):
@@ -108,11 +175,16 @@ class SpeechServer(ThreadingHTTPServer):
         self.token = token
         self.playback_targets = playback_targets or {}
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="speech-model")
+        # say runs in isolated processes and has substantial startup latency.
+        # Two prefetch requests can render concurrently without blocking the
+        # single-threaded MLX model worker or exceeding the four HTTP slots.
+        self.macos_worker = ThreadPoolExecutor(max_workers=2, thread_name_prefix="speech-macos")
         self.slots = threading.BoundedSemaphore(4)
 
     def server_close(self):
         super().server_close()
         self.worker.shutdown(wait=False, cancel_futures=True)
+        self.macos_worker.shutdown(wait=False, cancel_futures=True)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -139,6 +211,33 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.reply(404, {"error": "not found"})
 
+    def disconnected(self):
+        """Observe cancelled HTTP clients even while the model worker is busy."""
+        readable, _, _ = select.select([self.connection], [], [], 0)
+        if not readable:
+            return False
+        try:
+            return not self.connection.recv(1, socket.MSG_PEEK)
+        except OSError:
+            return True
+
+    def synthesize_connected(self, text, options):
+        if self.disconnected():
+            raise ConnectionResetError("speech request cancelled")
+        worker = self.server.macos_worker if options["backend"] == "macos" else self.server.worker
+        future = worker.submit(self.server.synthesizer, text, options)
+        try:
+            while True:
+                if self.disconnected():
+                    raise ConnectionResetError("speech request cancelled")
+                try:
+                    return future.result(timeout=.2)
+                except FutureTimeout:
+                    if future.done():
+                        raise
+        finally:
+            future.cancel()  # Discard queued work; running model calls finish safely.
+
     def do_POST(self):
         if self.path not in ("/v1/speech/stream", "/v1/speech/deliver"):
             return self.reply(404, {"error": "not found"})
@@ -164,13 +263,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
-            self.event({"type": "start", "protocol": 1, "sample_rate": RATE})
+            self.event({"type": "start", "protocol": 1, "sample_rate": RATE,
+                        "language": options["language"], "backend": options["backend"],
+                        "voice": options["voice"], "speed": options["speed"], "rate": options["rate"]})
             count = 0
-            for index, text in enumerate(split_text(options["text"])):
+            for index, text in enumerate(synthesis_chunks(options)):
                 if delivery:
                     from speech_http.delivery import upload
                     upload(delivery, "check")
-                wav = self.server.worker.submit(self.server.synthesizer, text, options).result()
+                wav = self.synthesize_connected(text, options)
                 if delivery:
                     upload(delivery, str(index), wav, "audio/wav")
                     self.event({"type": "delivered", "index": index})

@@ -16,12 +16,13 @@
 @property NSPopUpButton *host;
 @property NSButton *startButton;
 @property NSButton *stopButton;
-@property NSTask *server;
+@property BOOL busy;
+@property NSString *pendingAction;
 @property NSString *logPath;
-@property NSFileHandle *logHandle;
+
 @property NSTimer *timer;
-@property BOOL checking;
-@property NSUInteger run;
+
+
 @end
 
 @implementation PlaybackApp
@@ -89,7 +90,7 @@
     self.host = [NSPopUpButton new];
     [self.host addItemsWithTitles:@[@"このMacのみ（SSH接続用）", @"LANから接続（0.0.0.0）"]];
     [stack addArrangedSubview:[self row:@"接続範囲" control:self.host]];
-    self.port = [self field:@"8768"];
+    self.port = [self field:([NSUserDefaults.standardUserDefaults stringForKey:@"servicePort"] ?: @"8768")];
     self.device = [self field:@""];
     self.device.placeholderString = @"空欄でシステム既定の出力";
     self.prebuffer = [self field:@"1.0"];
@@ -110,7 +111,7 @@
     self.address = [self label:@"接続先: http://127.0.0.1:8768" size:13];
     self.address.selectable = YES;
     [stack addArrangedSubview:self.address];
-    [stack addArrangedSubview:[self label:@"Intel / Apple Silicon・macOS Monterey以降\nアプリを終了すると再生サーバーも停止します。" size:12]];
+    [stack addArrangedSubview:[self label:@"Intel / Apple Silicon・macOS Monterey以降\n画面を閉じても再生サーバーは動作を続けます。" size:12]];
     [self.window.contentView addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
         [stack.leadingAnchor constraintEqualToAnchor:self.window.contentView.leadingAnchor constant:24],
@@ -125,23 +126,36 @@
     [self.window center];
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+    [self runAction:@"status"];
 }
 - (void)inputsEnabled:(BOOL)enabled {
     for (NSControl *control in @[self.host, self.port, self.device, self.prebuffer, self.token]) control.enabled = enabled;
     self.startButton.enabled = enabled;
     self.stopButton.enabled = !enabled;
 }
-- (void)start:(id)sender {
-    if (self.server.running) return;
+- (void)runAction:(NSString *)action {
+    if (self.busy) {
+        if (![action isEqual:@"status"]) self.pendingAction = action;
+        return;
+    }
     NSScanner *portScanner = [NSScanner scannerWithString:self.port.stringValue];
     int port = 0;
     NSScanner *bufferScanner = [NSScanner scannerWithString:self.prebuffer.stringValue];
     double buffer = -1;
     if (![portScanner scanInt:&port] || !portScanner.isAtEnd || port < 1 || port > 65535 ||
-        ![bufferScanner scanDouble:&buffer] || !bufferScanner.isAtEnd || !isfinite(buffer) || buffer < 0 || buffer > 30) {
+        ([action isEqual:@"start"] && (![bufferScanner scanDouble:&buffer] || !bufferScanner.isAtEnd ||
+                                       !isfinite(buffer) || buffer < 0 || buffer > 30))) {
         self.status.stringValue = @"ポートは1〜65535、先読みは0〜30秒で指定してください";
         return;
     }
+    self.busy = YES;
+    BOOL mutation = ![action isEqual:@"status"];
+    if (mutation) {
+        [self inputsEnabled:NO];
+        self.stopButton.enabled = NO;
+        self.status.stringValue = [action isEqual:@"start"] ? @"起動中…" : @"停止中…";
+    }
+    [NSUserDefaults.standardUserDefaults setObject:self.port.stringValue forKey:@"servicePort"];
 #if defined(__arm64__)
     NSString *arch = @"arm64";
 #else
@@ -150,70 +164,69 @@
     NSString *resources = NSBundle.mainBundle.resourcePath;
     NSString *python = [resources stringByAppendingPathComponent:[NSString stringWithFormat:@"runtime-%@/bin/python3.12", arch]];
     NSString *host = self.host.indexOfSelectedItem == 0 ? @"127.0.0.1" : @"0.0.0.0";
-    NSTask *task = [NSTask new];
-    task.executableURL = [NSURL fileURLWithPath:python];
     NSMutableArray *arguments = [@[@"-I", @"-B", [resources stringByAppendingPathComponent:@"bootstrap.py"],
-                                    @"--host", host, @"--port", [NSString stringWithFormat:@"%d", port],
-                                    @"--prebuffer", self.prebuffer.stringValue] mutableCopy];
-    if (self.device.stringValue.length) [arguments addObjectsFromArray:@[@"--device", self.device.stringValue]];
-    task.arguments = arguments;
-    task.currentDirectoryURL = [NSURL fileURLWithPath:NSHomeDirectory()];
+                                   @"service", action, @"--port", [NSString stringWithFormat:@"%d", port]] mutableCopy];
+    if ([action isEqual:@"start"]) {
+        [arguments addObjectsFromArray:@[@"--host", host, @"--prebuffer", self.prebuffer.stringValue]];
+        if (self.device.stringValue.length) [arguments addObjectsFromArray:@[@"--device", self.device.stringValue]];
+    }
     NSMutableDictionary *environment = [NSProcessInfo.processInfo.environment mutableCopy];
     environment[@"READER_PLAYBACK_TOKEN"] = self.token.stringValue;
-    task.environment = environment;
-    [[NSFileManager defaultManager] createFileAtPath:self.logPath contents:nil
-        attributes:@{NSFilePosixPermissions: @0600}];
-    self.logHandle = [NSFileHandle fileHandleForWritingAtPath:self.logPath];
-    task.standardOutput = self.logHandle;
-    task.standardError = self.logHandle;
-    NSUInteger run = ++self.run;
-    __weak PlaybackApp *weakSelf = self;
-    task.terminationHandler = ^(NSTask *finished) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSTask *task = [NSTask new];
+        task.executableURL = [NSURL fileURLWithPath:python];
+        task.arguments = arguments;
+        task.currentDirectoryURL = [NSURL fileURLWithPath:NSHomeDirectory()];
+        task.environment = environment;
+        NSPipe *pipe = [NSPipe pipe];
+        task.standardOutput = pipe;
+        task.standardError = pipe;
+        NSError *error = nil;
+        NSData *data = nil;
+        BOOL launched = [task launchAndReturnError:&error];
+        if (launched) {
+            data = [pipe.fileHandleForReading readDataToEndOfFile];
+            [task waitUntilExit];
+        }
+        NSDictionary *state = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        NSString *failure = error.localizedDescription ?: [[NSString alloc] initWithData:data ?: [NSData data] encoding:NSUTF8StringEncoding];
+        BOOL success = launched && task.terminationStatus == 0 && state != nil;
         dispatch_async(dispatch_get_main_queue(), ^{
-            PlaybackApp *app = weakSelf;
-            if (!app || app.run != run) return;
-            app.status.stringValue = finished.terminationStatus == 0 ? @"停止中" : @"起動・実行に失敗しました。ログを確認してください";
-            [app inputsEnabled:YES];
-            [app.logHandle closeFile];
-            app.logHandle = nil;
-            app.server = nil;
+            self.busy = NO;
+            if (self.pendingAction) {
+                NSString *pending = self.pendingAction;
+                self.pendingAction = nil;
+                [self runAction:pending];
+                return;
+            }
+            if (self.port.intValue != port) return;
+            if (!success) {
+                self.status.stringValue = @"操作に失敗しました";
+                self.address.stringValue = failure ?: @"ログを確認してください";
+                [self inputsEnabled:YES];
+                self.stopButton.enabled = YES;
+                return;
+            }
+            BOOL running = [state[@"ok"] boolValue];
+            BOOL managed = [state[@"managed"] boolValue];
+            [self inputsEnabled:!running];
+            self.stopButton.enabled = managed;
+            self.status.stringValue = running ? (managed ? @"稼働中（独立サービス）" : @"稼働中（別の方法で起動）") : @"停止中";
+            if (state[@"log"]) self.logPath = state[@"log"];
+            if (managed) {
+                [self.host selectItemAtIndex:[state[@"host"] isEqual:@"0.0.0.0"] ? 1 : 0];
+                self.device.stringValue = state[@"device"] ?: @"";
+                self.prebuffer.stringValue = state[@"prebuffer"] ?: @"1.0";
+            }
+            NSString *address = [state[@"host"] isEqual:@"0.0.0.0"] ? self.lanAddress : @"127.0.0.1";
+            self.address.stringValue = [NSString stringWithFormat:@"接続先: http://%@:%d   PID: %@%@", address, port,
+                                       state[@"pid"] ?: @"—", running && !managed ? @"\n停止は起動元のターミナル／旧アプリで行ってください。" : @""];
         });
-    };
-    NSError *error = nil;
-    if (![task launchAndReturnError:&error]) {
-        self.status.stringValue = [NSString stringWithFormat:@"起動できません: %@", error.localizedDescription];
-        [self.logHandle closeFile];
-        self.logHandle = nil;
-        return;
-    }
-    self.server = task;
-    self.status.stringValue = @"起動中…";
-    self.address.stringValue = [NSString stringWithFormat:@"接続先: http://%@:%d", self.host.indexOfSelectedItem == 0 ? @"127.0.0.1" : self.lanAddress, port];
-    [self inputsEnabled:NO];
+    });
 }
-- (void)stop:(id)sender {
-    if (self.server.running) {
-        self.status.stringValue = @"停止中…";
-        self.stopButton.enabled = NO;
-        [self.server terminate];
-    }
-}
-- (void)check:(NSTimer *)timer {
-    if (!self.server.running || self.checking) return;
-    self.checking = YES;
-    NSUInteger run = self.run;
-    NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"http://127.0.0.1:%d/health", self.port.intValue]];
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    request.timeoutInterval = 1;
-    [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        NSDictionary *result = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.checking = NO;
-            if (self.run == run && self.server.running && self.stopButton.enabled &&
-                [result[@"service"] isEqual:@"reader-playback"]) self.status.stringValue = @"稼働中";
-        });
-    }] resume];
-}
+- (void)start:(id)sender { [self runAction:@"start"]; }
+- (void)stop:(id)sender { [self runAction:@"stop"]; }
+- (void)check:(NSTimer *)timer { [self runAction:@"status"]; }
 - (void)openLogs:(id)sender {
     if ([[NSFileManager defaultManager] fileExistsAtPath:self.logPath])
         [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:self.logPath]];
@@ -221,13 +234,7 @@
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender { return YES; }
 - (void)applicationWillTerminate:(NSNotification *)notification {
     [self.timer invalidate];
-    if (self.server.running) {
-        [self.server terminate];
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3];
-        while (self.server.running && deadline.timeIntervalSinceNow > 0)
-            [NSThread sleepForTimeInterval:0.05];
-        if (self.server.running) kill(self.server.processIdentifier, SIGKILL);
-    }
+
 }
 @end
 

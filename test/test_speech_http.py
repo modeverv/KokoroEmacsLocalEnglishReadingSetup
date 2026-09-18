@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import queue
+import socket
+from functools import partial
 import subprocess
 import sys
 import tempfile
@@ -57,12 +59,45 @@ class ProtocolTests(unittest.TestCase):
 
     def test_languages_chunk_order_pcm_and_single_worker(self):
         result = self.receive({"text": "一文目です。二文目です。", "language": "ja"})
-        self.assertEqual(result, [b'\x01\x00' * 240] * 2 + [None])
-        self.assertEqual([call[0] for call in self.calls], ["一文目です。", "二文目です。"])
+        self.assertEqual(result, [b'\x01\x00' * 240, None])
+        self.assertEqual([call[0] for call in self.calls], ["一文目です。 二文目です。"])
         self.assertEqual(self.calls[0][1]["voice"], "Kyoko")
         self.receive({"text": "English.", "language": "en"})
         self.assertEqual(self.calls[-1][1]["voice"], "bf_emma")
-        self.assertEqual(len({call[2] for call in self.calls}), 1)
+        self.receive({"text": "Another English sentence.", "language": "en"})
+        self.assertEqual(len({call[2] for call in self.calls if call[1]["backend"] == "kokoro"}), 1)
+
+    def test_auto_language_reaches_synthesis_and_start_metadata(self):
+        import urllib.request
+        for text, language, voice in (("APIの説明です。", "ja", "Kyoko"), ("Hello.", "en", "bf_emma")):
+            payload = json.dumps(dict(text=text, language="auto")).encode()
+            request = urllib.request.Request(self.endpoint + "/v1/speech/stream", data=payload,
+                      headers={"Authorization": "Bearer test-secret", "Content-Type": "application/json"})
+            with urllib.request.urlopen(request) as response:
+                events = [json.loads(line) for line in response]
+            self.assertEqual(events[0]["language"], language)
+            self.assertEqual(events[0]["voice"], voice)
+            self.assertEqual(events[-1]["type"], "done")
+            self.assertEqual(self.calls[-1][1]["language"], language)
+
+    def test_macos_prefetch_runs_while_model_and_first_macos_job_are_busy(self):
+        release = threading.Event()
+        model_busy, macos_busy = threading.Event(), threading.Event()
+        def block(entered):
+            entered.set()
+            release.wait(5)
+        self.http.worker.submit(block, model_busy)
+        self.http.macos_worker.submit(block, macos_busy)
+        try:
+            self.assertTrue(model_busy.wait(1))
+            self.assertTrue(macos_busy.wait(1))
+            start = time.monotonic()
+            result = self.receive({"text": "日本語です。", "language": "ja"})
+            self.assertLess(time.monotonic() - start, 2, "macOS job waited behind a blocked worker")
+            self.assertIsNone(result[-1])
+            self.assertFalse(release.is_set())
+        finally:
+            release.set()
 
     def test_rejects_unauthorized_before_synthesis(self):
         result = self.receive({"text": "hello"}, token="wrong")
@@ -83,10 +118,53 @@ class ProtocolTests(unittest.TestCase):
         for _ in range(4):
             self.http.slots.acquire()
         try:
-            self.assertEqual(self.receive({"text": "hello"})[0].code, 503)
+            opener = partial(client.open_speech_request, busy_timeout=.1)
+            with patch.object(client, "open_speech_request", opener):
+                error = self.receive({"text": "hello"})[0]
+            self.assertEqual(error.code, 503)
+            self.assertIn("server busy", str(error))
         finally:
             for _ in range(4):
                 self.http.slots.release()
+
+    def test_busy_retries_until_capacity_is_available(self):
+        for _ in range(4):
+            self.http.slots.acquire()
+        timer = threading.Timer(.3, self.http.slots.release)
+        timer.start()
+        try:
+            self.assertEqual(self.receive({"text": "hello"})[-1], None)
+            self.assertEqual(len(self.calls), 1)
+        finally:
+            timer.join()
+            for _ in range(3):
+                self.http.slots.release()
+
+    def test_cancelled_waiter_releases_slot_and_does_not_synthesize(self):
+        busy, release = threading.Event(), threading.Event()
+        def block_worker():
+            busy.set()
+            release.wait(5)
+        self.http.worker.submit(block_worker)
+        self.assertTrue(busy.wait(1))
+        connection = socket.create_connection(("127.0.0.1", self.http.server_port))
+        payload = json.dumps({"text": "cancelled"}).encode()
+        connection.sendall(("POST /v1/speech/stream HTTP/1.0\r\n"
+                            "Authorization: Bearer test-secret\r\n"
+                            f"Content-Length: {len(payload)}\r\n\r\n").encode() + payload)
+        try:
+            self.assertIn(b"200", connection.recv(4096))
+            connection.close()
+            deadline = time.monotonic() + 2
+            while self.http.slots._value != 4 and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertEqual(self.http.slots._value, 4)
+            release.set()
+            self.http.worker.submit(lambda: None).result(timeout=2)
+            self.assertEqual(self.calls, [])
+        finally:
+            connection.close()
+            release.set()
 
     def test_one_player_concatenates_all_frames_without_wav_headers(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -146,6 +224,42 @@ class ProtocolTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
+    def test_auto_language_script_rules_and_defaults(self):
+        for text, language in [("日本語のAPIです。", "ja"), ("漢字", "ja"), ("ｶﾀｶﾅ", "ja"),
+                               ("𠮷野家", "ja"), ("Hello!", "en"), ("Ｈｅｌｌｏ", "en"),
+                               ("123 ! 😀", "en")]:
+            with self.subTest(text=text):
+                result = server.validate(dict(text=text, language="auto"))
+                self.assertEqual(result["language"], language)
+                self.assertEqual(result["text"], text)
+                self.assertEqual(result["voice"], "Kyoko" if language == "ja" else "bf_emma")
+                self.assertEqual(result["backend"], "macos" if language == "ja" else "kokoro")
+        self.assertEqual(server.validate(dict(text="123。", language="auto", fallback_language="ja"))["language"], "ja")
+
+    def test_auto_language_profiles_do_not_leak_across_languages(self):
+        profiles = {"ja": dict(backend="macos", voice="Kyoko", rate=540),
+                    "en": dict(backend="kokoro", voice="bf_emma", speed=1.2)}
+        en = server.validate(dict(text="Hello", language="auto", language_options=profiles))
+        ja = server.validate(dict(text="こんにちは", language="auto", language_options=profiles))
+        self.assertIsNone(en["rate"])
+        self.assertEqual(en["speed"], 1.2)
+        self.assertEqual(ja["rate"], 540)
+        self.assertEqual(ja["speed"], 1.0)
+
+    def test_explicit_language_and_omitted_language_keep_old_behavior(self):
+        self.assertEqual(server.validate(dict(text="Hello", language="ja"))["language"], "ja")
+        self.assertEqual(server.validate(dict(text="日本語", language="en"))["language"], "en")
+        self.assertEqual(server.validate(dict(text="日本語"))["language"], "en")
+
+    def test_auto_language_rejects_ambiguous_or_invalid_settings(self):
+        for extra in [dict(voice="Kyoko"), dict(rate=540), dict(lang_code="j"),
+                      dict(fallback_language="auto"), dict(language_options=[]),
+                      dict(language_options={"fr": {}}), dict(language_options={"ja": None}),
+                      dict(language_options={"ja": {"text": "replace"}}),
+                      dict(language_options={"ja": {"rate": -1}})]:
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                server.validate(dict(text="日本語", language="auto", **extra))
+
     def test_splitting_preserves_content_and_bounds(self):
         text = "長い文章" * 200 + "。 Hello world! Last sentence."
         chunks = list(server.split_text(text))
@@ -184,7 +298,38 @@ class ValidationTests(unittest.TestCase):
             server.validate({"text": "Hello", "language": "en", "lang_code": "j"})
 
 
+class SynthesisEfficiencyTests(unittest.TestCase):
+    def test_macos_batches_short_sentences_but_bounds_long_requests(self):
+        text = "短い文。次の文。" * 100
+        chunks = list(server.synthesis_chunks({"text": text, "backend": "macos"}))
+        self.assertTrue(all(len(chunk) <= 240 for chunk in chunks))
+        self.assertEqual("".join(chunks).replace(" ", ""), text)
+        self.assertLess(len(chunks), len(list(server.split_text(text))))
+
+    def test_model_backends_keep_sentence_boundaries(self):
+        for backend in ("kokoro", "irodori"):
+            self.assertEqual(list(server.synthesis_chunks({"text": "One. Two.", "backend": backend})),
+                             ["One.", "Two."])
+
+    def test_canonical_wav_needs_no_conversion_process(self):
+        wav = wav_bytes()
+        with patch.object(server.subprocess, "run") as run:
+            self.assertEqual(server.canonical_wav(wav), wav)
+            run.assert_not_called()
+
+    def test_truncated_pcm_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            server.canonical_wav(wav_bytes()[:-10])
+
+
 class ServiceTests(unittest.TestCase):
+    def test_control_lock_timeout_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with service.control_lock(Path(directory)):
+                with self.assertRaisesRegex(RuntimeError, "still busy"):
+                    with service.control_lock(Path(directory), timeout=.01):
+                        self.fail("lock unexpectedly acquired")
+
     def test_running_service_is_reused_without_launch(self):
         with patch.object(service, "health", return_value={"ok": True, "pid": 42}), patch.object(service, "launchctl") as launch:
             self.assertEqual(service.ensure()["pid"], 42)

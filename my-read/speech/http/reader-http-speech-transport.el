@@ -7,12 +7,6 @@
 
 (defvar reader-http-speech-transport-mode nil)
 
-(defun reader-http-speech-transport--mark-cancelled (&rest _)
-  "Mark HTTP requests before killing them so sentinels cannot restart the queue."
-  (dolist (entry kokoro-reader--macos-prefetch-queue)
-    (when (plist-get entry :http-payload)
-      (setf (plist-get entry :http-cancelled) t))))
-
 (defun reader-http-speech-transport--payload (text)
   "Capture the reader's explicit language, voice and exact speed for TEXT."
   (let* ((backend (symbol-name kokoro-reader-backend))
@@ -51,83 +45,56 @@
                         (and (boundp 'my/read-speech-language-override) my/read-speech-language-override)))
     key))
 
-(defun reader-http-speech-transport--enqueue (original text &optional announced)
-  "Reserve a native playback slot and receive TEXT over HTTP."
-  (if (not reader-http-speech-transport-mode)
-      (funcall original text announced)
-    (let* ((process (kokoro-reader--ensure-macos-bridge))
-           (id (cl-incf kokoro-reader--macos-next-id))
-           (entry (list :id id :backend 'kokoro
-                        :key (if (eq kokoro-reader-backend 'macos)
-                                 (kokoro-reader--macos-key text)
-                               (kokoro-reader--kokoro-key text))
-                        :announced announced :queued nil :loaded nil :started nil
-                        :http-cancelled nil :process nil
-                        :remote-playback (reader-http-playback--enabled-p)
-                        :audio-file (unless (reader-http-playback--enabled-p)
-                                      (make-temp-file "reader-http-" nil ".wav"))
-                        :volume kokoro-reader-volume
-                        :http-payload (reader-http-speech-transport--payload text)
-                        :endpoint reader-http-speech-endpoint)))
-      (setq kokoro-reader--macos-prefetch-queue
-            (append kokoro-reader--macos-prefetch-queue (list entry))
-            kokoro-reader--kokoro-pending-entries
-            (append kokoro-reader--kokoro-pending-entries (list entry))
-            kokoro-reader--kokoro-api-ready-p t)
-      (process-send-string process
-                           (concat (json-encode `((command . "reserve") (id . ,id)
-                                                  (volume . ,kokoro-reader-volume))) "\n"))
-      (kokoro-reader--launch-pending-requests)
-      entry)))
+(defun reader-http-speech-transport--prepare (text)
+  "Describe HTTP synthesis of TEXT without modifying the queue."
+  (let ((remote (reader-http-playback--enabled-p)))
+    (list :backend 'kokoro :start #'reader-http-speech-transport--start-request
+          :failure-policy 'stop :error-buffer "*HTTP Speech Errors*"
+          :remote-playback remote
+          :audio-file (unless remote (make-temp-file "reader-http-" nil ".wav"))
+          :volume kokoro-reader-volume
+          :http-payload (reader-http-speech-transport--payload text)
+          :endpoint reader-http-speech-endpoint)))
 
-(defun reader-http-speech-transport--start-request (original entry)
-  "Download HTTP ENTRY; preserve the existing resident playback lifecycle."
-  (if (not (plist-get entry :http-payload))
-      (funcall original entry)
-    (let* ((default-directory reader-http-speech--directory)
-           (remote (plist-get entry :remote-playback))
-           (payload (if remote (reader-http-playback--request entry)
-                      (plist-get entry :http-payload)))
-           (stderr-buffer (generate-new-buffer " *http-speech-request-error*"))
-           (process
-            (make-process
-             :name (format "http-speech-chunk-%s" (plist-get entry :id))
-             :buffer nil :stderr stderr-buffer :connection-type 'pipe
-             :coding 'utf-8-unix :noquery t
-             :command (append (list reader-http-speech-python "-m" "speech_http.client"
-                                    "--endpoint" (plist-get entry :endpoint)
-                                    "--auto-start" "--listen-host" reader-http-speech-listen-host)
-                              (if remote '("--deliver")
-                                (list "--output" (plist-get entry :audio-file))))
-             :sentinel
-             (lambda (proc _event)
-               (when (memq (process-status proc) '(exit signal))
-                 (when (and (not (zerop (process-exit-status proc)))
-                            (not (plist-get entry :http-cancelled))
-                            (buffer-live-p stderr-buffer))
-                   (with-current-buffer (get-buffer-create "*HTTP Speech Errors*")
-                     (insert-buffer-substring stderr-buffer))
-                   ;; A failed request must not advance reading or automatically
-                   ;; relaunch a server the user just stopped in the app.
-                   (when (kokoro-reader--macos-entry-for-id (plist-get entry :id))
-                     (if (fboundp 'english-reading-mode-stop-continuous)
-                         (english-reading-mode-stop-continuous)
-                       (kokoro-reader-stop))
-                     (message "HTTP speech stopped; see *HTTP Speech Errors*")))
-                 (if (or remote (plist-get entry :http-cancelled))
-                     (progn
-                       ;; Delivery is not playback completion. Only the player
-                       ;; device's finished event advances the reader.
-                       (setq kokoro-reader--kokoro-request-processes
-                             (delq proc kokoro-reader--kokoro-request-processes))
-                       (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))
-                       (unless (plist-get entry :http-cancelled)
-                         (kokoro-reader--launch-pending-requests)))
-                   (kokoro-reader--kokoro-request-finished proc entry stderr-buffer)))))))
-      (setf (plist-get entry :process) process)
-      (push process kokoro-reader--kokoro-request-processes)
-      (process-send-string process payload)
-      (process-send-eof process))))
+(defun reader-http-speech-transport--start-request (entry)
+  "Send ENTRY and report its result through the shared queue API."
+  (reader-http-speech--remember-endpoint (plist-get entry :endpoint))
+  (let* ((default-directory reader-http-speech--directory)
+         (remote (plist-get entry :remote-playback))
+         (payload (if remote (reader-http-playback--request entry)
+                    (plist-get entry :http-payload)))
+         (stderr-buffer (generate-new-buffer " *http-speech-request-error*"))
+         (process
+          (make-process
+           :name (format "http-speech-chunk-%s" (plist-get entry :id))
+           :buffer nil :stderr stderr-buffer :connection-type 'pipe
+           :coding 'utf-8-unix :noquery t
+           :command (append (list reader-http-speech-python "-m" "speech_http.client"
+                                  "--endpoint" (plist-get entry :endpoint)
+                                  "--auto-start" "--listen-host" reader-http-speech-listen-host)
+                            (if remote '("--deliver")
+                              (list "--output" (plist-get entry :audio-file))))
+           :sentinel
+           (lambda (proc _event)
+             (when (memq (process-status proc) '(exit signal))
+               (reader-speech-queue-request-finished proc entry stderr-buffer))))))
+    (reader-speech-queue-attach-process entry process)
+    (process-send-string process payload)
+    (process-send-eof process)))
+
+(defun reader-http-speech-transport--descriptor ()
+  "Return the explicit HTTP transport operations."
+  (list :prepare #'reader-http-speech-transport--prepare
+        :key #'reader-http-speech-transport--key))
+
+;; Remove old runtime advice when updating an already-running Emacs.
+(dolist (pair '((kokoro-reader--clear-macos-prefetch . reader-http-speech-transport--mark-cancelled)
+                (kokoro-reader--enqueue-macos-text . reader-http-speech-transport--enqueue)
+                (kokoro-reader--enqueue-kokoro-text . reader-http-speech-transport--enqueue)
+                (kokoro-reader--start-kokoro-request . reader-http-speech-transport--start-request)
+                (kokoro-reader--macos-key . reader-http-speech-transport--key)
+                (kokoro-reader--kokoro-key . reader-http-speech-transport--key)))
+  (advice-remove (car pair) (cdr pair)))
 
 ;;;###autoload
 (define-minor-mode reader-http-speech-transport-mode
@@ -143,21 +110,9 @@ sentence completion, highlighting, page turning and continuous audio queue."
              (process-get kokoro-reader--macos-bridge-process 'playback-endpoint))
     (delete-process kokoro-reader--macos-bridge-process)
     (setq kokoro-reader--macos-bridge-process nil))
-  (setq kokoro-reader--kokoro-api-ready-p nil)
-  (if reader-http-speech-transport-mode
-      (progn
-        (advice-add 'kokoro-reader--clear-macos-prefetch :before #'reader-http-speech-transport--mark-cancelled)
-        (advice-add 'kokoro-reader--enqueue-macos-text :around #'reader-http-speech-transport--enqueue)
-        (advice-add 'kokoro-reader--enqueue-kokoro-text :around #'reader-http-speech-transport--enqueue)
-        (advice-add 'kokoro-reader--start-kokoro-request :around #'reader-http-speech-transport--start-request)
-        (advice-add 'kokoro-reader--macos-key :filter-return #'reader-http-speech-transport--key)
-        (advice-add 'kokoro-reader--kokoro-key :filter-return #'reader-http-speech-transport--key))
-    (advice-remove 'kokoro-reader--clear-macos-prefetch #'reader-http-speech-transport--mark-cancelled)
-    (advice-remove 'kokoro-reader--enqueue-macos-text #'reader-http-speech-transport--enqueue)
-    (advice-remove 'kokoro-reader--enqueue-kokoro-text #'reader-http-speech-transport--enqueue)
-    (advice-remove 'kokoro-reader--start-kokoro-request #'reader-http-speech-transport--start-request)
-    (advice-remove 'kokoro-reader--macos-key #'reader-http-speech-transport--key)
-    (advice-remove 'kokoro-reader--kokoro-key #'reader-http-speech-transport--key)))
+  (reader-speech-queue-select-transport
+   (when reader-http-speech-transport-mode
+     (reader-http-speech-transport--descriptor))))
 
 (provide 'reader-http-speech-transport)
 ;;; reader-http-speech-transport.el ends here

@@ -44,6 +44,18 @@
         payload[@"language"] = voice.language;
     }
     if (rate) payload[@"rate"] = rate;
+    [self writeEvent:payload];
+}
+
+- (void)emitLoaded:(NSNumber *)identifier buffers:(NSArray<AVAudioPCMBuffer *> *)buffers {
+    double duration = 0;
+    for (AVAudioPCMBuffer *buffer in buffers) {
+        duration += buffer.frameLength / buffer.format.sampleRate;
+    }
+    [self writeEvent:@{@"event": @"loaded", @"id": identifier, @"duration": @(duration)}];
+}
+
+- (void)writeEvent:(NSDictionary *)payload {
     NSData *data = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
     if (!data) return;
     NSMutableData *line = [data mutableCopy];
@@ -158,6 +170,9 @@
         self.playingIdentifier = self.scheduledIdentifiers.firstObject;
         [self emit:@"started" id:self.playingIdentifier message:nil voice:nil rate:nil];
     } else {
+        // A starved player remains running. Pause before scheduling late audio,
+        // otherwise it plays before warmup release and its "started" event.
+        [self.player pause];
         [self beginPlaybackIfReady];
     }
 }
@@ -207,6 +222,7 @@
         return;
     }
     [self.renderers removeObjectForKey:identifier];
+    [self emitLoaded:identifier buffers:self.buffers[identifier]];
     [self.completed addObject:identifier];
     [self flushCompletedInOrder:token];
 }
@@ -288,7 +304,7 @@
     if (volume) self.player.volume = MIN(MAX(volume.floatValue, 0.0f), 1.0f);
     [self.buffers[identifier] addObject:buffer];
     [self.completed addObject:identifier];
-    [self emit:@"loaded" id:identifier message:nil voice:nil rate:nil];
+    [self emitLoaded:identifier buffers:@[buffer]];
     [self flushCompletedInOrder:self.generationToken];
 }
 

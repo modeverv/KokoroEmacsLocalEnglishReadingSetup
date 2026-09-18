@@ -42,7 +42,12 @@ file-based keyとの互換性を別途設計します。未対応操作は `read
 ## Speech backendを追加する
 
 Readerの操作は `:speak` → `kokoro-reader--speak-bounds` に合流します。新しい合成backendは
-`my-read/speech/synthesis/kokoro-reader.el` のqueue/payload境界、言語別設定は `my-read/speech/backend-selection/my-read-speech-settings.el`、HTTP経由の
+`reader-speech-queue-transport` の `:prepare` / `:key` 操作を登録します。
+`:prepare` は `:start` callbackとpayload・接続先を持つ要求を返します。
+callbackは `reader-speech-queue-attach-process` / `reader-speech-queue-request-finished` で
+生成processの開始・完了を通知します。queueの追加・削除は直接行いません。
+再生接続は `reader-speech-queue-connect-functions`、追加の接続eventは
+`reader-speech-queue-event-functions` へ登録します。言語別設定は `my-read/speech/backend-selection/my-read-speech-settings.el`、HTTP経由の
 合成は `companion-implementations/speech_http/server.py` に実装します。新しい合成方式をReaderの文送りに混ぜません。
 
 守る契約:
@@ -68,7 +73,7 @@ HTTPの認証/timeout/不正応答は既存のerror bufferと停止経路へ伝�
 - キーは各minor-modeのmapに置き、Readerのpane predicateを維持します。
 - 文書ごとの位置・言語・cacheはbuffer-local、windowとtabの所有関係はframe parameterです。
 - 出力装置を共有する単一音声sessionは `my-read/core/english-reading-state.el`、接続queueは
-  `my-read/speech/synthesis/kokoro-reader.el`、Kindleの接続とページcacheは `my-read/document/kindle/my-read-k.el` が所有します。
+  `my-read/speech/synthesis/reader-speech-queue.el`、Kindleの接続とページcacheは `my-read/document/kindle/my-read-k.el` が所有します。
 - 遅延読み上げ処理は `english-reading-mode--session-timer` を使用し、既存generationを
   無視した `run-at-time` を追加しません。
 - import cycleの代わりにhook・document operation・`declare-function` を使います。
@@ -78,9 +83,11 @@ HTTPの認証/timeout/不正応答は既存のerror bufferと停止経路へ伝�
 
 ```sh
 make reader-check            # check-parens + 全Elispの警告をエラー扱いでcompile
-make my-read-k-ert           # Reader + document/lifecycle ERT
+make reader-ert              # Reader全体（make my-read-k-ertも同じ）
+make reader-ert READER_SUITE=speech  # 音声だけ。分類一覧はtest/README.md
 make speech-http-test       # HTTP Python + ERT
 make speech-playback-test   # playback Python + ERT
+make speech-native-test    # macOS実機device：無音PCMで再生順序・音声長を確認
 make reader-python-test     # test/ と scripts/ の全Python unittest
 make my-read-k-test         # Swiftのpure logicテスト
 make reader-test            # 上記をまとめて実行

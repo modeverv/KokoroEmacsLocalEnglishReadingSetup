@@ -25,6 +25,10 @@ Emacs → 生成サーバー → 再生サーバーへWAVを送り、実際の�
 手元の再生サーバーにはKindleや音声モデルは不要です。
 転送先はEmacsでURLを指定するだけで、生成サーバーへの事前登録は不要です。
 macOS版はIntel／Apple Silicon・Monterey（12）以降を対象とする単体GUIアプリを
+再生サーバーも独立サービスとして動作し、GUIを閉じても継続します。GUIを後から開いて開始・停止できます。
+`make speech-playback` / `make speech-playback-stop` / `make speech-playback-status` でも操作できます。
+macOSのEmacsでlocalhostの再生先を指定した場合は、読み上げ時に自動起動し、Emacs正常終了時に停止します。
+
 `make speech-playback-app` で作成できます。Pythonも同梱します（Intel／Monterey実機は未検証）。
 [クロスプラットフォーム再生サーバーの導入・SSH接続手順](docs/remote-playback.md)を参照してください。
 
@@ -60,7 +64,17 @@ make speech-gui
 初回はアプリを自動ビルドします。以後はFinderで
 `companion-implementations/speech-http-app/build/Reader Speech Server.app` を開いて起動できます。
 アプリはこのリポジトリと `companion-implementations/.venv` を参照するため、`.app` だけを別Macへコピーする配布形式ではありません。
-GUIやEmacsを終了してもサーバーは動き続けます。停止にはGUIの「停止」を使います。
+GUIを閉じてもサーバーは継続します。Emacsを通常終了すると、そのEmacsから利用したローカルの
+launchd音声サーバーを停止します。共有サーバーとして残す場合は
+`(setq reader-http-speech-stop-server-on-exit nil)` を設定してください。
+リモート接続先や、ターミナルから直接起動したサーバーは終了しません。
+`M-x reader-diagnose` で接続先、サーバーPID、声・速度、生成要求数、先読み秒数、
+待機状態と直近のエラーを一画面で確認できます。`g`で更新、`q`で閉じます。
+診断は読み上げを止めず、本文を永続ログへ保存しません。
+
+復旧には `M-x reader-http-speech-restart-server`、停止には
+`M-x reader-http-speech-stop-server` を使えます。
+HTTP 503（同時受付の混雑）は最大30秒待って再試行し、途中まで受信した音声は再送しません。
 
 ### 通常のEmacs読み上げを接続する
 
@@ -178,7 +192,7 @@ nov.elでEPUBを開き、翻訳対象の1文をハイライトしながら読書
 - PDF／EPUBのページ、表示位置、表示倍率を自動保存・復元
 - PDF／EPUB／Kindle／EWWをorg-noterで統一して記録
 - EWWのURL履歴からWebページを再訪し、arXiv HTMLの数式・図を表示
-- `M-x my-read-change-japanese-speed` / `M-x my-read-change-english-speed` で言語別に速度を変更
+- `M-x my-read-change-speed` で現在の読み上げ言語の速度を変更
 - PDFの選択範囲を永続ハイライトとして保存
 - Kindleでは前後2ページをメモリ上だけにキャッシュ
 - Kindle本文をファイルへ保存しない
@@ -328,17 +342,17 @@ Irodoriの参照音声方式も追加しています。
 
 | 言語 | 設定変数（初期値） | 変更コマンド |
 | --- | --- | --- |
-| 日本語（Apple） | `my/read-japanese-macos-rate`（540） | `M-x my-read-change-japanese-speed` |
-| 日本語（Kokoro） | `my/read-japanese-kokoro-speed`（1.0倍） | `M-x my-read-change-japanese-speed` |
-| 日本語（Irodori） | `my/read-japanese-irodori-speed`（1.0倍） | `M-x my-read-change-japanese-speed` |
-| 英語（Kokoro） | `kokoro-reader-speed`（1.0倍） | `M-x my-read-change-english-speed` |
+| 日本語（Apple） | `my/read-japanese-macos-rate`（540） | `M-x my-read-change-speed` |
+| 日本語（Kokoro） | `my/read-japanese-kokoro-speed`（1.0倍） | `M-x my-read-change-speed` |
+| 日本語（Irodori） | `my/read-japanese-irodori-speed`（1.0倍） | `M-x my-read-change-speed` |
+| 英語（Kokoro） | `kokoro-reader-speed`（1.0倍） | `M-x my-read-change-speed` |
 
 Apple音声は毎分語数を正の整数、Kokoroは言語ごとの速度倍率（0.5〜2.0、通常1.0）を入力すると、
 その言語の開いている読書バッファと、
 以後開く文書に反映されます。対象言語を読み上げ中なら再生と先読みを停止し、
 `s`または`SPC`で再開すると新しい速度を使います。他方の言語の速度は変わりません。
 Apple音声を英語の既定に戻した場合は、同じコマンドで`my/read-english-macos-rate`（毎分語数）を変更します。
-従来の`my-read-change-speed`は日本語用の別名として使えます。
+`my-read-change-speed` は現在の英語・日本語設定に応じて変更先を選びます。
 コマンドの変更は現在のEmacsセッション内で有効です。再起動後も使う値は設定ファイルに記述してください。
 
 ```elisp
@@ -540,8 +554,7 @@ Emacs Lispから指定する場合の引数はシンボルです。
 
 | コマンド（`M-x`） | 動作 |
 | --- | --- |
-| `my-read-change-japanese-speed` / `my-read-change-speed` | 日本語音声の毎分語数を変更 |
-| `my-read-change-english-speed` | 英語音声の速度を変更（Kokoroは倍率、macOSは毎分語数） |
+| `my-read-change-speed` | 現在の読み上げ言語の速度を変更（Kokoro/Irodoriは倍率、macOSは毎分語数） |
 | `my-read-set-japanese-speech-backend` | 日本語の音声エンジンを選択（kokoro / irodori / macos） |
 | `my-read-set-english-speech-backend` | 英語の音声エンジンを選択（kokoro / macos） |
 | `my-read-restart-japanese-speech` | 音声エンジンを再起動し、現在の再生・先読みを停止 |
@@ -749,7 +762,10 @@ Kindle.appへ接続できない場合は、Kindle.appで英語本文が表示さ
 make my-read-k-check
 ```
 
-`make my-read-k-test` はKindle.app AccessibilityブリッジのSwiftテスト、`make my-read-k-ert` はEmacs ERTテストを実行します。
+`make my-read-k-test` はKindle.app AccessibilityブリッジのSwiftテスト、`make reader-ert`
+（従来の `make my-read-k-ert` も同じ）はEmacs ERT全体を実行します。
+`make reader-ert READER_SUITE=speech` のように機能別でも実行できます。
+分類と対応ファイルは [test/README.md](test/README.md) を参照してください。
 
 HTTPサーバー・クライアントとEmacsの設定反映は、次で検証できます。
 
@@ -783,7 +799,9 @@ Swiftビルドの回避経路は[開発ガイド](docs/DEVELOPMENT.md#検証)を
 | `scripts/build_speech_app.py` | macOSアプリのビルド |
 | `scripts/check_speech_server.py` | LAN端末からの音声生成・WAV検証 |
 | `companion-implementations/kokoro_server.py` | ローカルKokoro HTTPサーバー |
-| `my-read/speech/synthesis/kokoro-reader.el` | 非同期音声生成・再生・ハイライト |
+| `my-read/speech/synthesis/kokoro-reader.el` | 発話範囲・合成payload・再生接続・ハイライト |
+| `my-read/speech/synthesis/reader-speech-queue.el` | 音声queue API・要求取消・プレイヤー通知 |
+| `my-read/core/reader-diagnose.el` | 読み上げ状態の診断 |
 | `companion-implementations/macos-speech-bridge/main.m` | Kokoro WAVとmacOS音声を順序付きで再生する常駐ネイティブブリッジ |
 | `my-read/core/english-reading-mode.el` | 公開コマンド、keymap、minor-modeの有効化・終了 |
 | `my-read/speech/playback/english-reading-speech.el` / `my-read/speech/prefetch/english-reading-prefetch.el` | 発話context、連続読み上げ、実再生完了、音声先読み |
@@ -801,7 +819,8 @@ Swiftビルドの回避経路は[開発ガイド](docs/DEVELOPMENT.md#検証)を
 | `my-read/document/kindle/my-read-k2.el` | Kindle.app Accessibilityバックエンド |
 | `companion-implementations/my-read-k2/bridge/` | macOS Accessibilityを読むSwiftブリッジ |
 | `key.md` | my-readとorg-noterのキーバインド・競合方針 |
-| `test/my-read-k-tests.el` | 共有Reader UIのERTテスト |
+| `test/my-read-k-tests.el` | 機能別Reader ERTを読み込む互換入口 |
+| `test/reader-*-tests.el` | 音声・PDF・EPUB・画面・位置保存などの機能別ERT |
 | `test/my-read-k2-tests.el` | Kindle.appバックエンドのERTテスト |
 | `test/reader-document-tests.el` | 文書API、状態遷移、古いcallback、保存失敗の境界テスト |
 | `scripts/check-reader.el` | 全Elispの構文と警告をエラー扱いにしたコンパイル検証 |

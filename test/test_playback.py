@@ -66,6 +66,14 @@ class QueueTests(unittest.TestCase):
         queue.render(8, 20)
         self.assertEqual(queue.due_events(20), [(10 + 4 / RATE, "finished", 1)])
 
+    def test_duration_includes_audio_already_consumed(self):
+        queue = PlaybackQueue(0)
+        queue.reserve(1)
+        queue.append(1, 0, b"\x01\x00" * 2400)
+        queue.render(2400, 10)
+        queue.append(1, 1, b"\x01\x00" * 1200)
+        self.assertAlmostEqual(queue.complete(1, 2), .15)
+
     def test_hold_prebuffer_and_short_final_utterance(self):
         queue = PlaybackQueue(1)
         queue.held = True
@@ -164,7 +172,9 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         payload = dict(text="One. Two.", language="en", playback=self.delivery())
         endpoint = f"http://127.0.0.1:{self.generator.server_port}"
         await asyncio.to_thread(deliver, endpoint, payload)
-        self.assertEqual((await self.ws.receive_json(timeout=2))["event"], "loaded")
+        loaded = await self.ws.receive_json(timeout=2)
+        self.assertEqual(loaded["event"], "loaded")
+        self.assertAlmostEqual(loaded["duration"], .2)
         self.assertEqual(len(self.service.session["queue"].entries), 1)
         await self.ws.send_json(dict(command="play"))
         started = await self.ws.receive_json(timeout=2)
@@ -175,13 +185,18 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_request_endpoint_without_registration(self):
         self.generator.playback_targets = {}
+        def synth(text, options):
+            self.assertEqual(options["language"], "ja")
+            self.assertEqual(options["voice"], "Kyoko")
+            return wav()
+        self.generator.synthesizer = synth
         await self.ws.send_json(dict(command="hold"))
         await self.reserve()
         data = self.delivery()
         data.pop("target")
         data["endpoint"] = str(self.player.make_url(""))
         await asyncio.to_thread(deliver, f"http://127.0.0.1:{self.generator.server_port}",
-                                dict(text="Direct.", language="en", playback=data))
+                                dict(text="日本語です。", language="auto", playback=data))
         self.assertEqual((await self.ws.receive_json(timeout=2))["event"], "loaded")
         await self.ws.send_json(dict(command="play"))
         self.assertEqual((await self.ws.receive_json(timeout=2))["event"], "started")

@@ -220,14 +220,15 @@ KOKORO may be the symbol irodori to select its independent setting."
   "Set Japanese speed independently of English.
 Kokoro and Irodori accept multipliers from 0.5 to 2.0; macOS accepts
 positive integer words per minute. Stop Japanese playback; resume with s."
-  (interactive
-   (list (pcase my/read-japanese-speech-backend
-           ('irodori (read-number "日本語のIrodori速度（0.5〜2.0倍）: "
-                                  my/read-japanese-irodori-speed))
-           ('kokoro (read-number "日本語のKokoro速度（0.5〜2.0倍）: "
-                                 my/read-japanese-kokoro-speed))
-           (_ (read-number "日本語の読み上げ速度（毎分語数）: "
-                           my/read-japanese-macos-rate)))))
+  ;; Use my-read-change-speed from M-x; retain Lisp-call compatibility.
+;;   (interactive
+;;    (list (pcase my/read-japanese-speech-backend
+;;            ('irodori (read-number "日本語のIrodori速度（0.5〜2.0倍）: "
+;;                                   my/read-japanese-irodori-speed))
+;;            ('kokoro (read-number "日本語のKokoro速度（0.5〜2.0倍）: "
+;;                                  my/read-japanese-kokoro-speed))
+;;            (_ (read-number "日本語の読み上げ速度（毎分語数）: "
+;;                            my/read-japanese-macos-rate)))))
   (my/read--change-language-speed
    "ja" rate (pcase my/read-japanese-speech-backend
                ('irodori 'irodori) ('kokoro t) (_ nil))))
@@ -238,17 +239,50 @@ With the default Kokoro backend, RATE is a 0.5 to 2.0 multiplier and
 updates `kokoro-reader-speed'.  With macOS, RATE is words per minute
 and updates `my/read-english-macos-rate'.  Stop active English speech;
 resume with SPC or s.  Japanese speed remains unchanged."
-  (interactive
-   (list (if (eq (default-value 'kokoro-reader-backend) 'kokoro)
-             (read-number "英語のKokoro速度（0.5〜2.0倍）: "
-                          (default-value 'kokoro-reader-speed))
-           (read-number "英語の読み上げ速度（毎分語数）: "
-                        my/read-english-macos-rate))))
+  ;; Use my-read-change-speed from M-x; retain Lisp-call compatibility.
+;;   (interactive
+;;    (list (if (eq (default-value 'kokoro-reader-backend) 'kokoro)
+;;              (read-number "英語のKokoro速度（0.5〜2.0倍）: "
+;;                           (default-value 'kokoro-reader-speed))
+;;            (read-number "英語の読み上げ速度（毎分語数）: "
+;;                         my/read-english-macos-rate))))
   (my/read--change-language-speed
    "en" rate (eq (default-value 'kokoro-reader-backend) 'kokoro)))
 
-(defalias 'my-read-change-speed #'my-read-change-japanese-speed
-  "Set Japanese reading speed; compatibility alias for the Japanese command.")
+(defun my/read--speed-language ()
+  "Return the current reading language for speed adjustment."
+  (let ((language (or (and my/read-speech-language-override
+                           (symbol-name my/read-speech-language-override))
+                      my/read-source-language
+                      (progn (my/read--configure-speech-language)
+                             my/read-source-language))))
+    (unless (member language '("en" "ja"))
+      (user-error "読み上げ言語を英語または日本語に設定してください"))
+    language))
+
+(defun my-read-change-speed (rate)
+  "Change the current reading language's speed to RATE.
+Use words per minute for macOS, or a multiplier for Kokoro/Irodori."
+  (interactive
+   (list
+    (read-number
+     (let* ((language (my/read--speed-language))
+            (backend (if (equal language "ja") my/read-japanese-speech-backend
+                       (default-value 'kokoro-reader-backend))))
+       (format "%sの読み上げ速度（%s）: "
+               (if (equal language "ja") "日本語" "英語")
+               (if (eq backend 'macos) "毎分語数" "0.5〜2.0倍")))
+     (if (equal (my/read--speed-language) "ja")
+         (pcase my/read-japanese-speech-backend
+           ('irodori my/read-japanese-irodori-speed)
+           ('kokoro my/read-japanese-kokoro-speed)
+           (_ my/read-japanese-macos-rate))
+       (if (eq (default-value 'kokoro-reader-backend) 'kokoro)
+           (default-value 'kokoro-reader-speed)
+         my/read-english-macos-rate)))))
+  (if (equal (my/read--speed-language) "ja")
+      (my-read-change-japanese-speed rate)
+    (my-read-change-english-speed rate)))
 
 (defun my-read-restart-japanese-speech ()
   "Restart the resident speech engine and discard stale continuous playback."

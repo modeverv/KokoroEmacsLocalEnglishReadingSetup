@@ -42,7 +42,7 @@ def build():
             "--requirements", ROOT / "playback-app/requirements.txt", env=env)
     package = resources / "speech_http"
     package.mkdir()
-    for name in ("__init__.py", "playback.py", "playback_queue.py"):
+    for name in ("__init__.py", "playback.py", "playback_queue.py", "playback_service.py", "service.py"):
         shutil.copy2(ROOT / "speech_http" / name, package / name)
     shutil.copy2(ROOT / "playback-app/bootstrap.py", resources)
     shutil.copy2(ROOT / "playback-app/requirements.txt", resources / "DEPENDENCIES.txt")
@@ -67,7 +67,7 @@ def build():
     with (contents / "Info.plist").open("wb") as stream:
         plistlib.dump({"CFBundleExecutable": "ReaderPlaybackServer", "CFBundleIdentifier": "local.reader.playback.gui",
                       "CFBundleName": "Reader Playback Server", "CFBundlePackageType": "APPL",
-                      "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0",
+                      "CFBundleVersion": "2", "CFBundleShortVersionString": "1.1",
                       "CFBundleIconFile": "Playback.icns", "LSMinimumSystemVersion": "12.0",
                       "NSHighResolutionCapable": True,
                       "NSLocalNetworkUsageDescription": "生成サーバーから音声を受信し、Emacsへ再生完了を通知します。"}, stream)

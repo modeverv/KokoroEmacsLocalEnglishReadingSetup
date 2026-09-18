@@ -3,6 +3,8 @@
 (require 'reader-load-path)
 
 (require 'json)
+(require 'cl-lib)
+(require 'reader-speech-queue)
 (require 'subr-x)
 (require 'thingatpt)
 (declare-function reader-http-speech-transport--payload "reader-http-speech-transport" (text))
@@ -40,6 +42,65 @@
   "Language used by the buffer's HTTP speech commands."
   :type '(choice (const "en") (const "ja")))
 (make-variable-buffer-local 'reader-http-speech-language)
+(defcustom reader-http-speech-stop-server-on-exit t
+  "Stop local launchd speech services used by this Emacs on normal exit.
+Set nil when deliberately sharing the server with other clients."
+  :type 'boolean)
+(defvar reader-http-speech--local-endpoints nil)
+
+(defun reader-http-speech--remember-endpoint (endpoint)
+  "Remember local ENDPOINT services for shutdown; never manage remote hosts."
+  (when (and (stringp endpoint)
+             (string-match-p "\\`http://\\(?:127\\.0\\.0\\.1\\|localhost\\)\\(?::[0-9]+\\)?/?\\'" endpoint))
+    (cl-pushnew endpoint reader-http-speech--local-endpoints :test #'equal)))
+
+(defun reader-http-speech--service-command (action endpoint)
+  "Run local service ACTION for ENDPOINT with a bounded wait."
+  (let* ((default-directory reader-http-speech--directory)
+         (log (get-buffer-create "*HTTP Speech Service*"))
+         (process (make-process
+                   :name "reader-speech-service" :buffer log :noquery t
+                   :connection-type 'pipe :sentinel #'ignore
+                   :command (list reader-http-speech-python "-m" "speech_http.service"
+                                  action "--endpoint" endpoint
+                                  "--host" reader-http-speech-listen-host)))
+         (deadline (+ (float-time) 25)))
+    (unwind-protect
+        (progn
+          (while (and (process-live-p process) (< (float-time) deadline))
+            (accept-process-output process .05))
+          (when (or (process-live-p process) (/= (process-exit-status process) 0))
+            (reader-speech-queue-record-error 'server (format "Speech server %s failed" action))
+            (error "Speech server %s failed; see *HTTP Speech Service*" action)))
+      (when (process-live-p process) (delete-process process)))))
+
+(defun reader-http-speech-stop-server ()
+  "Stop reading and the configured local launchd speech server."
+  (interactive)
+  (reader-http-speech-stop)
+  (when (fboundp 'english-reading-mode-stop-continuous)
+    (english-reading-mode-stop-continuous))
+  (when (fboundp 'kokoro-reader-stop) (kokoro-reader-stop))
+  (reader-http-speech--service-command "stop" reader-http-speech-endpoint))
+
+(defun reader-http-speech-restart-server ()
+  "Restart the local speech service after cancelling current reading."
+  (interactive)
+  (reader-http-speech-stop-server)
+  (reader-http-speech--service-command "start" reader-http-speech-endpoint)
+  (reader-http-speech--remember-endpoint reader-http-speech-endpoint)
+  (message "HTTP speech server restarted"))
+
+(defun reader-http-speech--shutdown ()
+  "Cancel requests, then stop local services with bounded waits."
+  (reader-http-speech-stop)
+  (when (fboundp 'kokoro-reader-stop) (kokoro-reader-stop))
+  (when reader-http-speech-stop-server-on-exit
+    (dolist (endpoint reader-http-speech--local-endpoints)
+      (condition-case err
+          (reader-http-speech--service-command "stop" endpoint)
+        (error (message "%s" (error-message-string err)))))))
+
 (defvar reader-http-speech--process nil)
 (defvar reader-http-speech--gui-process nil)
 (defvar reader-http-speech-finished-hook nil
@@ -81,6 +142,7 @@
         (default-directory reader-http-speech--directory))
     (unless (executable-find reader-http-speech-player)
       (user-error "FFplay is missing: install ffmpeg or set reader-http-speech-player"))
+    (reader-http-speech--remember-endpoint reader-http-speech-endpoint)
     (reader-http-speech-stop)
     (when (fboundp 'english-reading-mode-stop-continuous)
       (english-reading-mode-stop-continuous))
@@ -106,6 +168,7 @@
                        (with-current-buffer source
                          (run-hooks 'reader-http-speech-finished-hook))
                        (message "HTTP speech finished"))
+                   (reader-speech-queue-record-error 'request "Standalone HTTP speech failed")
                    (message "HTTP speech failed; see *HTTP Speech Errors*"))))))
       (process-put reader-http-speech--process 'source-buffer source)
       (process-send-string reader-http-speech--process payload)
@@ -166,6 +229,7 @@ In EPUB this reads the current chapter.  For PDF, select extracted text."
     (reader-http-speech-stop)))
 
 (add-hook 'kill-buffer-hook #'reader-http-speech--source-killed)
-(add-hook 'kill-emacs-hook #'reader-http-speech-stop)
+(remove-hook 'kill-emacs-hook #'reader-http-speech-stop)
+(add-hook 'kill-emacs-hook #'reader-http-speech--shutdown)
 (provide 'reader-http-speech)
 ;;; reader-http-speech.el ends here

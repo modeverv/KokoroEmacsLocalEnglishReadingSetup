@@ -34,14 +34,18 @@ my-read-k-test:
 		-Xlinker -rpath \
 		-Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib
 
+READER_ERT_FILES := $(if $(READER_SUITE),test/reader-$(READER_SUITE)-tests.el,test/my-read-k-tests.el test/my-read-k2-tests.el test/reader-document-tests.el test/reader-layout-tests.el test/reader-speech-queue-tests.el test/reader-diagnose-tests.el)
+
+.PHONY: reader-ert
+reader-ert: my-read-k-ert
+
 my-read-k-ert:
 	READER_TEST_COMPILED_DIR="$(if $(READER_TEST_COMPILED),$(abspath $(READER_ELISP_DIR)))" $(EMACS) -Q --batch -L . -L "$(READER_ELISP_DIR)" \
 		-L $(ORG_NOTER_DIR) \
 		-L $(PDF_TOOLS_DIR) -L $(TABLIST_DIR) -L $(MARKDOWN_MODE_DIR) \
 		--eval "(setq load-prefer-newer t native-comp-jit-compilation nil native-comp-enable-subr-trampolines nil)" \
 		-l test/reader-test-source.el \
-		-l test/my-read-k-tests.el -l test/my-read-k2-tests.el \
-		-l test/reader-document-tests.el -l test/reader-layout-tests.el \
+		$(foreach file,$(READER_ERT_FILES),-l $(file)) \
 		-f ert-run-tests-batch-and-exit
 
 my-read-k-check: my-read-speech-build my-read-k-test my-read-k-ert
@@ -73,8 +77,17 @@ speech-http-test:
 speech-app-build:
 	$(PYTHON) scripts/build_speech_app.py
 
-.PHONY: speech-playback speech-playback-setup speech-playback-test
+.PHONY: speech-playback speech-playback-stop speech-playback-status speech-playback-foreground speech-playback-setup speech-playback-test
 speech-playback:
+	$(PYTHON) -m speech_http.playback_service start
+
+speech-playback-stop:
+	$(PYTHON) -m speech_http.playback_service stop
+
+speech-playback-status:
+	$(PYTHON) -m speech_http.playback_service status
+
+speech-playback-foreground:
 	$(PYTHON) -m speech_http.playback
 
 speech-playback-setup:
@@ -85,7 +98,7 @@ speech-playback-app:
 	python3 scripts/build_playback_app.py
 
 speech-playback-test:
-	$(PYTHON) -m unittest discover -s test -p test_playback.py -v
+	$(PYTHON) -m unittest discover -s test -p 'test_playback*.py' -v
 	READER_TEST_COMPILED_DIR="$(if $(READER_TEST_COMPILED),$(abspath $(READER_ELISP_DIR)))" $(EMACS) -Q --batch -L . -L "$(READER_ELISP_DIR)" \
 		--eval "(setq load-prefer-newer t)" \
 		-l test/reader-test-source.el \
@@ -100,3 +113,7 @@ reader-python-test:
 	$(PYTHON) -m unittest discover -s scripts -p 'test_*.py' -v
 
 reader-test: reader-check my-read-k-ert speech-http-test speech-playback-test reader-python-test my-read-k-test
+
+.PHONY: speech-native-test
+speech-native-test: my-read-speech-build
+	READER_NATIVE_AUDIO_TESTS=1 $(PYTHON) -m unittest discover -s test -p test_macos_speech_bridge.py -v

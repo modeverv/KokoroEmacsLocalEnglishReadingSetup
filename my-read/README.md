@@ -30,7 +30,9 @@ my-read/
 起動は `core/my-read.el` → `ui/my-read-ui.el`、文書操作の共通契約は
 `document/reader-document.el`、音声sessionは `speech/playback/english-reading-speech.el`
 から追えます。状態の宣言は `core/english-reading-state.el` にあります。
-`kokoro-reader.el` は合成要求と常駐playerの予約queueを結ぶ境界を引き続き所有します。
+`speech/synthesis/reader-speech-queue.el` が予約queue・要求の取消・プレイヤー通知を所有し、
+`kokoro-reader.el` は発話範囲・合成payload・ネイティブ接続を担当します。
+`core/reader-diagnose.el` の `M-x reader-diagnose` で接続先と待機状態を確認できます。
 
 リポジトリのルートにある `my-read.el` が唯一のエントリーポイントです。
 先に `(require 'my-read)` を実行すると、内部moduleもfeature名でrequireできます。

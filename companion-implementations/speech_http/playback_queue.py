@@ -14,6 +14,7 @@ class Utterance:
     chunks: deque = field(default_factory=deque)
     index: int = 0
     buffered: int = 0
+    received: int = 0
     complete: bool = False
     started: bool = False
     volume: float = 1.0
@@ -68,6 +69,7 @@ class PlaybackQueue:
             entry.chunks.append(memoryview(pcm))
             entry.index += 1
             entry.buffered += len(pcm)
+            entry.received += len(pcm)
             self.buffered += len(pcm)
 
     def complete(self, id, count):
@@ -76,6 +78,7 @@ class PlaybackQueue:
             if entry.complete or type(count) is not int or count != entry.index or count < 1:
                 raise ValueError("incomplete or duplicate delivery")
             entry.complete = True
+            return entry.received / (RATE * 2)
 
     def stop(self):
         with self.lock:

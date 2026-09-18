@@ -27,9 +27,17 @@ Intel版とApple Silicon版のPython 3.12・PortAudio・必要なライブラリ
 4. 「サーバースタート」を押します。既定ポートは8768です。
 5. 以下の手順でEmacsに再生先URLを設定します。生成サーバーへの事前登録は不要です。
 
-音声出力デバイスは空欄でシステム既定を使います。「停止」またはアプリ終了でサーバーも停止します。
+音声出力デバイスは空欄でシステム既定を使います。サーバーはGUIから独立したlaunchdサービスです。
+**ウィンドウを閉じたりアプリを終了しても再生サーバーは継続します。**
+GUIを後から開くと同じポートのサービスを検出し、状態・PID・設定を表示します。
+CLIで起動したサービスもGUIから停止できます。終了するには「停止」を押してください。
+ログイン時の自動起動は登録しません。ログアウト／再起動後は再度開始してください。
+稼働中のアプリbundleはサービスの実行元でもあるため、移動・更新前に停止してください。
 認証トークンは任意で、設定した場合はEmacsの `READER_PLAYBACK_TOKEN` に同じ値を設定します。
-設定値・トークンは終了時に保存しません。ログは `~/Library/Logs/ReaderPlayback/server.log` です。
+GUIは最後に選んだポートを保存します。稼働中の設定とトークンは、所有者だけが読める
+`~/Library/Caches/ReaderPlaybackServer/<port>/server.plist` に保持し、明示停止時に削除します。
+GUIへトークンを再表示しません。停止後に認証付きで再起動する場合は再入力してください。
+ログは同じディレクトリの `server.log` です。
 
 開発用のアドホック署名を付けていますが、Appleの公証は未実施です。
 転送先で確認を求められた場合は、macOSの「セキュリティとプライバシー」からこのアプリの起動を許可してください。
@@ -73,9 +81,23 @@ py -3 -m venv .playback-venv
 ```
 
 LinuxでPortAudioが見つからない場合は、OSのパッケージを導入します（Debian/Ubuntuでは `libportaudio2`）。
-既存のReader用 `companion-implementations/.venv` を使う場合は `make speech-playback-setup` の後、`make speech-playback` で起動できます。
+macOSで既存のReader用 `companion-implementations/.venv` を使う場合:
 
-既定は `127.0.0.1:8768` で待ち受けます。終了は起動したターミナルでCtrl-Cです。
+```sh
+make speech-playback-setup
+make speech-playback         # 独立サービス開始。ターミナルを閉じても継続
+make speech-playback-status  # 状態・PID
+make speech-playback-stop    # 明示停止
+```
+
+ポートやデバイスを指定する場合は、`companion-implementations` 内で
+`python -m speech_http.playback_service start --port 8768 --host 0.0.0.0 --prebuffer 2`
+を使います。`stop` / `status` にも同じ `--port` を指定します。
+単体アプリも同じサービス名・ポートを管理するため、CLIとGUIで二重起動しません。
+従来どおりターミナル内で動かす場合は `make speech-playback-foreground`、
+または上記の `python -m speech_http.playback` を使います。Windows/Linuxはこの前景起動を使います。
+
+既定は `127.0.0.1:8768` で待ち受けます。前景起動の場合は、起動したターミナルでCtrl-Cで終了します。
 出力デバイスや先読み秒数を変更できます。
 
 ```sh
@@ -212,14 +234,21 @@ make speech-playback-test speech-http-test
 
 Emacs側では `*HTTP Playback Errors*`（制御接続）と `*HTTP Speech Errors*`（生成・転送）、
 生成側では `~/Library/Caches/ReaderSpeechServer/8765/server.log` を確認してください。
-再生サーバー停止中は自動起動・別端末への代替再生をせず、読み上げを止めます。
+macOSのEmacsから `http://127.0.0.1:<port>` または `http://localhost:<port>` を使う場合は、
+読み上げの接続時に再生サービスを自動起動し、Emacsの正常終了時に使用したローカルサービスを停止します。
+GUIだけを閉じた場合は継続します。別端末やHTTPS接続のサービスは自動起動・停止しません。
+共有サービスとして残す場合は `(setq reader-http-playback-stop-server-on-exit nil)`、
+自動起動を無効にする場合は `(setq reader-http-playback-auto-start nil)` を設定してください。
+起動・停止の失敗は `*HTTP Playback Service*` で確認できます。
+強制終了やクラッシュでは終了hookが動かないため、GUIまたはCLIから停止してください。
 
 ### 接続時にHTTP 409になる場合
 
 再生サーバーは一度に一つのEmacsだけが操作します。別のGUI/SSH Emacsの接続が残っている場合は、
 そのEmacsで `(reader-http-speech-set-playback-server nil)` を評価して解放してください。
 読み上げを停止するだけでは制御接続は残ります。
-また、CLI版とGUIアプリを同じポートで重複起動しないでください。
+独立サービスはCLIとGUIが同じものを操作します。旧GUIや前景起動のサーバーは自動で引き継がず、起動元で停止する必要があります。
+旧GUI／前景起動と独立サービスを同じポートで重複起動しないでください。
 macOSではループバックと全インターフェースへの待ち受けが併存し、接続先が意図と異なることがあります。
 `lsof -nP -iTCP:8768` で確認し、不要な検証用サーバーを終了します。
 
