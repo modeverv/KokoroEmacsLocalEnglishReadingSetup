@@ -44,6 +44,9 @@ Use `my-read-change-english-speed' to also update open reading buffers."
   :type 'integer
   :group 'my-read)
 
+(defvar-local my/read-http-auto-language nil
+  "Non-nil in hidden PDF speech buffers: use server language detection by default.")
+
 (defvar-local my/read-source-language nil
   "Detected source language for the current reading buffer, or nil.")
 
@@ -113,14 +116,19 @@ until reset or closed."
   (unless (memq language '(nil ja en))
     (user-error "言語は ja、en、または nil を指定してください"))
   (unless (and (my/read--center-window-active-p)
-               (or (derived-mode-p 'eww-mode 'nov-mode 'my-read-k-document-mode)
+               (or (derived-mode-p 'eww-mode 'nov-mode 'my-read-k-document-mode 'pdf-view-mode 'doc-view-mode)
                    (my/read--text-file-buffer-p)))
-    (user-error "my-readのKINDLE・EWW・TEXT・EPUB本文で実行してください"))
+    (user-error "my-readのKINDLE・PDF・EWW・TEXT・EPUB本文で実行してください"))
   (english-reading-mode-stop-continuous)
   (setq-local my/read-speech-language-override language)
   (if (derived-mode-p 'my-read-k-document-mode)
       (my-read-k--configure-buffer-language my-read-k--current-result)
     (my/read--configure-speech-language))
+  (when (and (derived-mode-p 'pdf-view-mode 'doc-view-mode)
+             (buffer-live-p english-reading-mode--pdf-text-buffer))
+    (with-current-buffer english-reading-mode--pdf-text-buffer
+      (setq-local my/read-speech-language-override language)
+      (my/read--configure-speech-language)))
   (when (derived-mode-p 'eww-mode)
     (add-hook 'eww-after-render-hook #'my/read--configure-speech-language nil t))
   (message "読み上げ言語: %s（SPC または s で再開）"

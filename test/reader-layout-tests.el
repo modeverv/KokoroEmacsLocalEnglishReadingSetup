@@ -52,3 +52,118 @@
                        (list entry 0 nil)))))))
 
 ;;; reader-layout-tests.el ends here
+
+(ert-deftest reader-layout-close-document-all-formats ()
+  ;; Exercise key lookup and ensure session teardown precedes buffer killing.
+  (dolist (entry '((pdf . pdf-view-mode) (pdf . doc-view-mode)
+                   (epub . nov-mode) (text . text-mode)
+                   (text . org-mode) (text . markdown-mode)
+                   (eww . eww-mode) (kindle . my-read-k-document-mode)))
+    (save-window-excursion
+      (let* ((frame (selected-frame))
+             (parameters (frame-parameters frame))
+             (center (selected-window))
+             (notes (split-window-right))
+             (source (generate-new-buffer " *close-source*"))
+             (dired (generate-new-buffer " *close-dired*"))
+             (note (generate-new-buffer " *close-note*"))
+             (ready (generate-new-buffer " *close-ready*"))
+             (kind (car entry))
+             (parameter (intern (format "my-reading-%s-buffer" kind)))
+             (my-read-k--buffer nil)
+             saved stopped detached closed)
+        (unwind-protect
+            (cl-letf (((symbol-function 'my/read-position-save-buffer)
+                       (lambda (buffer window) (setq saved (list buffer window))))
+                      ((symbol-function 'kokoro-reader-stop)
+                       (lambda () (setq stopped t)))
+                      ((symbol-function 'my-read-k-detach)
+                       (lambda () (setq detached t)))
+                      ((symbol-function 'my-read-k--prepare-buffer) (lambda () ready))
+                      ((symbol-function 'my/read--prepare-eww-buffer) (lambda (_) ready))
+                      ((symbol-function 'my/read--prepare-notes-buffer) (lambda (_) ready))
+                      ((symbol-function 'my/read--prepare-center-tab-placeholder)
+                       (lambda (_ type)
+                         (with-current-buffer ready
+                           (setq-local my/read-center-tab-placeholder-type type))
+                         ready))
+                      ((symbol-function 'my/read--configure-center-tab-buffer) #'ignore)
+                      ((symbol-function 'my/read-lookup-follow-post-command) #'ignore)
+                      ((symbol-function 'my/read-translate-follow-post-command) #'ignore)
+                      ((symbol-function 'my/read-org-noter-close-source)
+                       (lambda (buffer)
+                         (should (eq buffer source))
+                         (should (eq (window-buffer center) dired))
+                         (should (eq (window-buffer notes) ready))
+                         (setq closed t))))
+              (set-frame-parameter frame 'my-reading-frame t)
+              (set-frame-parameter frame 'my-reading-center-window center)
+              (set-frame-parameter frame 'my-reading-center-windows (list center))
+              (set-frame-parameter frame 'my-reading-note-window notes)
+              (set-frame-parameter frame 'my-reading-dired-buffer dired)
+              (set-frame-parameter frame parameter source)
+              (set-window-buffer center source)
+              (set-window-buffer notes note)
+              (with-current-buffer source
+                (setq major-mode (cdr entry))
+                (setq-local my/read-center-tab-frame frame)
+                (my-read-center-tab-mode 1)
+                (add-hook 'kill-buffer-hook
+                          (lambda () (should closed)) nil t))
+              (with-selected-window notes
+                (should-not (eq (key-binding (kbd "C-x k"))
+                                #'my/read-close-document)))
+              (with-selected-window center
+                (should (eq (key-binding (kbd "C-x k")) #'my/read-close-document))
+                (call-interactively (key-binding (kbd "C-x k"))))
+              (should (equal saved (list source center)))
+              (should stopped)
+              (should (eq detached (eq kind 'kindle)))
+              (should-not (buffer-live-p source))
+              (should (frame-live-p frame))
+              (should (window-live-p notes))
+              (should (eq (window-buffer center) dired))
+              (should (eq (frame-parameter frame parameter) ready)))
+          (dolist (key (delete-dups
+                        (list parameter 'my-reading-frame 'my-reading-center-window
+                              'my-reading-center-windows 'my-reading-note-window
+                              'my-reading-dired-buffer 'my-reading-kindle-book-name)))
+            (set-frame-parameter frame key (cdr (assq key parameters))))
+          (dolist (buffer (list source dired note ready))
+            (when (buffer-live-p buffer)
+              (with-current-buffer buffer (setq kill-buffer-hook nil))
+              (kill-buffer buffer))))))))
+
+(ert-deftest reader-layout-close-empty-tab-keeps-workspace ()
+  (dolist (kind '(dired pdf epub text))
+    (save-window-excursion
+      (let* ((frame (selected-frame))
+             (parameters (frame-parameters frame))
+             (window (selected-window))
+             (dired (generate-new-buffer " *empty-dired*"))
+             (source (if (eq kind 'dired) dired
+                       (generate-new-buffer " *empty-tab*")))
+             (parameter (intern (format "my-reading-%s-buffer" kind))))
+        (unwind-protect
+            (progn
+              (set-frame-parameter frame 'my-reading-frame t)
+              (set-frame-parameter frame 'my-reading-center-window window)
+              (set-frame-parameter frame 'my-reading-center-windows (list window))
+              (set-frame-parameter frame 'my-reading-dired-buffer dired)
+              (set-frame-parameter frame parameter source)
+              (switch-to-buffer source)
+              (setq-local my/read-center-tab-frame frame)
+              (setq-local my/read-center-tab-placeholder-type
+                          (unless (eq kind 'dired) kind))
+              (my-read-center-tab-mode 1)
+              (call-interactively (key-binding (kbd "C-x k")))
+              (should (buffer-live-p source))
+              (should (frame-live-p frame))
+              (should (eq (window-buffer window) dired)))
+          (dolist (key (delete-dups (list parameter 'my-reading-frame
+                                         'my-reading-center-window
+                                         'my-reading-center-windows
+                                         'my-reading-dired-buffer)))
+            (set-frame-parameter frame key (cdr (assq key parameters))))
+          (kill-buffer source)
+          (when (buffer-live-p dired) (kill-buffer dired)))))))

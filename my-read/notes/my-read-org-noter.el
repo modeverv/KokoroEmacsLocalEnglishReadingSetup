@@ -7,7 +7,15 @@
 (require 'eww)
 (require 'org)
 (require 'subr-x)
+(require 'org-noter-core)
+;; Load only available document backends; PDF and EPUB do not require DjVu.
+(eval-and-compile
+  (unless (locate-library "djvu")
+    (setq org-noter-supported-modes
+          (delq 'djvu-read-mode (copy-sequence org-noter-supported-modes)))))
 (require 'org-noter)
+
+(declare-function my/read--configure-center-tab-buffer "my-read-ui" (buffer frame))
 
 (defgroup my-read-org-noter nil
   "Org-noter integration for the my-read workspace."

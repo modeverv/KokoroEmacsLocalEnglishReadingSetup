@@ -1,6 +1,7 @@
 ;;; my-read-pdf.el --- Pdf for the reader -*- lexical-binding: t; -*-
 
 (require 'my-read-core)
+(declare-function my/read-close-document "my-read-ui")
 
 (autoload 'pdf-view-roll-minor-mode "pdf-roll" nil t)
 
@@ -15,44 +16,11 @@ around the visible area instead of loading the entire document at once."
   :group 'my-read)
 
 (defun my/read-close-pdf ()
-  "Close the active my-read PDF while keeping the workspace frame open."
+  "Close the active PDF while keeping the my-read workspace open."
   (interactive)
-  (let* ((frame (selected-frame))
-         (center (my/read-center-window frame))
-         (pdf-buffer (current-buffer))
-         (dired-buffer (frame-parameter frame 'my-reading-dired-buffer))
-         (notes-window (my/read-note-window frame)))
-    (unless (and (my/read--center-window-active-p)
-                 (english-reading-mode--pdf-buffer-p pdf-buffer))
-      (user-error "my-readのPDFペインで実行してください"))
-    (unless (buffer-live-p dired-buffer)
-      (user-error "my-readのDIREDタブが見つかりません"))
-
-    (my/read-position-save-buffer pdf-buffer center)
-    (when (fboundp 'kokoro-reader-stop)
-      (kokoro-reader-stop))
-
-    ;; Move both Org-noter-owned windows away before ending the session.  Its
-    ;; stock kill hook otherwise deletes the my-read frame with the session.
-    (when (window-live-p notes-window)
-      (set-window-buffer notes-window (my/read--prepare-notes-buffer frame)))
-    (set-window-buffer center dired-buffer)
-    (select-window center)
-
-    (when (fboundp 'my/read-org-noter-close-source)
-      (my/read-org-noter-close-source pdf-buffer))
-    ;; Org-noter normally kills its document itself.  Its cleanup can fail on
-    ;; a malformed notes root, so make PDF closure an explicit final step.
-    (when (buffer-live-p pdf-buffer)
-      (kill-buffer pdf-buffer))
-
-    (let ((placeholder
-           (my/read--prepare-center-tab-placeholder frame 'pdf)))
-      (set-frame-parameter frame 'my-reading-pdf-buffer placeholder)
-      (my/read--configure-center-tab-buffer placeholder frame))
-    (my/read-lookup-follow-post-command)
-    (my/read-translate-follow-post-command)
-    (message "PDFを閉じました")))
+  (unless (english-reading-mode--pdf-buffer-p)
+    (user-error "my-readのPDFペインで実行してください"))
+  (my/read-close-document))
 
 (defun my/read--pdf-view-window-overlay-valid-p (window)
   "Return non-nil when WINDOW has a live PDF Tools image overlay."

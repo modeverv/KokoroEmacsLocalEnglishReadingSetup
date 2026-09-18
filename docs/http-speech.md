@@ -192,8 +192,11 @@ HTTP 200後の合成失敗は `error` イベントを返し、`done` 前の切�
 `/v1/speech/stream` と `/v1/speech/deliver` の両方で利用できます。先頭の `start` イベントに
 判定後の `language`・`backend`・`voice`・`speed`・`rate` を返します。
 `rate` が `null` のmacOS音声は、従来どおり `250 × speed` の毎分語数を使います。
-Emacsの通常読み上げは引き続きEmacs側で選んだ `ja` / `en` を送ります。
-この追加で既存の翻訳・速度変更・先読み設定が自動的に切り替わることはありません。
+EmacsのKindle・PDF・EWWは、手動指定がなければ `auto` を送り、両言語の声・速度を
+`language_options` に含めます。`my-read-set-speech-language` の `ja` / `en` は優先されます。
+EPUB・TEXTは従来のEmacs側の判定を維持します。数字だけの区間はEmacs側の推定言語を
+`fallback_language` として送ります。翻訳や文の分割に使うEmacs側の推定言語は維持します。
+Kindleのヘッダーには `AUTO/Server`、`reader-diagnose` には言語指定の方針を表示します。
 
 ## 別マシンへの移動
 

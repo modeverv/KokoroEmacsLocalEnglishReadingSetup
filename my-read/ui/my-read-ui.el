@@ -1,6 +1,9 @@
 ;;; my-read-ui.el --- Ui for the reader -*- lexical-binding: t; -*-
 
 (defvar lookup-sub-window)
+(defvar my-read-k--buffer)
+(declare-function my-read-k-detach "my-read-k")
+(declare-function my-read-k--prepare-buffer "my-read-k")
 (require 'my-read-core)
 (require 'my-read-position)
 (require 'my-read-speech-settings)
@@ -106,11 +109,63 @@
   (when (my/read--center-window-active-p)
     binding))
 
-(defun my/read--filter-pdf-close-key-binding (binding)
-  "Return BINDING only for a PDF in my-read's active reading window."
-  (when (and (my/read--center-window-active-p)
-             (english-reading-mode--pdf-buffer-p))
-    binding))
+(defun my/read-close-document ()
+  "Close the active document and return to DIRED, preserving my-read."
+  (interactive)
+  (unless (my/read--center-window-active-p)
+    (user-error "my-readのドキュメントペインで実行してください"))
+  (let* ((frame (selected-frame))
+         (center (selected-window))
+         (source (current-buffer))
+         (dired (frame-parameter frame 'my-reading-dired-buffer))
+         (notes (my/read-note-window frame))
+         (type (cl-find-if
+                (lambda (kind)
+                  (eq source (frame-parameter
+                              frame (intern (format "my-reading-%s-buffer" kind)))))
+                '(kindle pdf epub text eww))))
+    (unless (buffer-live-p dired)
+      (user-error "my-readのDIREDタブが見つかりません"))
+    (if (or (not type) my/read-center-tab-placeholder-type)
+        (progn
+          (set-window-buffer center dired)
+          (message "閉じるドキュメントがありません"))
+      (my/read-position-save-buffer source center)
+      (english-reading-mode-stop-continuous)
+      ;; Move Org-noter's windows before its teardown can delete them.
+      (when (window-live-p notes)
+        (set-window-buffer notes (my/read--prepare-notes-buffer frame)))
+      (set-window-buffer center dired)
+      (select-window center)
+      (my/read-org-noter-close-source source)
+      (when (buffer-live-p source) (kill-buffer source))
+      ;; A kill query may refuse closure.  Keep the document registered.
+      (if (buffer-live-p source)
+          (set-window-buffer center source)
+        (when (eq type 'kindle)
+          (my-read-k-detach)
+          (set-frame-parameter frame 'my-reading-kindle-book-name nil))
+        (let* ((parameter (intern (format "my-reading-%s-buffer" type)))
+               (replacement
+                (pcase type
+                  ('eww
+                   (set-frame-parameter frame parameter nil)
+                   (my/read--prepare-eww-buffer frame))
+                  ('kindle
+                   (let ((buffer (my-read-k--prepare-buffer)))
+                     (setq my-read-k--buffer buffer)
+                     (with-current-buffer buffer
+                       (let ((inhibit-read-only t))
+                         (erase-buffer)
+                         (insert "Kindleのドキュメントを閉じました。r で再接続します。\n")
+                         (set-buffer-modified-p nil)))
+                     buffer))
+                  (_ (my/read--prepare-center-tab-placeholder frame type)))))
+          (set-frame-parameter frame parameter replacement)
+          (my/read--configure-center-tab-buffer replacement frame))
+        (my/read-lookup-follow-post-command)
+        (my/read-translate-follow-post-command)
+        (message "%sのドキュメントを閉じました" (upcase (symbol-name type)))))))
 
 (defun my/read--filter-eww-close-key-binding (binding)
   "Return BINDING only in the active my-read EWW reading pane."
@@ -160,8 +215,8 @@
                 '(menu-item "Open Org-noter notes" my/read-org-noter-follow-source
                             :filter my/read--filter-center-key-binding))
     (define-key map (kbd "C-x k")
-                '(menu-item "Close my-read PDF" my/read-close-pdf
-                            :filter my/read--filter-pdf-close-key-binding))
+                '(menu-item "Close my-read document" my/read-close-document
+                            :filter my/read--filter-center-key-binding))
     (define-key map (kbd "u")
                 '(menu-item "Save vocabulary" my/read-vocab-capture
                             :filter my/read--filter-center-key-binding))
@@ -197,8 +252,8 @@
                         :filter my/read--filter-center-key-binding))
 
 (keymap-set my-read-center-tab-mode-map "C-x k"
-            '(menu-item "Close my-read PDF" my/read-close-pdf
-                        :filter my/read--filter-pdf-close-key-binding))
+            '(menu-item "Close my-read document" my/read-close-document
+                        :filter my/read--filter-center-key-binding))
 
 (keymap-set my-read-center-tab-mode-map "u"
             '(menu-item "Save vocabulary" my/read-vocab-capture

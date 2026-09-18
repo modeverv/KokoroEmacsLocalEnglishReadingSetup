@@ -105,6 +105,8 @@ The bridge currently supports two."
       (match-string 0 language))
      (t "en"))))
 
+(declare-function reader-http-speech-transport--auto-language-p "reader-http-speech-transport" ())
+
 (defun my-read-k--configure-buffer-language (result)
   "Apply RESULT's language, honoring the Kindle buffer's speech override."
   (setq my-read-k--detected-language (my-read-k--language-from-result result))
@@ -115,9 +117,16 @@ The bridge currently supports two."
            (my/read--configure-speech-language my-read-k--detected-language)
            (setq header-line-format
                  (format " Kindle: attached | %s/%s | Accessibility"
-                         (upcase my/read-source-language)
-                         (pcase kokoro-reader-backend
-                           ('kokoro "Kokoro") ('irodori "Irodori") (_ "macOS"))))
+                         (if (and (bound-and-true-p reader-http-speech-transport-mode)
+                                  (fboundp 'reader-http-speech-transport--auto-language-p)
+                                  (reader-http-speech-transport--auto-language-p))
+                             "AUTO" (upcase my/read-source-language))
+                         (if (and (bound-and-true-p reader-http-speech-transport-mode)
+                                  (fboundp 'reader-http-speech-transport--auto-language-p)
+                                  (reader-http-speech-transport--auto-language-p))
+                             "Server"
+                           (pcase kokoro-reader-backend
+                             ('kokoro "Kokoro") ('irodori "Irodori") (_ "macOS")))))
            my/read-source-language)))
     (when (frame-live-p my-read-k--frame)
       (set-frame-parameter my-read-k--frame

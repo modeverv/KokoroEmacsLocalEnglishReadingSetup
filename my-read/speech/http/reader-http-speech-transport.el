@@ -7,7 +7,43 @@
 
 (defvar reader-http-speech-transport-mode nil)
 
+(defvar my/read-speech-language-override)
+(defvar my/read-http-auto-language)
+(declare-function my/read--configure-speech-language "my-read-speech-settings" (&optional detected-language))
+
+(defun reader-http-speech-transport--auto-language-p ()
+  "Delegate Kindle, EWW and PDF language to the server unless manually set."
+  (and (not (memq (bound-and-true-p my/read-speech-language-override) '(ja en)))
+       (or (derived-mode-p 'my-read-k-document-mode 'eww-mode 'pdf-view-mode 'doc-view-mode)
+           (bound-and-true-p my/read-http-auto-language))))
+
+(defun reader-http-speech-transport--language-options ()
+  "Capture independent English and Japanese settings for server detection."
+  (if (not (fboundp 'my/read--configure-speech-language))
+      (make-hash-table :test 'equal)
+    (mapcar
+     (lambda (language)
+       (cons (intern language)
+             (with-temp-buffer
+               (let ((my/read-speech-language-override (intern language)))
+                 (my/read--configure-speech-language language)
+                 (let ((json-object-type 'alist) (json-key-type 'symbol))
+                   (cl-remove-if
+                    (lambda (pair) (memq (car pair) '(text language)))
+                    (json-read-from-string
+                     (reader-http-speech-transport--explicit-payload "settings"))))))))
+     '("en" "ja"))))
+
 (defun reader-http-speech-transport--payload (text)
+  "Capture an explicit request or server-detected language with both profiles."
+  (if (reader-http-speech-transport--auto-language-p)
+      (json-encode
+       `((text . ,(kokoro-reader--speech-text text)) (language . "auto")
+         (fallback_language . ,(if (equal (bound-and-true-p my/read-source-language) "ja") "ja" "en"))
+         (language_options . ,(reader-http-speech-transport--language-options))))
+    (reader-http-speech-transport--explicit-payload text)))
+
+(defun reader-http-speech-transport--explicit-payload (text)
   "Capture the reader's explicit language, voice and exact speed for TEXT."
   (let* ((backend (symbol-name kokoro-reader-backend))
          (language
@@ -42,7 +78,9 @@
                         reader-http-speech-playback-delivery-endpoint
                         reader-http-speech-playback-target
                         (and (boundp 'my/read-source-language) my/read-source-language)
-                        (and (boundp 'my/read-speech-language-override) my/read-speech-language-override)))
+                        (and (boundp 'my/read-speech-language-override) my/read-speech-language-override)
+                        (when (reader-http-speech-transport--auto-language-p)
+                          (list 'auto (reader-http-speech-transport--language-options)))))
     key))
 
 (defun reader-http-speech-transport--prepare (text)

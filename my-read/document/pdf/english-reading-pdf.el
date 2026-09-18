@@ -10,6 +10,9 @@
 
 (defvar pdf-view-active-region)
 
+(defvar my/read-http-auto-language)
+(defvar my/read-speech-language-override nil)
+
 (defun english-reading-mode--pdf-buffer-p (&optional buffer)
   "Return non-nil when BUFFER is a DocView or PDF Tools PDF buffer."
   (with-current-buffer (or buffer (current-buffer))
@@ -89,6 +92,9 @@ breaks are deliberately excluded so page ranges remain intact."
           ;; non-nil.  The helper is never displayed, but it is the true text
           ;; source behind the visible PDF window.
           (setq-local english-reading-mode t)
+          (setq-local my/read-http-auto-language t)
+          (setq-local my/read-speech-language-override
+                      (buffer-local-value 'my/read-speech-language-override pdf-buffer))
           (run-hooks 'english-reading-mode-pdf-text-buffer-hook)
           (setq-local buffer-read-only t))
       (error

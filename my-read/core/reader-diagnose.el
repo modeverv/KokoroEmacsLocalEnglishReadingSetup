@@ -7,6 +7,7 @@
 (require 'kokoro-reader)
 (require 'reader-http-speech)
 
+(declare-function reader-http-speech-transport--auto-language-p "reader-http-speech-transport" ())
 (defvar english-reading-mode--continuous-state)
 (defvar english-reading-mode--active-speech)
 (defvar reader-http-speech-transport-mode)
@@ -46,6 +47,10 @@
             :speed (if (eq kokoro-reader-backend 'macos)
                        (format "%s 語/分" kokoro-reader-macos-rate)
                      (format "%s 倍" kokoro-reader-speed))
+            :language-policy (if (and http (fboundp 'reader-http-speech-transport--auto-language-p)
+                                      (reader-http-speech-transport--auto-language-p))
+                                 "auto（生成サーバーが判定。下記の声・速度はEmacs側の推定設定）"
+                               "Emacs側で指定")
             :transport (if http "HTTP" "ローカル")
             :endpoint (cond (http reader-http-speech-endpoint)
                             ((not (eq kokoro-reader-backend 'macos)) kokoro-reader-endpoint))
@@ -112,6 +117,7 @@
     (insert (format "対象          %s\n状態          %s\n方式          %s / %s\n声・速度      %s / %s\n"
                     (plist-get data :source) stage (plist-get data :transport)
                     (plist-get data :backend) (plist-get data :voice) (plist-get data :speed)))
+    (insert (format "言語指定      %s\n" (plist-get data :language-policy)))
     (insert (format "生成先        %s\nサーバー      %s   PID: %s\n"
                     (or (reader-diagnose--safe-url (plist-get data :endpoint)) "ネイティブ音声合成")
                     (or (plist-get health :status) "対象外") (or (plist-get health :pid) "不明／対象外")))

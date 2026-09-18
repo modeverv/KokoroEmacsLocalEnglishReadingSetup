@@ -43,3 +43,50 @@
           (should (= (alist-get 'rate request) 540)))
         (let ((request (reader-http-speech--request "text" "en")))
           (should (= (alist-get 'speed request) 1.4)))))))
+
+(ert-deftest reader-http-kindle-pdf-eww-default-to-server-auto ()
+  (dolist (mode '(my-read-k-document-mode eww-mode pdf-view-mode doc-view-mode))
+    (with-temp-buffer
+      (setq major-mode mode)
+      (setq-local my/read-source-language "en")
+      (let* ((request (json-read-from-string (reader-http-speech-transport--payload "日本語です。")))
+             (profiles (alist-get 'language_options request)))
+        (should (equal (alist-get 'language request) "auto"))
+        (should (alist-get 'en profiles))
+        (should (alist-get 'ja profiles))
+        (should-not (alist-get 'voice request)))
+      (dolist (language '(ja en))
+        (setq-local my/read-speech-language-override language)
+        (should (equal (alist-get 'language (json-read-from-string
+                                            (reader-http-speech-transport--payload "本文")))
+                       (symbol-name language)))))))
+
+(ert-deftest reader-http-hidden-pdf-text-uses-server-auto ()
+  (with-temp-buffer
+    (setq-local my/read-http-auto-language t)
+    (should (equal (alist-get 'language (json-read-from-string
+                                        (reader-http-speech-transport--payload "Hello"))) "auto"))))
+
+(ert-deftest reader-http-auto-key-tracks-both-language-profiles ()
+  (with-temp-buffer
+    (setq major-mode 'eww-mode)
+    (let ((reader-http-speech-transport-mode t)
+          (my/read-japanese-macos-rate 250))
+      (let ((key (reader-http-speech-transport--key '("Hello"))))
+        (setq my/read-japanese-macos-rate 540)
+        (should-not (equal key (reader-http-speech-transport--key '("Hello"))))))))
+
+(ert-deftest reader-http-pdf-manual-language-reaches-hidden-helper ()
+  (with-temp-buffer
+    (let ((helper (generate-new-buffer " *test PDF speech*")))
+      (unwind-protect
+          (progn
+            (setq major-mode 'pdf-view-mode)
+            (setq-local english-reading-mode--pdf-text-buffer helper)
+            (cl-letf (((symbol-function 'my/read--center-window-active-p) (lambda () t))
+                      ((symbol-function 'english-reading-mode-stop-continuous) #'ignore))
+              (my-read-set-speech-language 'ja)
+              (should (eq (buffer-local-value 'my/read-speech-language-override helper) 'ja))
+              (my-read-set-speech-language nil)
+              (should-not (buffer-local-value 'my/read-speech-language-override helper))))
+        (kill-buffer helper)))))

@@ -10,6 +10,7 @@
 (declare-function my/read--configure-speech-language "my-read-speech-settings")
 (declare-function my/read-eww-math-setup "my-read-eww-math")
 (require 'my-read-core)
+(declare-function my/read-close-document "my-read-ui")
 (require 'reader-state-file)
 (require 'my-read-position)
 (require 'color)
@@ -476,31 +477,11 @@ paper SVGs whenever their display rows enter the window."
           :persistent-type (lambda () (when my/read-position--eww-file 'html))) 'text)
 
 (defun my/read-close-eww ()
-  "Close the displayed EWW page while keeping the my-read workspace open."
+  "Close the active EWW page while keeping the my-read workspace open."
   (interactive)
-  (unless (and (my/read--center-window-active-p) (derived-mode-p 'eww-mode))
+  (unless (derived-mode-p 'eww-mode)
     (user-error "my-readのEWWペインで実行してください"))
-  (let* ((frame (selected-frame))
-         (center (my/read-center-window frame))
-         (page (current-buffer))
-         (dired (frame-parameter frame 'my-reading-dired-buffer))
-         (notes (my/read-note-window frame)))
-    (unless (buffer-live-p dired)
-      (user-error "my-readのDIREDタブが見つかりません"))
-    (my/read-position-save-buffer page center)
-    (english-reading-mode-stop-continuous)
-    ;; Org-noter must not own either visible window during its teardown.
-    (when (window-live-p notes)
-      (set-window-buffer notes (my/read--prepare-notes-buffer frame)))
-    (set-window-buffer center dired)
-    (select-window center)
-    (my/read-org-noter-close-source page)
-    (when (buffer-live-p page) (kill-buffer page))
-    (set-frame-parameter frame 'my-reading-eww-buffer nil)
-    (my/read--configure-center-tab-buffer (my/read--prepare-eww-buffer frame) frame)
-    (my/read-lookup-follow-post-command)
-    (my/read-translate-follow-post-command)
-    (message "EWWのページを閉じました")))
+  (my/read-close-document))
 
 (provide 'my-read-eww)
 ;;; my-read-eww.el ends here

@@ -6,6 +6,14 @@
 (require 'json)
 (require 'google-translate-core)
 
+;; Keep compilation independent of whether a test harness supplied the feature.
+(declare-function google-translate--format-request-url "google-translate-core" (query-params))
+(declare-function google-translate--insert-nulls "google-translate-core" (string))
+(declare-function google-translate-json-translation "google-translate-core" (json))
+
+(declare-function my/read--center-source-window-p "my-read-ui" (window frame))
+(defvar my-read-translate-follow-mode)
+
 (defvar google-translate-default-source-language)
 (defvar google-translate-default-target-language)
 

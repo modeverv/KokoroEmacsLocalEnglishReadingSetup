@@ -89,6 +89,8 @@ HTTP 503（同時受付の混雑）は最大30秒待って再試行し、途中�
 通常の `s` / `SPC` と先読みがHTTP経由になります。ローカルサーバーが停止中なら自動起動します。
 生成したWAVはEmacs側の常駐音声ブリッジで順番に再生し、ハイライトやページ送りも維持します。
 `my-read-set-speech-language` と言語別の速度変更関数の設定は次のリクエストに反映されます。
+Kindle・PDF・EWWは手動指定がなければ生成サーバーへ `language: "auto"` を送り、
+日本語／英語を判定してもらいます。`ja` / `en` の明示指定は優先します。
 macOS音声は語/分、Kokoro/Irodoriは速度倍率を送ります。
 
 ### LAN・外部プログラムから使う
@@ -590,7 +592,7 @@ Emacs Lispから指定する場合の引数はシンボルです。
 | `C-c t` | DIRED／KINDLE／PDF／EPUB／TEXT／EWWタブを順に切り替える |
 | `r` | Kindle.appへ再接続 |
 | `C-x C-k`（EWW） | 読書位置を保存してページを閉じ、DIREDへ戻る。my-readは維持 |
-| `C-x k`（PDF） | PDFだけを閉じてDIREDへ戻る。my-readは維持 |
+| `C-x k` | PDF・EPUB・TEXT・EWW・Kindleの現在のドキュメントだけを閉じてDIREDへ戻る。my-readは維持。DIRED・空タブでは文書を閉じない |
 | `G`（EWW） | URLを入力して開く |
 | `g`（EWW） | ページを再読み込み。履歴画面では初期URLを開く |
 

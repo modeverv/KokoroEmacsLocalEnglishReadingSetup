@@ -289,6 +289,12 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain queued macOS utterances."
 (defun kokoro-reader--speech-text (text)
   "Filter TEXT for the selected engine without modifying the source buffer."
   (cond
+   ;; Sentence splitting can leave a page-final closing quote on its own.
+   ;; In AUTO mode that fragment has no language and may reach Kokoro, which
+   ;; returns no audio and stops even the currently playing prefetched queue.
+   ;; Use the same empty-text path for playback, keys, and all prefetch engines.
+   ((string-match-p "\\`[[:space:]　「」『』（）()“”‘’\"…‥。！？!?、，.,:;—–-]*\\'" text)
+    "")
    ((and (eq kokoro-reader-backend 'macos)
          (stringp kokoro-reader-macos-voice)
          (string-match-p "\\`Kyoko\\(?: (.*)\\)?\\'"
