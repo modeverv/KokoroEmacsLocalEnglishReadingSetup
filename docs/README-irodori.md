@@ -1,6 +1,6 @@
 # 日本語Irodori MLX音声
 
-`assets/asuka.wav`を参照して声を再現するローカル音声合成です。
+`companion-implementations/assets/asuka.wav`を参照して声を再現するローカル音声合成です。
 追加学習は行いません。参照WAVは`.gitignore`で除外しています。
 
 ## 導入
@@ -17,7 +17,7 @@ uvと、このプロジェクト対応のPythonが必要です。`uv.lock`のMLX
 - モデル: `mlx-community/Irodori-TTS-500M-v3-8bit`
 - ランタイム: `mlx-audio`（検証版0.4.7、`uv.lock`で固定）
 - 生成設定: 24ステップ、sway sampling、sway係数−1.0
-- 音声: `asuka` = このプロジェクトの`assets/asuka.wav`
+- 音声: `asuka` = このプロジェクトの`companion-implementations/assets/asuka.wav`
 
 Tomokoの`v1/server/shared/inference/tts/irodori_mlx.py`で使われた構成を採用しています。
 短い文節へ強制分割せず、モデルの発話時間予測を使います。
@@ -56,13 +56,13 @@ Irodoriモデルは初回リクエストで読み込み、以後再利用しま�
 長文や速度設定によって待ち時間は変わります。モデル内部のストリーミングは
 使わず、文単位の生成と既存の先読み処理を利用します。
 
-`assets/asuka.wav`がない場合は生成を中止します。
+`companion-implementations/assets/asuka.wav`がない場合は生成を中止します。
 エラーはEmacsの`*kokoro-server*`バッファで確認できます。
 
 ```sh
-.venv/bin/python -m unittest discover -s test -p test_irodori_backend.py
+make reader-python-test
 make my-read-k-ert
-git check-ignore -v assets/asuka.wav
+git check-ignore -v companion-implementations/assets/asuka.wav
 ```
 
 資料:

@@ -1,14 +1,14 @@
 # Reader development
 
-全体の責務とcallback所有関係は [docs/architecture.md](docs/architecture.md)、
-設定・状態変数は [docs/state-inventory.md](docs/state-inventory.md) を参照してください。
+全体の責務とcallback所有関係は [docs/architecture.md](architecture.md)、
+設定・状態変数は [docs/state-inventory.md](state-inventory.md) を参照してください。
 
 ## ディレクトリとロード
 
-実装は [my-read/](my-read/README.md) の概念別ディレクトリに置きます。
-新しい概念のディレクトリを追加したら `reader-load-path.el` の一覧へ登録してください。
+実装は [my-read/](../my-read/README.md) の概念別ディレクトリに置きます。
+新しい概念のディレクトリを追加したら `my-read/reader-load-path.el` の一覧へ登録してください。
 既存ディレクトリにファイルを追加するとcompile検証には自動で含まれます。
-ルートの互換入口に業務ロジックを追加しないでください。
+ルートの `my-read.el` に業務ロジックを追加しないでください。
 
 compile出力は元のディレクトリ構造を保ちます。切り離したbytecodeのテストでも
 runtime資産はcheckout側のbootstrapで解決し、compiled側のmoduleを優先します。
@@ -43,7 +43,7 @@ file-based keyとの互換性を別途設計します。未対応操作は `read
 
 Readerの操作は `:speak` → `kokoro-reader--speak-bounds` に合流します。新しい合成backendは
 `my-read/speech/synthesis/kokoro-reader.el` のqueue/payload境界、言語別設定は `my-read/speech/backend-selection/my-read-speech-settings.el`、HTTP経由の
-合成は `speech_http/server.py` に実装します。新しい合成方式をReaderの文送りに混ぜません。
+合成は `companion-implementations/speech_http/server.py` に実装します。新しい合成方式をReaderの文送りに混ぜません。
 
 守る契約:
 
@@ -116,11 +116,10 @@ make my-read-k-test \
 Emacsを再起動して `M-x my-read` を実行してください。読み込み済みfeatureがある状態で
 `my-read.el` だけを再評価しても、依存moduleの再読み込みにはなりません。
 
-手元でbytecodeを使う場合は、テスト完了後に次で現在のソースから再生成できます。
-
-```sh
-READER_COMPILE_DIR="$PWD" make reader-check
-```
+bytecodeは上記の一時出力先で検証します。ルートを入口だけに保つため、
+`READER_COMPILE_DIR="$PWD"` でルートへbytecodeを生成しないでください。
+古いルートの各moduleを直接loadする設定は、先に `(require 'my-read)` を行う形へ更新します。
+音声サーバーやGUIも移動前から動いている場合は停止し、新しいMakefileから再起動します。
 
 履歴用ソースはGitにあります。`old/`へ動作する実装を複製したり、`.elc`をcommitしたり
 しないでください。

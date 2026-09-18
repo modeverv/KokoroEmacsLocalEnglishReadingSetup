@@ -3,7 +3,7 @@
 from pathlib import Path
 import subprocess
 
-root = Path(__file__).resolve().parents[1]
+root = Path(__file__).resolve().parents[1] / "companion-implementations"
 subprocess.run(["uv", "sync", "--locked", "--inexact"], cwd=root, check=True)
 subprocess.run([str(root / ".venv/bin/python"), "-c",
                 "from irodori_backend import ensure_model; ensure_model()"], cwd=root, check=True)

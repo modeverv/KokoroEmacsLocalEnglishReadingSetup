@@ -31,8 +31,8 @@ my-read/
 └── integrations/               # EWW数式・独立した旧TTS補助
 ```
 
-ルートの互換入口は `reader-load-path.el` を読み、各ディレクトリの実装へ委譲します。
-実行時のPython・Swift・native bridgeの基準位置は `reader-root-directory` です。
+ルートの唯一の入口 `my-read.el` は `my-read/reader-load-path.el` を読み、各ディレクトリの実装へ委譲します。
+実行時のPython・Swift・native bridgeの基準位置は `reader-companion-directory` です。
 
 ## 全体構成
 
@@ -138,11 +138,11 @@ sentence / chunk
 
 `my-read/speech/http/reader-http-speech.el` は独立したHTTP発話コマンドと設定、transportは通常Readerの
 先読みqueueへの接続、`my-read/speech/playback/reader-http-playback.el` はremote sessionとdelivery capabilityを
-担当します。`speech_http/server.py` と `delivery.py` は合成と転送、`playback.py` と
+担当します。`companion-implementations/speech_http/server.py` と `delivery.py` は合成と転送、`playback.py` と
 `playback_queue.py` は受信順序・重複・cancel・device clockに基づく完了を扱います。
 `remote_bridge.py` はEmacsからのJSON LinesをWebSocketへ接続します。
 
-`macos-speech-bridge/main.m` の常駐再生、`speech-http-app/` と `playback-app/` のGUI、
+`companion-implementations/macos-speech-bridge/main.m` の常駐再生、`companion-implementations/speech-http-app/` と `companion-implementations/playback-app/` のGUI、
 Swift Accessibilityブリッジは、既存の分離が有効なため書き換えていません。
 詳細なwire protocolは [http-speech.md](http-speech.md) と
 [remote-playback.md](remote-playback.md) を参照してください。

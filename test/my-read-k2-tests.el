@@ -12,9 +12,9 @@
 (ert-deftest my-read-k2-bridge-command-selects-native-package ()
   (let ((my-read-k2-bridge-program "/tmp/my-read-k2-test-bridge"))
     (should (equal (my-read-k2--bridge-command)
-                   '("swift" "run" "--package-path"
-                     "/Users/seijiro/Sync/emacs.d/reader/my-read-k2/bridge"
-                     "--configuration" "release" "my-read-k2-bridge")))))
+                   (list "swift" "run" "--package-path"
+                         (expand-file-name "my-read-k2/bridge" reader-companion-directory)
+                         "--configuration" "release" "my-read-k2-bridge")))))
 
 (ert-deftest my-read-k2-configures-the-accessibility-bridge ()
   (let ((my-read-k2-bridge-program "/tmp/my-read-k2-bridge"))

@@ -1,5 +1,9 @@
+COMPANION_DIR := $(CURDIR)/companion-implementations
+PYTHON := $(COMPANION_DIR)/.venv/bin/python
+export PYTHONPATH := $(COMPANION_DIR)$(if $(PYTHONPATH),:$(PYTHONPATH))
+
 run:
-	uv run --extra japanese python kokoro_server.py --host 127.0.0.1 --port 8000
+	uv run --directory "$(COMPANION_DIR)" --extra japanese python kokoro_server.py --host 127.0.0.1 --port 8000
 
 ORG_NOTER_DIR := $(shell find $(HOME)/.emacs.d/elpa -maxdepth 1 -type d -name 'org-noter-*' 2>/dev/null | sort | tail -1)
 EMACS ?= /Applications/Emacs-takaxp/Emacs.app/Contents/MacOS/Emacs
@@ -12,16 +16,16 @@ TABLIST_DIR := $(shell find $(HOME)/.emacs.d/elpa -maxdepth 1 -type d -name 'tab
 .PHONY: my-read-k-build my-read-speech-build my-read-k-test my-read-k-ert my-read-k-check
 
 my-read-k-build:
-	swift build --package-path my-read-k2/bridge --configuration release
+	swift build --package-path companion-implementations/my-read-k2/bridge --configuration release
 
 my-read-speech-build:
 	clang -fobjc-arc -O2 -Wall -Wextra \
 		-framework Foundation -framework AVFoundation \
-		macos-speech-bridge/main.m \
-		-o macos-speech-bridge/my-read-speech-bridge
+		companion-implementations/macos-speech-bridge/main.m \
+		-o companion-implementations/macos-speech-bridge/my-read-speech-bridge
 
 my-read-k-test:
-	swift test --package-path my-read-k2/bridge $(SWIFT_TEST_FLAGS) \
+	swift test --package-path companion-implementations/my-read-k2/bridge $(SWIFT_TEST_FLAGS) \
 		-Xswiftc -F \
 		-Xswiftc /Library/Developer/CommandLineTools/Library/Developer/Frameworks \
 		-Xlinker -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks \
@@ -48,13 +52,13 @@ my-read-irodori-setup:
 
 .PHONY: speech-server speech-gui speech-http-test
 speech-server:
-	.venv/bin/python -m speech_http.service start
+	$(PYTHON) -m speech_http.service start
 
 speech-gui:
-	.venv/bin/python -m speech_http.gui
+	$(PYTHON) -m speech_http.gui
 
 speech-http-test:
-	.venv/bin/python -m unittest discover -s test -p test_speech_http.py -v
+	$(PYTHON) -m unittest discover -s test -p test_speech_http.py -v
 	READER_TEST_COMPILED_DIR="$(if $(READER_TEST_COMPILED),$(abspath $(READER_ELISP_DIR)))" $(EMACS) -Q --batch -L . -L "$(READER_ELISP_DIR)" \
 		--eval "(setq load-prefer-newer t)" \
 		-l test/reader-test-source.el \
@@ -67,21 +71,21 @@ speech-http-test:
 
 .PHONY: speech-app-build
 speech-app-build:
-	.venv/bin/python scripts/build_speech_app.py
+	$(PYTHON) scripts/build_speech_app.py
 
 .PHONY: speech-playback speech-playback-setup speech-playback-test
 speech-playback:
-	.venv/bin/python -m speech_http.playback
+	$(PYTHON) -m speech_http.playback
 
 speech-playback-setup:
-	uv sync --locked --inexact --extra playback
+	uv sync --directory "$(COMPANION_DIR)" --locked --inexact --extra playback
 
 .PHONY: speech-playback-app
 speech-playback-app:
 	python3 scripts/build_playback_app.py
 
 speech-playback-test:
-	.venv/bin/python -m unittest discover -s test -p test_playback.py -v
+	$(PYTHON) -m unittest discover -s test -p test_playback.py -v
 	READER_TEST_COMPILED_DIR="$(if $(READER_TEST_COMPILED),$(abspath $(READER_ELISP_DIR)))" $(EMACS) -Q --batch -L . -L "$(READER_ELISP_DIR)" \
 		--eval "(setq load-prefer-newer t)" \
 		-l test/reader-test-source.el \
@@ -92,7 +96,7 @@ reader-check:
 	$(EMACS) -Q --batch -l scripts/check-reader.el
 
 reader-python-test:
-	.venv/bin/python -m unittest discover -s test -p 'test_*.py' -v
-	.venv/bin/python -m unittest discover -s scripts -p 'test_*.py' -v
+	$(PYTHON) -m unittest discover -s test -p 'test_*.py' -v
+	$(PYTHON) -m unittest discover -s scripts -p 'test_*.py' -v
 
 reader-test: reader-check my-read-k-ert speech-http-test speech-playback-test reader-python-test my-read-k-test

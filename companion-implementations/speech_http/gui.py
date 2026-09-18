@@ -9,9 +9,9 @@ def main():
     app = root / "speech-http-app/build/Reader Speech Server.app"
     binary = app / "Contents/MacOS/ReaderSpeechServer"
     sources = [root / "speech-http-app/main.m", root / "speech-http-app/icon.png",
-               root / "scripts/build_speech_app.py"]
+               root.parent / "scripts/build_speech_app.py"]
     if not binary.exists() or any(path.stat().st_mtime > binary.stat().st_mtime for path in sources):
-        subprocess.run([sys.executable, str(root / "scripts/build_speech_app.py")], check=True)
+        subprocess.run([sys.executable, str(root.parent / "scripts/build_speech_app.py")], check=True)
     subprocess.run(["/usr/bin/open", str(app)], check=True)
 
 

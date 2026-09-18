@@ -9,7 +9,7 @@ import tempfile
 
 from verify_playback_app import verify
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / "companion-implementations"
 BUILD = ROOT / "playback-app/build"
 APP = BUILD / "Reader Playback Server.app"
 PYTHON_VERSION = "3.12.13"
@@ -46,7 +46,7 @@ def build():
         shutil.copy2(ROOT / "speech_http" / name, package / name)
     shutil.copy2(ROOT / "playback-app/bootstrap.py", resources)
     shutil.copy2(ROOT / "playback-app/requirements.txt", resources / "DEPENDENCIES.txt")
-    shutil.copy2(ROOT / "LICENSE", resources / "LICENSE.txt")
+    shutil.copy2(ROOT.parent / "LICENSE", resources / "LICENSE.txt")
     (resources / "THIRD_PARTY.txt").write_text(
         "Python runtimes: Astral python-build-standalone (CPython 3.12.13).\n"
         "Python and bundled library licenses are included in each runtime.\n"

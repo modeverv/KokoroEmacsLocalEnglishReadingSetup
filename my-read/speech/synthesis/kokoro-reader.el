@@ -33,7 +33,7 @@
   :type '(repeat string))
 
 (defcustom kokoro-reader-server-directory
-  reader-root-directory
+  reader-companion-directory
   "Working directory for `kokoro-reader-server-command'."
   :type '(choice (const :tag "Reader runtime directory" nil)
                  directory))
@@ -83,7 +83,7 @@ reference-voice synthesis to Irodori. All feed the same resident native player."
 (defcustom kokoro-reader-macos-speech-bridge-program
   (expand-file-name
    "macos-speech-bridge/my-read-speech-bridge"
-   reader-root-directory)
+   reader-companion-directory)
   "Path to the resident AVSpeechSynthesizer bridge executable."
   :type 'file)
 

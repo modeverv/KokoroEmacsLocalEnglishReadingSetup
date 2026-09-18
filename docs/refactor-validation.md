@@ -20,7 +20,7 @@ Vocabulary、HTTP transport、remote playbackの既存テストは削除して�
 
 起動時の絶対パスloadも、entry自身のディレクトリをload-pathへ加えて維持します。
 旧 `old/` の複製実装とテスト `.elc` を除去し、設定・保存データの移動はしていません。
-構成は [architecture.md](architecture.md)、変更方法は [DEVELOPMENT.md](../DEVELOPMENT.md) を
+構成は [architecture.md](architecture.md)、変更方法は [DEVELOPMENT.md](DEVELOPMENT.md) を
 参照してください。
 
 ## Before / After
@@ -118,3 +118,32 @@ Python/Swift/native/GUI runtimeの配置・起動コマンドは維持しまし�
 - 今回Swift/native実装は未変更。実機のGUI・音声再生・Kindle AX・LAN操作は未再確認。
 
 反映には `M-x my-read-end` 後にEmacsを再起動してください。
+
+## 補助実装の集約と単一入口への移行（同日追補）
+
+ルートはREADMEの配置一覧にある項目とGit管理情報だけに整理しました。
+Python・Swift・Objective-C・app・音声assets・Python環境は
+`companion-implementations/` 配下です。`pyproject.toml` も同配下に置き、
+`uv.lock` はルートを正本として相対symlinkで参照します。
+既存のルート転送ファイルは除去し、`my-read.el` を唯一のEmacsライブラリ入口にしました。
+bootstrapは `my-read/reader-load-path.el`、runtimeの基準位置は
+`reader-companion-directory` です。既存の文書移動を保持し、相対リンクも更新しました。
+
+検証結果:
+
+- check-parens / 警告をエラー扱いにしたcompile: 31ファイル成功。
+- ERT: ソース・別出力先のbytecodeともに247/247。
+- Python: `test/` 33/33 + `scripts/` 7/7。
+  ルートの許可項目、lockfile正本、app/serviceのパス、GUI再ビルド経路を追加検証。
+- Swift: 新しいpackage pathと空のscratch directoryで5/5成功。
+  この環境の既知の制約により `--build-system native` を使用。
+- native speech bridgeとSpeech Server appを新しいパスで再ビルド。
+  appのInfo.plistが新しいruntime rootとPythonを指すことを確認。
+- 移動済みPlayback appの静的互換性検証成功（今回の再ビルド・GUI実操作は未実施）。
+- `uv lock --directory companion-implementations --check --offline` 成功。
+  移動後のvenvのPython・CLI実行を確認。
+- Markdownのローカルリンクと `git diff --check` 成功。
+
+native buildには既存SDK由来の非推奨警告があります。音声再生・Kindle AX・LANの実操作は
+今回未確認です。Emacsと、移動前から動いている音声サーバー・GUIは再起動が必要です。
+旧ルートの個別Elispを直接loadする設定は、先に `(require 'my-read)` を行う設定へ変更します。

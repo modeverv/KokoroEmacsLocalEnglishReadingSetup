@@ -9,7 +9,7 @@
 
 (defgroup reader-http-speech nil "Independent HTTP speech playback." :group 'multimedia)
 (defconst reader-http-speech--directory
-  reader-root-directory)
+  reader-companion-directory)
 (defcustom reader-http-speech-python
   (expand-file-name ".venv/bin/python" reader-http-speech--directory)
   "Python executable for the playback helper and server GUI."

@@ -4,7 +4,7 @@ import plistlib
 import subprocess
 import tempfile
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent / "companion-implementations"
 APP = ROOT / "speech-http-app/build/Reader Speech Server.app"
 
 

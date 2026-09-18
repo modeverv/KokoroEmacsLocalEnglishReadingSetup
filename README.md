@@ -28,7 +28,7 @@ macOS版はIntel／Apple Silicon・Monterey（12）以降を対象とする単�
 `make speech-playback-app` で作成できます。Pythonも同梱します（Intel／Monterey実機は未検証）。
 [クロスプラットフォーム再生サーバーの導入・SSH接続手順](docs/remote-playback.md)を参照してください。
 
-<img src="speech-http-app/icon.png" alt="Reader Speech Serverのアイコン" width="96">
+<img src="companion-implementations/speech-http-app/icon.png" alt="Reader Speech Serverのアイコン" width="96">
 
 **Reader Speech Server**は、Emacsなしでも起動できるmacOSアプリです。
 「サーバースタート」「停止」ボタンで音声生成サーバーを操作し、画面にLAN接続先を表示します。
@@ -43,8 +43,8 @@ WAVチャンクを順番に受け取れます。
 | 日本語 | Irodori | `asuka`（参照音声が必要） |
 
 英語はmacOS音声も指定できます。Irodoriは現在日本語のみです。
-日本語Kokoroは `uv sync --extra japanese`、Irodoriは[専用のセットアップ](README-irodori.md)が必要です。
-Irodoriの参照音声 `assets/asuka.wav` はリポジトリに含まれません。
+日本語Kokoroは `uv sync --directory companion-implementations --extra japanese`、Irodoriは[専用のセットアップ](docs/README-irodori.md)が必要です。
+Irodoriの参照音声 `companion-implementations/assets/asuka.wav` はリポジトリに含まれません。
 
 ### Emacsなしで起動する
 
@@ -52,14 +52,14 @@ Apple Silicon Macで、このリポジトリのディレクトリから実行し
 Python・uvとApple Command Line Toolsを先に導入してください。
 
 ```sh
-uv sync
+uv sync --directory companion-implementations
 brew install ffmpeg
 make speech-gui
 ```
 
 初回はアプリを自動ビルドします。以後はFinderで
-`speech-http-app/build/Reader Speech Server.app` を開いて起動できます。
-アプリはこのリポジトリと `.venv` を参照するため、`.app` だけを別Macへコピーする配布形式ではありません。
+`companion-implementations/speech-http-app/build/Reader Speech Server.app` を開いて起動できます。
+アプリはこのリポジトリと `companion-implementations/.venv` を参照するため、`.app` だけを別Macへコピーする配布形式ではありません。
 GUIやEmacsを終了してもサーバーは動き続けます。停止にはGUIの「停止」を使います。
 
 ### 通常のEmacs読み上げを接続する
@@ -67,6 +67,7 @@ GUIやEmacsを終了してもサーバーは動き続けます。停止にはGUI
 下記のReader導入・Emacsの `load-path` 設定後、設定ファイルへ追加します。
 
 ```elisp
+(require 'my-read)
 (require 'reader-http-speech-transport)
 (reader-http-speech-transport-mode 1)
 ```
@@ -217,7 +218,7 @@ brew install poppler automake glib pkgconf imagemagick librsvg
 
 ```sh
 cd ~/Sync/emacs.d/reader
-uv sync
+uv sync --directory companion-implementations
 make my-read-speech-build
 ```
 
@@ -274,7 +275,7 @@ WAVを同じ順序付きキューで再生し、連続読み上げ
       (expand-file-name "eww-history.el" my/read-position-directory))
 
 (setq kokoro-reader-server-directory
-      (expand-file-name "~/Sync/emacs.d/reader")
+      reader-companion-directory
       kokoro-reader-voice "bf_emma"
       kokoro-reader-lang-code "b"
       kokoro-reader-speed 1.0
@@ -316,12 +317,12 @@ GitHubの日本語READMEなどが英語音声になる場合は、
       my/read-japanese-kokoro-speed 1.0)
 ```
 
-日本語Kokoroの導入手順は[依存関係の設定](README-kokoro-emacs.md#1-install-dependencies)を参照してください。
+日本語Kokoroの導入手順は[依存関係の設定](docs/README-kokoro-emacs.md#1-install-dependencies)を参照してください。
 
 Irodoriの参照音声方式も追加しています。
 `M-x my-read-set-japanese-speech-backend`で`irodori`を選ぶと、
-`assets/asuka.wav`をもとに日本語を読み上げます。
-[導入・設定・切り戻し](README-irodori.md)を参照してください。
+`companion-implementations/assets/asuka.wav`をもとに日本語を読み上げます。
+[導入・設定・切り戻し](docs/README-irodori.md)を参照してください。
 
 日本語と英語の速度は個別に設定できます。
 
@@ -368,7 +369,7 @@ PDFとorg-noterをまだ導入していない環境では、次の設定も追�
 2. 「システム設定 → プライバシーとセキュリティ → アクセシビリティ」でEmacsを許可します。
 3. Emacsで `M-x my-read` を実行します。
 
-最初の実行時に、必要であれば `my-read-k2/bridge` のSwiftブリッジをリリース構成でビルドします。先にビルドする場合は次を実行します。
+最初の実行時に、必要であれば `companion-implementations/my-read-k2/bridge` のSwiftブリッジをリリース構成でビルドします。先にビルドする場合は次を実行します。
 
 ```sh
 make my-read-k-build
@@ -592,7 +593,7 @@ TEXTタブには最後に開いたテキストファイルが表示されます�
 
 my-read固有キーは、my-readフレームの左側読書ペインにカーソルがある場合だけ
 有効です。右側のOrgバッファや通常のEmacsバッファには影響しません。org-noterの
-詳細な標準キーと競合方針は[key.md](key.md)を参照してください。`o` / `p`は
+詳細な標準キーと競合方針は[key.md](docs/key.md)を参照してください。`o` / `p`は
 右下のLookupペインで前／次の辞書エントリを選びますが、入力フォーカスは左側の
 読書ペインに維持されます。
 
@@ -761,7 +762,7 @@ make speech-http-test
 `make reader-check` です。ReaderのERTはcheckoutのソースを明示的に読み、手元の古い
 `.elc`やnative cacheがテスト対象に混ざることを防ぎます。
 リファクタリングの前後比較は[検証記録](docs/refactor-validation.md)、実行環境と
-Swiftビルドの回避経路は[開発ガイド](DEVELOPMENT.md#検証)を参照してください。
+Swiftビルドの回避経路は[開発ガイド](docs/DEVELOPMENT.md#検証)を参照してください。
 実音声とLAN接続の確認範囲は[HTTPサーバーの検証記録](docs/http-speech.md#検証)に記載しています。
 
 今回のmodule分離を既存Emacsへ反映するには、`M-x my-read-end` の後にEmacsを再起動し、
@@ -772,18 +773,18 @@ Swiftビルドの回避経路は[開発ガイド](DEVELOPMENT.md#検証)を参�
 
 | ファイル | 役割 |
 | --- | --- |
-| `speech_http/` | HTTP音声生成、WAV受信・再生、launchdサービス管理 |
+| `companion-implementations/speech_http/` | HTTP音声生成、WAV受信・再生、launchdサービス管理 |
 | `my-read/speech/http/reader-http-speech-transport.el` | 通常のReader読み上げ・先読みをHTTPへ接続 |
 | `my-read/speech/http/reader-http-speech.el` | 独立した文字列の読み上げ・GUI起動コマンド |
 | `my-read/speech/playback/reader-http-playback.el` | 手元の再生サーバーへの接続・再生完了通知 |
-| `speech_http/playback.py` | モデル不要のHTTP/WebSocket再生サーバー |
-| `requirements-playback.txt` | 再生専用のクロスプラットフォーム依存関係 |
-| `speech-http-app/` | ネイティブGUIアプリのソースとアイコン |
+| `companion-implementations/speech_http/playback.py` | モデル不要のHTTP/WebSocket再生サーバー |
+| `companion-implementations/requirements-playback.txt` | 再生専用のクロスプラットフォーム依存関係 |
+| `companion-implementations/speech-http-app/` | ネイティブGUIアプリのソースとアイコン |
 | `scripts/build_speech_app.py` | macOSアプリのビルド |
 | `scripts/check_speech_server.py` | LAN端末からの音声生成・WAV検証 |
-| `kokoro_server.py` | ローカルKokoro HTTPサーバー |
+| `companion-implementations/kokoro_server.py` | ローカルKokoro HTTPサーバー |
 | `my-read/speech/synthesis/kokoro-reader.el` | 非同期音声生成・再生・ハイライト |
-| `macos-speech-bridge/main.m` | Kokoro WAVとmacOS音声を順序付きで再生する常駐ネイティブブリッジ |
+| `companion-implementations/macos-speech-bridge/main.m` | Kokoro WAVとmacOS音声を順序付きで再生する常駐ネイティブブリッジ |
 | `my-read/core/english-reading-mode.el` | 公開コマンド、keymap、minor-modeの有効化・終了 |
 | `my-read/speech/playback/english-reading-speech.el` / `my-read/speech/prefetch/english-reading-prefetch.el` | 発話context、連続読み上げ、実再生完了、音声先読み |
 | `my-read/core/english-reading-state.el` | 読み上げ設定、公開hook、sessionと文書bufferの状態宣言 |
@@ -798,19 +799,43 @@ Swiftビルドの回避経路は[開発ガイド](DEVELOPMENT.md#検証)を参�
 | `my-read/notes/my-read-org-noter.el` | PDF／EPUB／Kindle／EWWのorg-noter統合と保存先管理 |
 | `my-read/document/kindle/my-read-k.el` | Kindle本文バッファ、ページ移動、メモリキャッシュ |
 | `my-read/document/kindle/my-read-k2.el` | Kindle.app Accessibilityバックエンド |
-| `my-read-k2/bridge/` | macOS Accessibilityを読むSwiftブリッジ |
+| `companion-implementations/my-read-k2/bridge/` | macOS Accessibilityを読むSwiftブリッジ |
 | `key.md` | my-readとorg-noterのキーバインド・競合方針 |
 | `test/my-read-k-tests.el` | 共有Reader UIのERTテスト |
 | `test/my-read-k2-tests.el` | Kindle.appバックエンドのERTテスト |
 | `test/reader-document-tests.el` | 文書API、状態遷移、古いcallback、保存失敗の境界テスト |
 | `scripts/check-reader.el` | 全Elispの構文と警告をエラー扱いにしたコンパイル検証 |
 
-詳細は [README-my-read-k2.md](README-my-read-k2.md) と [README-kokoro-emacs.md](README-kokoro-emacs.md) を参照してください。
+詳細は [README-my-read-k2.md](docs/README-my-read-k2.md) と [README-kokoro-emacs.md](docs/README-kokoro-emacs.md) を参照してください。
 設計・状態所有・拡張方法は [architecture.md](docs/architecture.md)、
-[state-inventory.md](docs/state-inventory.md)、[DEVELOPMENT.md](DEVELOPMENT.md) に記載しています。
+[state-inventory.md](docs/state-inventory.md)、[DEVELOPMENT.md](docs/DEVELOPMENT.md) に記載しています。
 
 ## ライセンス
 
 [MIT License](LICENSE)
 
-ソースは概念別の [my-read/](my-read/README.md) 配下にあります。ルートの同名Elispは既存設定との互換入口です。
+ソースは概念別の [my-read/](my-read/README.md) 配下にあります。ルートの `my-read.el` が唯一のライブラリエントリーポイントです。
+
+## リポジトリの配置
+
+```text
+reader/
+├── docs/
+├── companion-implementations/  # Python・Swift・native bridge・app・音声assets
+├── my-read/                    # 概念別のEmacs Lisp実装
+├── my-read.el                  # Emacsから読む唯一の入口
+├── README.md
+├── LICENSE
+├── Makefile
+├── .gitignore
+├── mise.toml
+├── uv.lock
+├── test/
+└── scripts/
+```
+
+`(require 'my-read)` を先に実行すると、各機能の `require` が使えます。
+旧ルートの `kokoro-reader.el` などを直接loadする設定は、この入口へ変更してください。
+Python環境・`pyproject.toml`・ビルド成果物は `companion-implementations/` に置きます。
+同ディレクトリの `uv.lock` は、ルートの正本への相対シンボリックリンクです。
+補助実装の使い方は [companion-implementations/README.md](companion-implementations/README.md) を参照してください。

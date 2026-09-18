@@ -2,7 +2,7 @@
 name = "kokoro-emacs-reader"
 version = "0.1.0"
 description = "Local Kokoro TTS server for the Emacs reader"
-readme = "README-kokoro-emacs.md"
+readme = "../docs/README-kokoro-emacs.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "fastapi>=0.115",

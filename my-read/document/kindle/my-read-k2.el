@@ -13,7 +13,7 @@
   :group 'my-read-k)
 
 (defconst my-read-k2--root
-  reader-root-directory)
+  reader-companion-directory)
 
 (defcustom my-read-k2-bridge-program nil
   "Kindle.app bridge executable, or nil to use the package release binary."

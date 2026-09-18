@@ -5,7 +5,7 @@
                         (file-name-directory (or load-file-name buffer-file-name)))))
 
 ;; Anchor runtime assets to the checkout even when testing a detached bytecode tree.
-(load (expand-file-name "reader-load-path.el" reader-test--root) nil t t)
+(load (expand-file-name "my-read/reader-load-path.el" reader-test--root) nil t t)
 (when-let* ((compiled (getenv "READER_TEST_COMPILED_DIR"))
             ((not (equal compiled ""))))
   (let ((compiled-paths (let ((load-path nil))

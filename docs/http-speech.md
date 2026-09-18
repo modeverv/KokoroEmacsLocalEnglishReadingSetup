@@ -21,7 +21,7 @@ GUIは次のいずれかで開きます。
 - `M-x reader-http-speech-open-gui`
 - リポジトリで `make speech-gui`
 - Finderから `scripts/speech-server-gui.command` をダブルクリック
-- ビルド済みの `speech-http-app/build/Reader Speech Server.app` を開く
+- ビルド済みの `companion-implementations/speech-http-app/build/Reader Speech Server.app` を開く
 
 GUIには「サーバースタート」「停止」と稼働状態を表示します。
 Emacsの自動起動とGUIは、同じlaunchdサービスを操作します。
@@ -33,8 +33,8 @@ GUIやEmacsを終了してもサーバーは継続します。停止時は読み
 
 ```sh
 make speech-server
-.venv/bin/python -m speech_http.service status
-.venv/bin/python -m speech_http.service stop
+(cd companion-implementations && .venv/bin/python -m speech_http.service status)
+(cd companion-implementations && .venv/bin/python -m speech_http.service stop)
 ```
 
 launchdの起動定義・ログは `~/Library/Caches/ReaderSpeechServer/8765/` に置きます。
@@ -44,23 +44,24 @@ launchdの起動定義・ログは `~/Library/Caches/ReaderSpeechServer/8765/` �
 
 ## 必要な環境
 
-既存の `.venv`（Python 3.11以上）を使います。音声合成側に `ffmpeg`、
+既存の `companion-implementations/.venv`（Python 3.11以上）を使います。音声合成側に `ffmpeg`、
 独立した再生クライアントには `ffplay` が必要です。通常のEmacs読書は既存の常駐音声ブリッジで再生します。
 Kokoro/Irodoriは既存のMLX環境・モデル、macOS音声は `/usr/bin/say` を使用します。
 
 ネイティブアプリのビルドにはAppleのCommand Line Toolsが必要です。
 `make speech-app-build` でビルドでき、`make speech-gui` は未ビルド・ソース更新時に自動ビルドします。
-アプリはこのチェックアウトと `.venv` を参照するランチャーです。
+アプリはこのチェックアウトと `companion-implementations/.venv` を参照するランチャーです。
 Emacsを起動せず、Finderからこの `.app` を開いて「サーバースタート」だけで利用できます。
 アプリ画面にLAN接続先を表示します。このMacのPython環境を使用するため、別Macへ `.app` だけを
 コピーして使う配布形式ではありません。
 別の場所へリポジトリを移動した場合は `make speech-app-build` で再ビルドしてください。
-本と音声波形の[アプリアイコン・生成記録](../speech-http-app/ICON.md)を同梱しています。
+本と音声波形の[アプリアイコン・生成記録](../companion-implementations/speech-http-app/ICON.md)を同梱しています。
 
 ## 通常のEmacs読書を接続
 
 ```elisp
 (add-to-list 'load-path "/Users/seijiro/Sync/emacs.d/reader")
+(require 'my-read)
 (require 'reader-http-speech-transport)
 (reader-http-speech-transport-mode 1)
 ```
@@ -87,7 +88,7 @@ Emacsのネイティブ音声ブリッジは、ダウンロードしたWAVの連
 言語変更は読書本文ペインで行います。設定変更時に古い先読みを破棄し、`s` / `SPC` で再開すると
 新しい設定を送ります。macOS音声は `rate` に語/分をそのまま送るため、540なども変換せず反映します。
 Kokoro/Irodoriは `speed` に0.5〜2.0の倍率を送ります。声・バックエンド・英語の発音言語コードも
-バッファの設定を毎回取得します。日本語Irodoriは既存の [Irodori手順](../README-irodori.md) を参照してください。
+バッファの設定を毎回取得します。日本語Irodoriは既存の [Irodori手順](README-irodori.md) を参照してください。
 
 サーバー側はユーザーごとの言語・速度を固定保持せず、リクエストの値で合成します。
 複数クライアントの言語設定が混ざることはありません。
@@ -95,6 +96,7 @@ Kokoro/Irodoriは `speed` に0.5〜2.0の倍率を送ります。声・バック
 ## 独立した文字列の読み上げ
 
 ```elisp
+(require 'my-read)
 (require 'reader-http-speech)
 (reader-http-speech-speak "こんにちは。続けて読みます。" "ja")
 (reader-http-speech-speak "Hello. Read this in English." "en")
@@ -137,7 +139,7 @@ curl -N http://127.0.0.1:8765/v1/speech/stream \
 ```
 
 各wavをBase64デコードすると単独のWAVになります。形式は24kHz・モノラル・PCM16です。
-WAVヘッダーを除いたPCMを順に再生してください。実装例は `speech_http/client.py`。
+WAVヘッダーを除いたPCMを順に再生してください。実装例は `companion-implementations/speech_http/client.py`。
 
 ```sh
 printf '%s' '{"text":"Hello. A speech test.","language":"en","speed":1.2}' \
@@ -187,7 +189,7 @@ GUIだけで起動したサーバーの検証にも使えます。
 | Irodori | 日本語 / asuka | 成功、4.72秒 |
 | macOS | 日本語 / Kyoko | LANアドレスへのPOSTで成功、2.19秒 |
 
-Irodoriは現在日本語のみ、参照音声は `assets/asuka.wav` です。英語はKokoroまたはmacOSを使います。
+Irodoriは現在日本語のみ、参照音声は `companion-implementations/assets/asuka.wav` です。英語はKokoroまたはmacOSを使います。
 待受は `*:8765`。同じMacからLANアドレス `192.168.11.30` 経由のHTTP/WAV取得は成功しました。
 登録済みの別LANマシン3台はSSH接続がタイムアウトしたため、別マシンからの到達確認は未完了です。
 同じMacのLANアドレスに接続できることだけでは、別端末側の経路・ファイアウォールまでは検証できません。

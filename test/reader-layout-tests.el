@@ -5,18 +5,18 @@
 (require 'my-read-k2)
 (require 'reader-http-speech)
 
-(ert-deftest reader-layout-runtime-assets-use-checkout-root ()
-  (should (equal my-read-k2--root reader-root-directory))
-  (should (equal reader-http-speech--directory reader-root-directory))
-  (should (equal kokoro-reader-server-directory reader-root-directory))
+(ert-deftest reader-layout-runtime-assets-use-companion-root ()
+  (should (equal my-read-k2--root reader-companion-directory))
+  (should (equal reader-http-speech--directory reader-companion-directory))
+  (should (equal kokoro-reader-server-directory reader-companion-directory))
   (should (equal reader-http-speech-python
-                 (expand-file-name ".venv/bin/python" reader-root-directory)))
+                 (expand-file-name ".venv/bin/python" reader-companion-directory)))
   (should (equal kokoro-reader-macos-speech-bridge-program
                  (expand-file-name "macos-speech-bridge/my-read-speech-bridge"
-                                   reader-root-directory)))
+                                   reader-companion-directory)))
   (dolist (asset '("kokoro_server.py" "speech_http/service.py"
                    "my-read-k2/bridge/Package.swift"))
-    (should (file-exists-p (expand-file-name asset reader-root-directory)))))
+    (should (file-exists-p (expand-file-name asset reader-companion-directory)))))
 
 (ert-deftest reader-layout-definitions-live-in-concept-directories ()
   (dolist (entry '((my-read . "core/my-read")
@@ -39,8 +39,9 @@
                  (require 'package)
                  (package-initialize)
                  (setq native-comp-jit-compilation nil)
-                 (load ,(expand-file-name (concat entry ".el") reader-root-directory)
+                 (load ,(expand-file-name "my-read.el" reader-root-directory)
                        nil t t)
+                 (require ',(intern entry))
                  (unless (featurep ',(intern entry)) (error "Missing feature"))
                  (unless (equal reader-root-directory ,reader-root-directory)
                    (error "Wrong runtime root"))))

@@ -32,21 +32,21 @@ my-read/
 から追えます。状態の宣言は `core/english-reading-state.el` にあります。
 `kokoro-reader.el` は合成要求と常駐playerの予約queueを結ぶ境界を引き続き所有します。
 
-リポジトリのルートにある同名 `.el` は、既存init.elの `require` と直接 `load` を
-維持するための入口だけです。修正はこのディレクトリ内の実装に行ってください。
-`reader-load-path.el` が明示した各ディレクトリを登録します。内部moduleだけを使う場合も
-先に `(require 'reader-load-path)` を実行します。
+リポジトリのルートにある `my-read.el` が唯一のエントリーポイントです。
+先に `(require 'my-read)` を実行すると、内部moduleもfeature名でrequireできます。
+`my-read/reader-load-path.el` が各ディレクトリを登録します。
+UIを読み込まず単独のmoduleだけ使う開発時は、このbootstrapを絶対パスでloadします。
 
-別プロセスで動くruntimeは、既存の起動・配布パスを維持しています。
+別プロセスのruntimeは `companion-implementations/` にあります。
 
 | 関連する概念 | runtimeのソース（リポジトリルートから） |
 | --- | --- |
-| Speech / synthesis | `kokoro_server.py`, `irodori_backend.py` |
-| Speech / HTTP・playback | `speech_http/` |
-| Speech / native playback | `macos-speech-bridge/` |
-| Document / Kindle | `my-read-k2/bridge/` |
-| Supporting integrations / GUI | `speech-http-app/`, `playback-app/` |
+| Speech / synthesis | `companion-implementations/kokoro_server.py`, `companion-implementations/irodori_backend.py` |
+| Speech / HTTP・playback | `companion-implementations/speech_http/` |
+| Speech / native playback | `companion-implementations/macos-speech-bridge/` |
+| Document / Kindle | `companion-implementations/my-read-k2/bridge/` |
+| Supporting integrations / GUI | `companion-implementations/speech-http-app/`, `companion-implementations/playback-app/` |
 
-これらの実行場所は `reader-root-directory` に固定し、現在のbuffer、移動先のElisp、
+これらの実行場所は `reader-companion-directory` に固定し、現在のbuffer、移動先のElisp、
 `default-directory` に依存させません。詳細は
-[architecture](../docs/architecture.md) と [development](../DEVELOPMENT.md) を参照してください。
+[architecture](../docs/architecture.md) と [development](../docs/DEVELOPMENT.md) を参照してください。

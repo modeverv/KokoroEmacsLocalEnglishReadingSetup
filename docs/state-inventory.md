@@ -335,7 +335,7 @@
 | `defvar` | `reader-http-speech-finished-hook` |
 | `defvar` | `reader-http-speech-mode-map` |
 
-## reader-load-path.el
+## my-read/reader-load-path.el
 
-`reader-root-directory` はruntime資産の基準位置、`reader-module-directories` は概念別の検索先です。
-どちらも `defconst` であり、読書sessionの可変状態を所有しません。
+`reader-root-directory` はリポジトリの基準位置、`reader-companion-directory` はruntime資産の基準位置、`reader-module-directories` は概念別の検索先です。
+いずれも `defconst` であり、読書sessionの可変状態を所有しません。

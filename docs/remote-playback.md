@@ -41,7 +41,7 @@ Intel版とApple Silicon版のPython 3.12・PortAudio・必要なライブラリ
 make speech-playback-app
 ```
 
-成果物は `playback-app/build/` に作成します。`compatibility-report.json` に全Mach-OのCPU・最低OS・リンク先を記録します。
+成果物は `companion-implementations/playback-app/build/` に作成します。`compatibility-report.json` に全Mach-OのCPU・最低OS・リンク先を記録します。
 ビルドはmacOS 12を指定し、外部Python/Homebrewへの絶対参照や、macOS 12より新しいOSを要求するバイナリを拒否します。
 
 確認済み: Apple Silicon上で、作業フォルダー外へ移動したアプリのGUI起動・停止、WAV実デバイス出力、
@@ -51,12 +51,13 @@ make speech-playback-app
 
 ## 手元の再生サーバーを導入
 
-このリポジトリ、または `speech_http/` と `requirements-playback.txt` を手元に置きます。
-Python 3.11〜3.13を使用してください。モデル用の `uv sync` は不要です。
+このリポジトリ、または `companion-implementations/speech_http/` と `companion-implementations/requirements-playback.txt` を手元に置きます。
+Python 3.11〜3.13を使用してください。モデル用の `uv sync --directory companion-implementations` は不要です。
 
 macOS / Linux:
 
 ```sh
+cd companion-implementations
 python3 -m venv .playback-venv
 .playback-venv/bin/python -m pip install -r requirements-playback.txt
 .playback-venv/bin/python -m speech_http.playback
@@ -65,13 +66,14 @@ python3 -m venv .playback-venv
 Windows PowerShell:
 
 ```powershell
+cd companion-implementations
 py -3 -m venv .playback-venv
 .playback-venv\Scripts\python -m pip install -r requirements-playback.txt
 .playback-venv\Scripts\python -m speech_http.playback
 ```
 
 LinuxでPortAudioが見つからない場合は、OSのパッケージを導入します（Debian/Ubuntuでは `libportaudio2`）。
-既存のReader用 `.venv` を使う場合は `make speech-playback-setup` の後、`make speech-playback` で起動できます。
+既存のReader用 `companion-implementations/.venv` を使う場合は `make speech-playback-setup` の後、`make speech-playback` で起動できます。
 
 既定は `127.0.0.1:8768` で待ち受けます。終了は起動したターミナルでCtrl-Cです。
 出力デバイスや先読み秒数を変更できます。
@@ -101,6 +103,7 @@ WebSocket制御用のaiohttpもEmacs側のPythonに導入します。
 SSH先のEmacsで設定します。
 
 ```elisp
+(require 'my-read)
 (require 'reader-http-speech-transport)
 (setq reader-http-speech-endpoint "http://127.0.0.1:8765")
 (reader-http-speech-set-playback-server "http://127.0.0.1:18768")
@@ -236,9 +239,10 @@ Readerの初回読み込みを次のようにして、更新時は新しいソ�
   (require 'reader-http-speech-transport))
 ```
 
-実行中のEmacsは `require` だけでは再読み込みしません。読み上げを止めて、次を評価します。
+実行中のEmacsは `require` だけでは再読み込みしません。ディレクトリ移行後はEmacsを再起動してください。
+配置を変えないHTTP moduleだけの更新なら、読み上げを止めて次を評価できます。
 
 ```elisp
-(load "~/Sync/emacs.d/reader/reader-http-playback.el" nil t t)
-(load "~/Sync/emacs.d/reader/reader-http-speech-transport.el" nil t t)
+(load "~/Sync/emacs.d/reader/my-read/speech/playback/reader-http-playback.el" nil t t)
+(load "~/Sync/emacs.d/reader/my-read/speech/http/reader-http-speech-transport.el" nil t t)
 ```

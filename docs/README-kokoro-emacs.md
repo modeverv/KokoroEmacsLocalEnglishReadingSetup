@@ -6,15 +6,15 @@ Run these commands in the reader checkout. The Emacs launcher enables the
 `japanese` extra so Japanese support survives subsequent server starts.
 
 ```sh
-uv sync --inexact --extra japanese
-uv run --extra japanese python -m spacy download en_core_web_sm
+uv sync --directory companion-implementations --inexact --extra japanese
+uv run --directory companion-implementations --extra japanese python -m spacy download en_core_web_sm
 ```
 
 On macOS, if building `pyopenjtalk` fails with `fatal error: 'fstream' file not
 found` while the C++ headers exist inside the SDK, supply their include path:
 
 ```sh
-CPLUS_INCLUDE_PATH="$(xcrun --show-sdk-path)/usr/include/c++/v1${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}" uv sync --inexact --extra japanese
+CPLUS_INCLUDE_PATH="$(xcrun --show-sdk-path)/usr/include/c++/v1${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}" uv sync --directory companion-implementations --inexact --extra japanese
 ```
 
 `--inexact` preserves the separately installed English spaCy model. The server
@@ -27,10 +27,10 @@ select `macos` to return to the Apple voice. English remains `bf_emma`.
 
 ## 2. Start the dedicated server (optional)
 
-Place `kokoro_server.py` in the project root, then run:
+From the checkout root, run the server stored under `companion-implementations/`:
 
 ```sh
-uv run --extra japanese python kokoro_server.py --host 127.0.0.1 --port 8000
+uv run --directory companion-implementations --extra japanese python kokoro_server.py --host 127.0.0.1 --port 8000
 ```
 
 Health check:
@@ -63,12 +63,12 @@ The server binds only to `127.0.0.1` by default, loads Kokoro at startup, and se
 
 The Emacs client checks `/health` whenever speech is requested. If the server is
 not already running, it starts the command above automatically and waits for
-the health check to succeed before sending the speech request. This requires
-the client file to remain next to `kokoro_server.py` (the default server
-working directory), or an explicit configuration such as:
+the health check to succeed before sending the speech request. The default
+working directory is `reader-companion-directory`, where the server, Python
+environment, and project configuration reside. For a separate installation:
 
 ```elisp
-(setq kokoro-reader-server-directory "/path/to/reader")
+(setq kokoro-reader-server-directory "/path/to/reader/companion-implementations")
 ```
 
 You can override `kokoro-reader-server-command` if your Kokoro environment uses
@@ -77,12 +77,13 @@ is intentionally kept running for the next request.
 
 ## 3. Install the Emacs client
 
-Keep the checkout together: the root entry files load the implementation under
+Keep the checkout together: the root `my-read.el` entry loads the implementation under
 `my-read/`, and runtime assets remain relative to the checkout root. Add the
 checkout directory to `load-path` (adjust this example to your location):
 
 ```elisp
 (add-to-list 'load-path (expand-file-name "~/Sync/emacs.d/reader"))
+(require 'my-read)
 (require 'kokoro-reader)
 (require 'english-reading-mode)
 

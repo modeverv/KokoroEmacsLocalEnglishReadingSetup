@@ -1,11 +1,18 @@
 ;;; reader-load-path.el --- Reader source layout -*- lexical-binding: t; -*-
 
 (defconst reader-root-directory
-  (file-name-directory (or load-file-name buffer-file-name))
+  (file-name-directory
+   (directory-file-name
+    (file-name-directory (or load-file-name buffer-file-name))))
   "Repository runtime root, independent of the current buffer or directory.")
 
+(defconst reader-companion-directory
+  (expand-file-name "companion-implementations/" reader-root-directory)
+  "Runtime root for Python, native bridges, applications, and assets.")
+
 (defconst reader-module-directories
-  '("my-read/core"
+  '("my-read"
+    "my-read/core"
     "my-read/ui"
     "my-read/document"
     "my-read/document/pdf"

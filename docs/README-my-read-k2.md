@@ -10,7 +10,7 @@ Accessibility text.
 2. Give Emacs Accessibility permission in **System Settings → Privacy &
    Security → Accessibility**. If the bridge is launched from a terminal while
    testing, that terminal may also need permission.
-3. Add this directory to `load-path`, load `my-read.el`, then run:
+3. Add the repository root (the parent of `docs/`) to `load-path`, load `my-read.el`, then run:
 
    ```elisp
    (require 'my-read)
@@ -22,7 +22,7 @@ the Swift bridge in release mode when no release
 binary exists. To build it ahead of time:
 
 ```sh
-swift build --package-path my-read-k2/bridge --configuration release
+swift build --package-path companion-implementations/my-read-k2/bridge --configuration release
 ```
 
 The reader keys are the same as `my-read-k`: `j`/`k` read by sentence and cross
