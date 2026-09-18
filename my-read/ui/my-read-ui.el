@@ -13,6 +13,49 @@
 (require 'my-read-eww)
 (require 'my-read-pdf)
 (require 'my-read-org-noter)
+(require 'dired)
+(require 'dired-x)
+(require 'seq)
+
+(defvar-local my/read-dired-owner-frame nil
+  "Frame owning this private my-read Dired buffer.")
+
+(defun my/read--private-dired-buffer (source frame)
+  "Return a private Dired buffer for SOURCE belonging to FRAME.
+SOURCE is a Dired buffer.  Keep private listings out of the ordinary
+Dired buffer registry, including when the listing is reverted."
+  (with-current-buffer source
+    (if (eq my/read-dired-owner-frame frame)
+        source
+      (let* ((directory dired-directory)
+             (file (dired-get-filename nil t))
+             (existing
+              (seq-find
+               (lambda (buffer)
+                 (with-current-buffer buffer
+                   (and (eq my/read-dired-owner-frame frame)
+                        (equal dired-directory directory))))
+               (buffer-list)))
+             (private
+              (or existing
+                  (let ((dired-buffers nil))
+                    (dired-noselect directory)))))
+        (with-current-buffer private
+          (unless existing
+            (rename-buffer (format "*my-read DIRED: %s*"
+                                   (buffer-name source)) t)
+            (setq-local my/read-dired-owner-frame frame)
+            (setq-local dired-buffers
+                        (list (cons (expand-file-name default-directory)
+                                    private)))
+            (dired-hide-details-mode 1)
+            (setq-local dired-omit-files "\\`\\.\\(?:[^.]\\|\\..\\)"
+                        dired-omit-extensions nil
+                        dired-omit-lines nil
+                        dired-omit-size-limit nil)
+            (dired-omit-mode 1))
+          (when file (dired-goto-file file)))
+        private))))
 
 (defcustom my/read-book-path
   "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/einglish-book"
@@ -353,6 +396,10 @@
                    ((my/read--text-file-buffer-p)
                     'my-reading-text-buffer))))))
         (when parameter
+          (when (eq parameter 'my-reading-dired-buffer)
+            (setq buffer (my/read--private-dired-buffer buffer frame))
+            (unless (eq buffer (window-buffer window))
+              (set-window-buffer window buffer)))
           (set-frame-parameter frame parameter buffer)
           (my/read--configure-center-tab-buffer buffer frame)
           (when (and (eq window (my/read-center-window frame))
@@ -516,6 +563,7 @@ When KINDLE-BUFFER is live, expose it with the center document tabs."
                  (if (file-directory-p book-path)
                      book-path
                    (file-name-directory book-path))))))
+      (setq dired-buffer (my/read--private-dired-buffer dired-buffer frame))
       (unless (buffer-live-p kindle-buffer)
         (setq kindle-buffer
               (my/read--prepare-center-tab-placeholder frame 'kindle)))

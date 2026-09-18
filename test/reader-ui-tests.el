@@ -2,6 +2,39 @@
 
 (require 'reader-test-helpers)
 
+(ert-deftest my-read-dired-details-stay-private-after-revert ()
+  (let* ((directory (make-temp-file "my-read-dired-" t))
+         (file (expand-file-name "book.epub" directory))
+         ordinary private)
+    (unwind-protect
+        (progn
+          (write-region "book" nil file nil 'silent)
+          (setq ordinary (dired-noselect directory))
+          (with-current-buffer ordinary
+            (dired-hide-details-mode -1)
+            (dired-goto-file file))
+          (setq private
+                (my/read--private-dired-buffer ordinary (selected-frame)))
+          (should-not (eq ordinary private))
+          (with-current-buffer private
+            (should dired-hide-details-mode)
+            (should (equal (dired-get-filename) file))
+            (revert-buffer)
+            (should dired-hide-details-mode))
+          (with-current-buffer ordinary
+            (should-not dired-hide-details-mode)
+            (should (eq (dired-noselect directory) ordinary)))
+          (should (eq (my/read--private-dired-buffer ordinary (selected-frame))
+                      private))
+          (kill-buffer ordinary)
+          (setq ordinary (dired-noselect directory))
+          (should-not (eq ordinary private))
+          (with-current-buffer ordinary
+            (should-not dired-hide-details-mode)))
+      (dolist (buffer (list ordinary private))
+        (when (buffer-live-p buffer) (kill-buffer buffer)))
+      (delete-directory directory t))))
+
 (ert-deftest my-read-k-japanese-sentence-boundaries-work-one-at-a-time ()
   (with-temp-buffer
     (insert "これは最初の文です。これは二番目の文です！最後です？")
@@ -320,7 +353,9 @@
                                (,pdf-buffer pdf-view-mode
                                 my-reading-pdf-buffer)))
                 (with-current-buffer (nth 0 entry)
-                  (setq major-mode (nth 1 entry)))
+                  (setq major-mode (nth 1 entry))
+                  (when (eq major-mode 'dired-mode)
+                    (setq-local my/read-dired-owner-frame frame)))
                 (set-window-buffer center (nth 0 entry))
                 (my/read--track-center-tab-buffer frame)
                 (should (eq (frame-parameter frame (nth 2 entry))
@@ -391,6 +426,8 @@
                        (setq major-mode 'nov-mode)))
                     ((symbol-function 'dired-noselect)
                      (lambda (_directory) dired-buffer))
+                    ((symbol-function 'my/read--private-dired-buffer)
+                     (lambda (source _frame) source))
                     ((symbol-function 'my-read-lookup-follow-mode) #'ignore)
                     ((symbol-function 'my-read-translate-follow-mode) #'ignore)
                     ((symbol-function 'my/read-lookup-follow-post-command) #'ignore)
