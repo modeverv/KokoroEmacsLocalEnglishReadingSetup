@@ -1148,7 +1148,7 @@
                        #'ignore))
               (with-selected-window center
                 (should (eq (key-binding (kbd "C-x k"))
-                            #'my/read-close-pdf))
+                            #'my/read-close-document))
                 (my/read-close-pdf)))
             (should (frame-live-p frame))
             (should-not (buffer-live-p pdf-buffer))
