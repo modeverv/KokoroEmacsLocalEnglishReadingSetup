@@ -166,10 +166,7 @@ Call ON-ERROR with a diagnostic string when startup cannot be completed."
            (lambda (process _event)
              (when (and (eq process kokoro-reader--server-health-process)
                         (memq (process-status process) '(exit signal)))
-               (let ((ok (= (process-exit-status process) 0))
-                     (error-text
-                      (with-current-buffer (process-buffer process)
-                        (string-trim (buffer-string)))))
+               (let ((ok (= (process-exit-status process) 0)))
                  (setq kokoro-reader--server-health-process nil)
                  (when (buffer-live-p (process-buffer process))
                    (kill-buffer (process-buffer process)))
@@ -203,7 +200,7 @@ Call ON-ERROR with a diagnostic string when startup cannot be completed."
                                   :sentinel
                                   (lambda (server _server-event)
                                     (when (and (memq (process-status server)
-                                                      '(exit signal))
+                                                     '(exit signal))
                                                (eq server
                                                    kokoro-reader--server-process))
                                       (setq kokoro-reader--server-process nil)
@@ -600,28 +597,30 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain queued macOS utterances."
          (kokoro-reader--delete-entry-audio-file entry)))
       ("error"
        (message "resident speech bridge: %s" (or (plist-get event :message)
-                                                   "unknown error"))
+                                                 "unknown error"))
        (when entry
          (kokoro-reader--discard-resident-entry
           entry (plist-get entry :announced)))))))
 
-(defun kokoro-reader--macos-bridge-filter (_process output)
+(defun kokoro-reader--macos-bridge-filter (process output)
   "Decode newline-delimited bridge OUTPUT and dispatch its events."
   ;; Publish the incomplete tail before dispatching any event.  Event hooks can
   ;; enqueue more speech and cause another filter call; retaining byte offsets
   ;; into the shared fragment across that re-entry produced `Args out of range'.
-  (let* ((parts (split-string
-                 (concat kokoro-reader--macos-bridge-fragment output) "\n"))
-         (lines (butlast parts)))
-    (setq kokoro-reader--macos-bridge-fragment (car (last parts)))
-    (dolist (line lines)
-      (unless (string-empty-p line)
-        (condition-case err
-            (kokoro-reader--handle-macos-bridge-event
-             (json-parse-string line :object-type 'plist))
-          (error
-           (message "macOS speech bridge response error: %s"
-                    (error-message-string err))))))))
+  (when (eq process kokoro-reader--macos-bridge-process)
+    (let* ((parts (split-string
+                   (concat kokoro-reader--macos-bridge-fragment output) "\n"))
+           (lines (butlast parts)))
+      (setq kokoro-reader--macos-bridge-fragment (car (last parts)))
+      (dolist (line lines)
+        (when (and (eq process kokoro-reader--macos-bridge-process)
+                   (not (string-empty-p line)))
+          (condition-case err
+              (kokoro-reader--handle-macos-bridge-event
+               (json-parse-string line :object-type 'plist))
+            (error
+             (message "macOS speech bridge response error: %s"
+                      (error-message-string err)))))))))
 
 (defun kokoro-reader--macos-bridge-sentinel (process event)
   "Clear resident bridge state when PROCESS exits with EVENT."
@@ -783,7 +782,7 @@ ANNOUNCED means the normal speech wrapper already owns its visual context."
 
 (defvar-keymap kokoro-reader-mode-map
   :doc "Keymap for `kokoro-reader-mode'."
-;;  "C-c s" #'kokoro-reader-speak
+  ;;  "C-c s" #'kokoro-reader-speak
   "C-c p" #'kokoro-reader-speak-paragraph
   "C-c n" #'kokoro-reader-speak-and-forward
   "C-c k" #'kokoro-reader-stop

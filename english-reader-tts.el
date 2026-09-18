@@ -22,7 +22,7 @@ nilならmacOSのシステム音声を使用する。
 (defun english-reader-tts--sentinel (process _event)
   "読み上げ終了時にハイライトを消す。"
   (when (memq (process-status process) '(exit signal))
-    (when-let ((overlay (process-get process 'tts-overlay)))
+    (when-let* ((overlay (process-get process 'tts-overlay)))
       (delete-overlay overlay))
     (when (eq process english-reader-tts-process)
       (setq english-reader-tts-process nil))))

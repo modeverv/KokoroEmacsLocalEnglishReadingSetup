@@ -65,10 +65,10 @@
           (let ((json-object-type 'alist) (json-key-type 'symbol))
             (json-read-from-string (reader-http-speech-transport--payload text)))))
     `((text . ,text) (language . ,language)
-    (backend . ,(if (equal language "ja") reader-http-speech-japanese-backend
-                  reader-http-speech-english-backend))
-    (speed . ,(if (equal language "ja") reader-http-speech-japanese-speed
-                reader-http-speech-english-speed)))))
+      (backend . ,(if (equal language "ja") reader-http-speech-japanese-backend
+                    reader-http-speech-english-backend))
+      (speed . ,(if (equal language "ja") reader-http-speech-japanese-speed
+                  reader-http-speech-english-speed)))))
 
 (defun reader-http-speech-speak (text language)
   "Request TEXT in LANGUAGE (en or ja) and play buffered WAV chunks locally."
@@ -114,11 +114,11 @@
   "Read the region, or point through buffer end, using LANGUAGE.
 In EPUB this reads the current chapter.  For PDF, select extracted text."
   (interactive (list (if current-prefix-arg
-                        (completing-read "Language: " '("en" "ja") nil t)
-                      reader-http-speech-language)))
+                         (completing-read "Language: " '("en" "ja") nil t)
+                       reader-http-speech-language)))
   (reader-http-speech-speak
    (buffer-substring-no-properties (if (use-region-p) (region-beginning) (point))
-                                  (if (use-region-p) (region-end) (point-max)))
+                                   (if (use-region-p) (region-end) (point-max)))
    language))
 
 (defun reader-http-speech-read-english ()

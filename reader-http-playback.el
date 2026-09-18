@@ -1,7 +1,10 @@
 ;;; reader-http-playback.el --- Remote playback bridge -*- lexical-binding: t; -*-
 
+(declare-function reader-http-speech-transport-mode "reader-http-speech-transport")
 (require 'reader-http-speech)
 (require 'kokoro-reader)
+
+(defvar reader-http-speech-transport-mode)
 
 (defcustom reader-http-speech-playback-endpoint nil
   "Playback server origin, e.g. http://127.0.0.1:8768; nil plays on Emacs's host."
@@ -115,10 +118,10 @@ An empty ENDPOINT restores playback on the Emacs host."
     (json-encode
      (cons `(playback . ((endpoint . ,(or reader-http-speech-playback-delivery-endpoint
                                           reader-http-speech-playback-endpoint))
-                        (target . ,reader-http-speech-playback-target)
-                        (session . ,reader-http-playback--session)
-                        (delivery_token . ,reader-http-playback--delivery-token)
-                        (id . ,(plist-get entry :id))))
+                         (target . ,reader-http-speech-playback-target)
+                         (session . ,reader-http-playback--session)
+                         (delivery_token . ,reader-http-playback--delivery-token)
+                         (id . ,(plist-get entry :id))))
            (json-read-from-string (plist-get entry :http-payload))))))
 
 (advice-add 'kokoro-reader--ensure-macos-bridge :around #'reader-http-playback--ensure)

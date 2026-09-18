@@ -61,13 +61,13 @@
 (defun my/read-org-noter--eww-url (&optional buffer)
   "Return BUFFER's canonical EWW URL without a fragment."
   (with-current-buffer (or buffer (current-buffer))
-    (when-let ((url (and (boundp 'eww-data)
-                         (plist-get eww-data :url))))
+    (when-let* ((url (and (boundp 'eww-data)
+                          (plist-get eww-data :url))))
       (replace-regexp-in-string "#.*\\'" "" url))))
 
 (defun my/read-org-noter--eww-property (&optional buffer)
   "Return the virtual NOTER_DOCUMENT value for EWW BUFFER."
-  (when-let ((url (my/read-org-noter--eww-url buffer)))
+  (when-let* ((url (my/read-org-noter--eww-url buffer)))
     (format "[[eww:%s]]" (org-link-escape url))))
 
 (defun my/read-org-noter--eww-url-from-property (property)
@@ -189,7 +189,7 @@
 Return non-nil when an active session was found.  The caller must first move
 the document and notes windows to other buffers; this prevents Org-noter's
 normal session teardown from deleting those windows."
-  (when-let ((session (my/read-org-noter--session-for-buffer buffer)))
+  (when-let* ((session (my/read-org-noter--session-for-buffer buffer)))
     (let ((frame (org-noter--session-frame session))
           (notes-buffer (org-noter--session-notes-buffer session))
           completed)
@@ -277,7 +277,7 @@ clears Org-noter's buffer-local handler, minor mode, and session pointer."
 
 (defun my/read-org-noter--eww-open-document (property)
   "Return an EWW buffer for virtual document PROPERTY."
-  (when-let ((url (my/read-org-noter--eww-url-from-property property)))
+  (when-let* ((url (my/read-org-noter--eww-url-from-property property)))
     (or (cl-find-if
          (lambda (buffer)
            (and (my/read-org-noter--eww-buffer-p buffer)
@@ -354,8 +354,8 @@ clears Org-noter's buffer-local handler, minor mode, and session pointer."
 
 (defun my/read-org-noter--eww-after-render ()
   "Follow a newly rendered URL when this EWW buffer is visible in my-read."
-  (when-let ((frame (and (boundp 'my/read-center-tab-frame)
-                         my/read-center-tab-frame)))
+  (when-let* ((frame (and (boundp 'my/read-center-tab-frame)
+                          my/read-center-tab-frame)))
     (let ((center (and (frame-live-p frame)
                        (my/read-center-window frame))))
       (when (and (window-live-p center)
@@ -560,8 +560,8 @@ clears Org-noter's buffer-local handler, minor mode, and session pointer."
     (cancel-timer my/read-org-noter--sync-timer))
   (setq my/read-org-noter--sync-timer
         (run-with-idle-timer 0.15 nil
-                            #'my/read-org-noter--sync-now
-                            (current-buffer))))
+                             #'my/read-org-noter--sync-now
+                             (current-buffer))))
 
 (defun my/read-org-noter--session-matches-source-p (session source frame)
   "Return non-nil when SESSION still represents SOURCE in FRAME."

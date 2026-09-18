@@ -49,10 +49,10 @@
    (equal my/read-org-noter-directory
           "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read")))
 
-(ert-deftest my-read-positions-use-obsidian-read-directory ()
+(ert-deftest my-read-positions-use-obsidian-read-log-directory ()
   (should
    (equal my/read-position-directory
-          "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read"))
+          "/Users/seijiro/Library/Mobile Documents/iCloud~md~obsidian/Documents/seijiro/000_org/read-log"))
   (should (equal (file-name-nondirectory (my/read-position-file))
                  "read-positions.el")))
 
@@ -413,7 +413,12 @@
                  (lambda (delay _repeat callback &rest _)
                    (setq scheduled (list delay callback)))))
         (kokoro-reader--speak-bounds (point-min) (point-max)))
-      (should (equal scheduled '(0 english-reading-mode--continuous-next)))
+      (should (zerop (car scheduled)))
+      (let (advanced)
+        (cl-letf (((symbol-function 'english-reading-mode--continuous-next)
+                   (lambda () (setq advanced t))))
+          (funcall (cadr scheduled)))
+        (should advanced))
       (should (= (plist-get english-reading-mode--continuous-state
                             :next-speech-position) (point-max)))
       (should-not english-reading-mode--active-speech)
@@ -496,7 +501,12 @@
                  (lambda (delay _repeat callback &rest _)
                    (setq scheduled (list delay callback)))))
         (kokoro-reader--speak-bounds (point-min) (point-max)))
-      (should (equal scheduled '(0 english-reading-mode--continuous-next)))
+      (should (zerop (car scheduled)))
+      (let (advanced)
+        (cl-letf (((symbol-function 'english-reading-mode--continuous-next)
+                   (lambda () (setq advanced t))))
+          (funcall (cadr scheduled)))
+        (should advanced))
       (should (= (plist-get english-reading-mode--continuous-state
                             :next-speech-position) (point-max)))
       (should-not english-reading-mode--active-speech)
@@ -941,7 +951,11 @@
                        'fake-timer)))
             (english-reading-mode--continuous-speech-finished
              (list :buffer text-buffer)))
-          (should (eq scheduled #'english-reading-mode--continuous-next))
+          (let (advanced)
+            (cl-letf (((symbol-function 'english-reading-mode--continuous-next)
+                       (lambda () (setq advanced t))))
+              (funcall scheduled))
+            (should advanced))
           (should (zerop scheduled-delay)))
       (kill-buffer pdf-buffer)
       (kill-buffer text-buffer))))
@@ -4080,7 +4094,7 @@
           (my/read-vocabulary-file file))
      (unwind-protect
          (progn ,@body)
-       (when-let ((buffer (get-file-buffer file)))
+       (when-let* ((buffer (get-file-buffer file)))
          (set-buffer-modified-p nil)
          (kill-buffer buffer))
        (when (file-exists-p file)

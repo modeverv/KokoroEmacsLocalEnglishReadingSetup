@@ -30,7 +30,7 @@
                 (t "en")))
          (voice (if (eq kokoro-reader-backend 'macos)
                     (replace-regexp-in-string " (.*)\\'" "" (or kokoro-reader-macos-voice
-                                                                          (if (equal language "ja") "Kyoko" "Samantha")))
+                                                                (if (equal language "ja") "Kyoko" "Samantha")))
                   kokoro-reader-voice))
          (payload `((text . ,(kokoro-reader--speech-text text))
                     (language . ,language) (backend . ,backend) (voice . ,voice)
@@ -95,8 +95,8 @@
              :buffer nil :stderr stderr-buffer :connection-type 'pipe
              :coding 'utf-8-unix :noquery t
              :command (append (list reader-http-speech-python "-m" "speech_http.client"
-                            "--endpoint" (plist-get entry :endpoint)
-                            "--auto-start" "--listen-host" reader-http-speech-listen-host)
+                                    "--endpoint" (plist-get entry :endpoint)
+                                    "--auto-start" "--listen-host" reader-http-speech-listen-host)
                               (if remote '("--deliver")
                                 (list "--output" (plist-get entry :audio-file))))
              :sentinel

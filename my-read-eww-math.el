@@ -155,7 +155,7 @@ clipped at any edge."
               (text (string-trim
                      (if (fboundp 'dom-inner-text)
                          (dom-inner-text annotation)
-                       (dom-text annotation))))
+                       (dom-inner-text annotation))))
               ((not (string-empty-p text))))
     text))
 
@@ -330,7 +330,7 @@ is changed only for this synchronous call and is restored even on error."
             (shr-tag-math dom)
           ;; Emacs 30 removed the private SHR handler.  Preserve the embedded
           ;; TeX as readable text on untrusted pages instead of failing.
-          (insert (or tex (dom-text dom))))
+          (insert (or tex (dom-inner-text dom))))
       (let (id generation)
         (with-current-buffer target
           (setq id (cl-incf my/read-eww-math--job-counter)

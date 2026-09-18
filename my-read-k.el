@@ -273,27 +273,24 @@ When ERROR-P is non-nil, mark the Kindle header as disconnected."
         (error
          (my-read-k--record-error "CALLBACK_ERROR" (error-message-string err)))))))
 
-(defun my-read-k--process-filter (_process chunk)
-  "Assemble JSON Lines from bridge output CHUNK."
-  (setq my-read-k--process-output (concat my-read-k--process-output chunk))
-  (let ((start 0))
-    (while (string-match "\n" my-read-k--process-output start)
-      ;; Save both offsets before parsing/callbacks: either may change Emacs's
-      ;; global match data and otherwise corrupt framing of the next JSON line.
-      (let* ((line-end (match-beginning 0))
-             (next-start (match-end 0))
-             (line (substring my-read-k--process-output start line-end)))
-        (unless (string-empty-p line)
+(defun my-read-k--process-filter (process chunk)
+  "Assemble JSON Lines from current bridge PROCESS output CHUNK."
+  (when (eq process my-read-k--process)
+    ;; Publish the tail before callbacks: they may read more bridge output
+    ;; recursively, or reconnect and replace the process during this batch.
+    (let* ((parts (split-string (concat my-read-k--process-output chunk) "\n"))
+           (lines (butlast parts)))
+      (setq my-read-k--process-output (car (last parts)))
+      (dolist (line lines)
+        (when (and (eq process my-read-k--process)
+                   (not (string-empty-p line)))
           (condition-case err
               (my-read-k--dispatch-response
                (json-parse-string line :object-type 'alist :array-type 'list
                                   :null-object nil :false-object nil))
             (error
              (my-read-k--record-error
-              "MALFORMED_RESPONSE" (error-message-string err)))))
-        (setq start next-start)))
-    (setq my-read-k--process-output
-          (substring my-read-k--process-output start))))
+              "MALFORMED_RESPONSE" (error-message-string err)))))))))
 
 (defun my-read-k--ensure-process ()
   "Start the persistent bridge if necessary and return it."
@@ -382,7 +379,7 @@ When ERROR-P is non-nil, mark the Kindle header as disconnected."
     (let (chunks)
       (dolist (page my-read-k--prefetch-queue)
         (when (< (length chunks) count)
-          (when-let ((text (my-read-k--alist-get 'text page)))
+          (when-let* ((text (my-read-k--alist-get 'text page)))
             (with-temp-buffer
               (insert (my-read-k--one-sentence-per-line text))
               (setq-local sentence-end-double-space nil)
@@ -504,12 +501,12 @@ When SPEAK is non-nil, continue the existing sentence-reading flow."
         (my-read-k--position-for-direction direction)
         (setq buffer-read-only t)
         (set-buffer-modified-p nil)))
-    (when-let ((center (and (frame-live-p my-read-k--frame)
-                            (my/read-kindle-window my-read-k--frame)
-                            (eq (window-buffer
-                                 (my/read-kindle-window my-read-k--frame))
-                                my-read-k--buffer)
-                            (my/read-kindle-window my-read-k--frame))))
+    (when-let* ((center (and (frame-live-p my-read-k--frame)
+                             (my/read-kindle-window my-read-k--frame)
+                             (eq (window-buffer
+                                  (my/read-kindle-window my-read-k--frame))
+                                 my-read-k--buffer)
+                             (my/read-kindle-window my-read-k--frame))))
       (set-window-point center (with-current-buffer my-read-k--buffer (point))))
     (when speak
       (condition-case err
@@ -768,7 +765,7 @@ When SPEAK is non-nil, continue the existing sentence-reading flow."
 
 (defun my-read-k--previous-sentence-available-p ()
   "Return non-nil when the current buffer has a previous sentence."
-  (when-let ((bounds (bounds-of-thing-at-point 'sentence)))
+  (when-let* ((bounds (bounds-of-thing-at-point 'sentence)))
     (save-excursion
       (goto-char (car bounds))
       (let ((origin (point)))
@@ -931,6 +928,24 @@ When SPEAK is non-nil, continue the existing sentence-reading flow."
         (set-buffer-modified-p nil))
       (read-only-mode 1))
     buffer))
+
+(defun reader-document-kindle--title (&optional frame)
+  "Return the live Kindle title associated with FRAME."
+  (or (frame-parameter (or frame (selected-frame)) 'my-reading-kindle-book-name)
+      (reader-document-text--title frame)))
+
+(defun reader-document-kindle--source (&optional _frame)
+  "Return Kindle's current source URL."
+  my-read-k--target-url)
+
+(reader-document-register
+ 'kindle (lambda ()
+           (or (derived-mode-p 'my-read-k-document-mode)
+               (eq (current-buffer)
+                   (frame-parameter (selected-frame) 'my-reading-kindle-buffer))))
+ '(:title reader-document-kindle--title :source reader-document-kindle--source
+          :persistent-type ignore :refresh my-read-k-refresh
+          :continue my-read-k-continuous-next) 'text)
 
 (provide 'my-read-k)
 ;;; my-read-k.el ends here
