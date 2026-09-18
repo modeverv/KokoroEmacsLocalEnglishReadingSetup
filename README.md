@@ -756,11 +756,17 @@ HTTPサーバー・クライアントとEmacsの設定反映は、次で検証�
 make speech-http-test
 ```
 
-2026-09-18時点でHTTP・分離再生関連はPython 27件・ERT 11件が成功しました。
 分離再生は `make speech-playback-test` で検証できます。
-既存Readerの `make my-read-k-ert` は最新ソースを優先して213件中211件成功・2件失敗でした。
-残る失敗はAccessibilityブリッジ設定と読書位置の保存先設定で、全体のテスト成功には至っていません。
+全体の検証は `make reader-test`、Elispの構文・警告をエラー扱いにしたコンパイルは
+`make reader-check` です。ReaderのERTはcheckoutのソースを明示的に読み、手元の古い
+`.elc`やnative cacheがテスト対象に混ざることを防ぎます。
+リファクタリングの前後比較は[検証記録](docs/refactor-validation.md)、実行環境と
+Swiftビルドの回避経路は[開発ガイド](DEVELOPMENT.md#検証)を参照してください。
 実音声とLAN接続の確認範囲は[HTTPサーバーの検証記録](docs/http-speech.md#検証)に記載しています。
+
+今回のmodule分離を既存Emacsへ反映するには、`M-x my-read-end` の後にEmacsを再起動し、
+`M-x my-read` を実行してください。`my-read.el`だけの再評価では、読み込み済みの依存moduleは
+再読み込みされません。設定名・キーバインド・保存データ形式は維持しています。
 
 ## ファイル構成
 
@@ -778,8 +784,16 @@ make speech-http-test
 | `kokoro_server.py` | ローカルKokoro HTTPサーバー |
 | `kokoro-reader.el` | 非同期音声生成・再生・ハイライト |
 | `macos-speech-bridge/main.m` | Kokoro WAVとmacOS音声を順序付きで再生する常駐ネイティブブリッジ |
-| `english-reading-mode.el` | 文単位の移動・連続読み上げ・PDF Tools連携 |
-| `my-read.el` | 専用フレーム、右3段ペイン、Lookup、翻訳、語彙保存 |
+| `english-reading-mode.el` | 公開コマンド、keymap、minor-modeの有効化・終了 |
+| `english-reading-speech.el` / `english-reading-prefetch.el` | 発話context、連続読み上げ、実再生完了、音声先読み |
+| `english-reading-state.el` | 読み上げ設定、公開hook、sessionと文書bufferの状態宣言 |
+| `reader-document.el` / `reader-document-text.el` / `reader-document-epub.el` | 文書操作API、TEXT/Markdown、EPUBの文・位置・章送り |
+| `english-reading-pdf.el` / `english-reading-pdf-view.el` | PDF抽出・仮想cursorと、highlight・scroll表示 |
+| `my-read.el` / `my-read-core.el` | 起動・終了、workspace所有関係、共通window API |
+| `my-read-ui.el` / `my-read-pdf.el` / `my-read-eww.el` | frameと固定タブ、PDF/EWWのworkspace統合 |
+| `my-read-position.el` / `reader-state-file.el` | 読書位置の保存復元とatomicな状態ファイルI/O |
+| `my-read-translation.el` / `my-read-lookup.el` / `my-read-vocabulary.el` | 翻訳、辞書pane、Org語彙保存 |
+| `my-read-speech-settings.el` | 言語別backend・voice・速度とbufferへの反映 |
 | `my-read-eww-math.el` | EWWのarXiv数式を非同期・並列変換し、SVGをキャッシュ |
 | `my-read-org-noter.el` | PDF／EPUB／Kindle／EWWのorg-noter統合と保存先管理 |
 | `my-read-k.el` | Kindle本文バッファ、ページ移動、メモリキャッシュ |
@@ -788,8 +802,12 @@ make speech-http-test
 | `key.md` | my-readとorg-noterのキーバインド・競合方針 |
 | `test/my-read-k-tests.el` | 共有Reader UIのERTテスト |
 | `test/my-read-k2-tests.el` | Kindle.appバックエンドのERTテスト |
+| `test/reader-document-tests.el` | 文書API、状態遷移、古いcallback、保存失敗の境界テスト |
+| `scripts/check-reader.el` | 全Elispの構文と警告をエラー扱いにしたコンパイル検証 |
 
 詳細は [README-my-read-k2.md](README-my-read-k2.md) と [README-kokoro-emacs.md](README-kokoro-emacs.md) を参照してください。
+設計・状態所有・拡張方法は [architecture.md](docs/architecture.md)、
+[state-inventory.md](docs/state-inventory.md)、[DEVELOPMENT.md](DEVELOPMENT.md) に記載しています。
 
 ## ライセンス
 

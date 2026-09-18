@@ -81,11 +81,11 @@ Copy `kokoro-reader.el` somewhere on `load-path`, for example:
 
 ```sh
 mkdir -p ~/.emacs.d/lisp
-cp kokoro-reader.el ~/.emacs.d/lisp/
-cp english-reading-mode.el ~/.emacs.d/lisp/
+cp kokoro-reader.el english-reading-*.el reader-document*.el ~/.emacs.d/lisp/
 ```
 
-Add this to `init.el`:
+Keep these modules together; `english-reading-mode.el` loads its document,
+PDF, speech, and prefetch modules. Add this to `init.el`:
 
 ```elisp
 (add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
