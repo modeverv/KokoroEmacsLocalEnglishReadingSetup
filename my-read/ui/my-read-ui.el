@@ -16,6 +16,62 @@
 (require 'dired)
 (require 'dired-x)
 (require 'seq)
+(require 'face-remap)
+
+(defface my/read-notes-background
+  '((t (:background "#2b241e")))
+  "Warm near-black background for reader notes."
+  :group 'my-read)
+
+(defface my/read-translation-background
+  '((t (:background "#1d2b38")))
+  "Blue near-black background for reader translation."
+  :group 'my-read)
+
+(defface my/read-lookup-entry-background
+  '((t (:background "#302336")))
+  "Violet near-black background for dictionary candidates."
+  :group 'my-read)
+
+(defface my/read-lookup-content-background
+  '((t (:background "#1e3027")))
+  "Green near-black background for dictionary content."
+  :group 'my-read)
+
+(defvar-local my/read--utility-background-cookies nil
+  "Face remappings filtered to reader utility windows in this buffer.")
+
+(defun my/read--color-utility-panes (frame)
+  "Apply subtle backgrounds to FRAME's right-hand utility windows.
+Window filters keep shared notes and Lookup buffers unchanged elsewhere."
+  (let ((center (my/read-center-window frame)))
+    (when (and (my/read-frame-p frame) (window-live-p center))
+      (dolist (window (window-list frame 'no-minibuf))
+        (let ((role
+               (when (>= (car (window-edges window))
+                         (nth 2 (window-edges center)))
+                 (cond
+                  ((eq window (my/read-note-window frame)) 'notes)
+                  ((eq window (frame-parameter frame 'my-reading-translate-window))
+                   'translation)
+                  ((with-current-buffer (window-buffer window)
+                     (derived-mode-p 'lookup-entry-mode))
+                   'lookup-entry)
+                  (t 'lookup-content)))))
+          (unless (eq role (window-parameter window 'my-read-utility-role))
+            (set-window-parameter window 'my-read-utility-role role))
+          (when role
+            (with-current-buffer (window-buffer window)
+              (unless my/read--utility-background-cookies
+                (dolist (kind '(notes translation lookup-entry lookup-content))
+                  (dolist (face '(default fringe))
+                    (push
+                     (face-remap-add-relative
+                      face `(:filtered (:window my-read-utility-role ,kind)
+                                       ,(intern (format "my/read-%s-background" kind))))
+                     my/read--utility-background-cookies)))))))))))
+
+(add-hook 'window-state-change-functions #'my/read--color-utility-panes)
 
 (defvar-local my/read-dired-owner-frame nil
   "Frame owning this private my-read Dired buffer.")
