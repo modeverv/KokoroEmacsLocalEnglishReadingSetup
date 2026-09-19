@@ -133,6 +133,9 @@ This is separate from `kokoro-reader-stop': cancelling or replacing playback
 does not run the hook.  Continuous readers can use it to enqueue the next
 already-rendered utterance without polling the player process.")
 
+(defvar kokoro-reader--playback-succeeded-p nil
+  "Non-nil only during notification of successful audio completion.")
+
 (defun kokoro-reader--server-ready-p ()
   (and (process-live-p kokoro-reader--server-process)
        (string= (process-name kokoro-reader--server-process) "kokoro-server")))
@@ -429,7 +432,10 @@ When PRESERVE-MACOS-PREFETCH is non-nil, retain queued macOS utterances."
               (when (equal audio-file kokoro-reader--audio-file)
                 (kokoro-reader--delete-audio-file))
               (message "%s finished" (or backend-label "Kokoro"))
-              (run-hooks 'kokoro-reader-player-finish-hook))))))
+              (let ((kokoro-reader--playback-succeeded-p
+                     (and (eq (process-status proc) 'exit)
+                          (zerop (process-exit-status proc)))))
+                (run-hooks 'kokoro-reader-player-finish-hook)))))))
     (setq kokoro-reader--player-process process)
     (message "%s speaking…" (or backend-label "Kokoro"))))
 

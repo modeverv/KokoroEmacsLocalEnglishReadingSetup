@@ -20,6 +20,32 @@
 (defvar-local my/read-dired-owner-frame nil
   "Frame owning this private my-read Dired buffer.")
 
+(defun my/read-focus-center ()
+  "Return keyboard focus to the current my-read frame's reading pane."
+  (interactive)
+  (let ((window (and (my/read-frame-p)
+                     (my/read-center-window))))
+    (unless (window-live-p window)
+      (user-error "このフレームにはmy-readの本文ペインがありません"))
+    (select-window window)))
+
+(defun my/read--filter-workspace-key-binding (binding)
+  "Enable BINDING in any my-read pane, excluding the minibuffer."
+  (when (and (my/read-frame-p) (not (minibufferp))) binding))
+
+(defvar my-read-workspace-keys-mode-map (make-sparse-keymap)
+  "Keys shared by every pane in a my-read frame.")
+(keymap-set my-read-workspace-keys-mode-map "C-c b"
+            '(menu-item "Return to reading pane" my/read-focus-center
+                        :filter my/read--filter-workspace-key-binding))
+
+(define-minor-mode my-read-workspace-keys-mode
+  "Provide frame-scoped my-read navigation from every buffer."
+  :global t
+  :keymap my-read-workspace-keys-mode-map)
+
+(my-read-workspace-keys-mode 1)
+
 (defun my/read--private-dired-buffer (source frame)
   "Return a private Dired buffer for SOURCE belonging to FRAME.
 SOURCE is a Dired buffer.  Keep private listings out of the ordinary
@@ -274,6 +300,9 @@ Dired buffer registry, including when the listing is reverted."
 
 ;; Keep re-evaluation effective in a live Emacs where `defvar' preserves the
 ;; existing map object.
+;; The review command now lives on `j' in the reading mode maps.
+(define-key my-read-center-tab-mode-map (kbd "f") nil)
+
 (keymap-set my-read-center-tab-mode-map "C-c t"
             '(menu-item "Switch my-read tab" my/read-toggle-center-tab
                         :filter my/read--filter-center-key-binding))

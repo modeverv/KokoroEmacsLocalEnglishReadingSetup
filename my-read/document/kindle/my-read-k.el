@@ -838,7 +838,7 @@ When SPEAK is non-nil, continue the existing sentence-reading flow."
 
 (defvar-keymap my-read-k-mode-map
   :doc "Keymap for the Kindle.app accessibility source."
-  "j" #'my-read-k-forward
+  "j" #'english-reading-mode-read-and-review
   "k" #'my-read-k-backward
   "SPC" #'english-reading-mode-speak-current-sentence
   "<down>" #'my-read-k-down
@@ -854,7 +854,7 @@ When SPEAK is non-nil, continue the existing sentence-reading flow."
 
 ;; `defvar-keymap' preserves an existing map on reload; install the new binding
 ;; explicitly so a live my-read-k session gains it without restarting Emacs.
-(keymap-set my-read-k-mode-map "j" #'my-read-k-forward)
+(keymap-set my-read-k-mode-map "j" #'english-reading-mode-read-and-review)
 (keymap-set my-read-k-mode-map "k" #'my-read-k-backward)
 (keymap-set my-read-k-mode-map "SPC"
             #'english-reading-mode-speak-current-sentence)

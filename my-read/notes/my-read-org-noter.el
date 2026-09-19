@@ -48,6 +48,27 @@
 (defvar my/read-org-noter--sync-timer nil
   "Idle timer used to synchronize the active Org-noter notes pane.")
 
+(defun my/read-org-noter--focus-inserted-note (original &rest arguments)
+  "Run ORIGINAL with ARGUMENTS, then focus the inserted my-read note.
+Org-noter's highlight handling can return focus to the document.  Select the
+notes only after successful insertion from this workspace's center pane."
+  (let* ((frame (selected-frame))
+         (session org-noter--session)
+         (from-center (and (my/read-frame-p frame)
+                           (eq (selected-window) (my/read-center-window frame))))
+         (notes (and from-center session
+                     (org-noter--session-notes-buffer session))))
+    (prog1 (apply original arguments)
+      (when (and from-center (not quit-flag)
+                 (frame-live-p frame) (buffer-live-p notes))
+        (let ((window (my/read-note-window frame)))
+          (when (and (window-live-p window)
+                     (eq (window-buffer window) notes))
+            (select-window window)))))))
+
+(advice-remove 'org-noter-insert-note #'my/read-org-noter--focus-inserted-note)
+(advice-add 'org-noter-insert-note :around #'my/read-org-noter--focus-inserted-note)
+
 (defun my/read-org-noter--slug (title)
   "Return a filesystem-safe directory name for TITLE."
   (let* ((title (string-trim (or title "Unknown source")))

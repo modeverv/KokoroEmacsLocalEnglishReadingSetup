@@ -2,6 +2,37 @@
 
 (require 'reader-test-helpers)
 
+(ert-deftest my-read-note-insertion-focus-and-return ()
+  (save-window-excursion
+    (let* ((frame (selected-frame))
+           (center (selected-window))
+           (notes-window (split-window-right))
+           (notes (generate-new-buffer " *note-focus-test*"))
+           (session (make-org-noter--session :notes-buffer notes))
+           (org-noter--session session))
+      (unwind-protect
+          (cl-letf (((symbol-function 'my/read-frame-p) (lambda (&optional _) t))
+                    ((symbol-function 'my/read-center-window) (lambda (&optional _) center))
+                    ((symbol-function 'my/read-note-window) (lambda (&optional _) notes-window)))
+            (set-window-buffer notes-window notes)
+            ;; Model Org-noter's final highlight step returning to the source.
+            (should (eq (my/read-org-noter--focus-inserted-note
+                         (lambda () (select-window center) 'inserted)) 'inserted))
+            (should (eq (selected-window) notes-window))
+            (should (eq (key-binding (kbd "C-c b")) #'my/read-focus-center))
+            (call-interactively (key-binding (kbd "C-c b")))
+            (should (eq (selected-window) center))
+            ;; An aborted insertion must not move focus.
+            (should-error
+             (my/read-org-noter--focus-inserted-note (lambda () (error "Cancelled"))))
+            (should (eq (selected-window) center)))
+        (kill-buffer notes)))))
+
+(ert-deftest my-read-workspace-return-key-is-frame-scoped ()
+  (cl-letf (((symbol-function 'my/read-frame-p) (lambda (&optional _) nil)))
+    (should-not (eq (key-binding (kbd "C-c b")) #'my/read-focus-center))
+    (should-error (my/read-focus-center) :type 'user-error)))
+
 (ert-deftest my-read-org-noter-uses-obsidian-read-directory ()
   (should
    (equal my/read-org-noter-directory

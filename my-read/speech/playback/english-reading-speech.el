@@ -113,6 +113,9 @@ successful playback handoff should not wait for its 50 ms polling interval."
              (not (process-live-p kokoro-reader--request-process))
              (not (process-live-p kokoro-reader--player-process)))
     (let ((english-reading-mode--exact-player-finish-p t))
+      (when kokoro-reader--playback-succeeded-p
+        ;; Keep the context object shared by start/finish listeners identical.
+        (nconc english-reading-mode--active-speech (list :completed t)))
       (english-reading-mode--finish english-reading-mode--active-speech))))
 
 (defun english-reading-mode--kokoro-busy-p ()

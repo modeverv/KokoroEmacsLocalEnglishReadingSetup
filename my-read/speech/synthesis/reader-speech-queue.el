@@ -18,6 +18,7 @@
 (defvar kokoro-reader-kokoro-prefetch-concurrency)
 (defvar kokoro-reader-macos-queued-start-hook)
 (defvar kokoro-reader-player-finish-hook)
+(defvar kokoro-reader--playback-succeeded-p)
 (declare-function kokoro-reader--ensure-server "kokoro-reader" (on-ready on-error))
 (declare-function kokoro-reader--ensure-macos-bridge "kokoro-reader" ())
 (declare-function kokoro-reader--delete-overlay "kokoro-reader" ())
@@ -305,7 +306,8 @@ REQUEST is a transport descriptor, never a mutation of queue internals."
            (kokoro-reader--delete-entry-audio-file entry)
            (when (plist-get entry :announced)
              (kokoro-reader--delete-overlay)
-             (run-hooks 'kokoro-reader-player-finish-hook))))
+             (let ((kokoro-reader--playback-succeeded-p t))
+               (run-hooks 'kokoro-reader-player-finish-hook)))))
 	("cancelled"
 	 (when entry
            (setq kokoro-reader--macos-prefetch-queue

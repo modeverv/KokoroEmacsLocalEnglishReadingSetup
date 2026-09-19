@@ -61,6 +61,67 @@
   (interactive)
   (reader-document-call :speak))
 
+(defvar-local english-reading-mode--review-state nil
+  "Last spoken sentence: its key, speech context and completion status.
+Stored in the speech buffer, including a PDF's extracted text buffer.")
+
+(defun english-reading-mode--review-key (beg end)
+  "Identify BEG..END independently of the cursor's position within it."
+  (save-excursion
+    (goto-char beg)
+    (skip-chars-forward " \t\n\r" end)
+    (setq beg (point))
+    (goto-char end)
+    (skip-chars-backward " \t\n\r" beg)
+    (list (buffer-chars-modified-tick) beg (point))))
+
+(defun english-reading-mode--review-started (context)
+  "Remember CONTEXT without moving the reader's cursor."
+  (when-let* ((buffer (plist-get context :buffer))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (setq english-reading-mode--review-state
+            (list :key (english-reading-mode--review-key
+                        (plist-get context :beg) (plist-get context :end))
+                  :context context :read nil)))))
+
+(defun english-reading-mode--review-finished (context)
+  "Mark CONTEXT read only after successful playback, never after a stop."
+  (when-let* ((buffer (plist-get context :buffer))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (when (eq context (plist-get english-reading-mode--review-state :context))
+        (setf (plist-get english-reading-mode--review-state :read)
+              (plist-get context :completed))))))
+
+(add-hook 'english-reading-mode-speech-start-hook
+          #'english-reading-mode--review-started)
+(add-hook 'english-reading-mode-speech-finish-hook
+          #'english-reading-mode--review-finished)
+
+(defun english-reading-mode-read-and-review ()
+  "Read this sentence, or advance and read once if it has finished.
+Stay on the spoken sentence for translation and vocabulary review.  Pressing
+the key during playback does nothing.  Stopped or failed speech can be retried.
+Sentence state lasts only in this buffer and is invalidated by text changes."
+  (interactive)
+  (when english-reading-mode--continuous-state
+    (english-reading-mode-stop-continuous t))
+  (pcase-let* ((`(,_text ,buffer ,beg ,end)
+                (or (reader-document-current-sentence)
+                    (user-error "No sentence at point")))
+               (state (buffer-local-value 'english-reading-mode--review-state buffer))
+               (same (equal (plist-get state :key)
+                            (with-current-buffer buffer
+                              (english-reading-mode--review-key beg end)))))
+    (cond
+     ((and same (plist-get state :context)
+           (eq (plist-get state :context) english-reading-mode--active-speech))
+      (message "Reading this sentence…"))
+     ((and same (plist-get state :read))
+      (reader-document-call :continue))
+     (t (english-reading-mode-speak-current-sentence)))))
+
 (defun english-reading-mode-next-sentence ()
   "Move to the next sentence without reading it."
   (interactive)
@@ -102,7 +163,7 @@
 
 (defvar-keymap english-reading-mode-map
   :doc "Keymap for `english-reading-mode'."
-  "j" '(menu-item "Move to next sentence" english-reading-mode-next-sentence
+  "j" '(menu-item "Read and review sentence" english-reading-mode-read-and-review
                   :filter english-reading-mode--filter-key-binding)
   "k" '(menu-item "Move to previous sentence" english-reading-mode-previous-sentence
                   :filter english-reading-mode--filter-key-binding)
@@ -122,8 +183,8 @@
 ;; Keep re-evaluation effective in a live Emacs where `defvar-keymap' preserves
 ;; the already existing map object.
 (keymap-set english-reading-mode-map "j"
-            '(menu-item "Move to next sentence"
-                        english-reading-mode-next-sentence
+            '(menu-item "Read and review sentence"
+                        english-reading-mode-read-and-review
                         :filter english-reading-mode--filter-key-binding))
 
 (keymap-set english-reading-mode-map "k"
@@ -164,8 +225,8 @@
 (define-minor-mode english-reading-mode
   "Read English text or a DocView PDF with Kokoro or macOS speech.
 
-`j' and `k' move to the next and previous sentences, `SPC' reads the sentence
-at point, and `s' reads continuously.  The macOS backend groups continuous
+`j' reads and stays for review, advancing on the next press after completion.
+`k' moves to the previous sentence, `SPC' rereads it, and `s' reads continuously.  The macOS backend groups continuous
 speech into short multi-sentence chunks.  `i' is reserved for Org-noter.  The
 buffer is read-only while this mode is active.  Speech lifecycle is exposed
 through `english-reading-mode-speech-start-hook' and
