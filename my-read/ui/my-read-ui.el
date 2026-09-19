@@ -499,6 +499,29 @@ Do not assume that a particular Lookup fork exposes
       (setq-local my/read-center-tab-placeholder-type type))
     buffer))
 
+(defun my/read--hide-utility-mode-lines (frame)
+  "Hide mode lines in FRAME's right column, including Lookup splits.
+Use window parameters so the same buffers keep their normal mode lines
+when displayed outside the reader's utility column."
+  (let ((center (my/read-center-window frame)))
+    (when (and (my/read-frame-p frame) (window-live-p center))
+      (dolist (window (window-list frame 'no-minibuf))
+        (let ((hidden (window-parameter window 'my-read-hidden-mode-line)))
+          (if (>= (car (window-edges window))
+                  (nth 2 (window-edges center)))
+              (progn
+                (unless hidden
+                  (set-window-parameter
+                   window 'my-read-hidden-mode-line
+                   (list (window-parameter window 'mode-line-format))))
+                (unless (eq (window-parameter window 'mode-line-format) 'none)
+                  (set-window-parameter window 'mode-line-format 'none)))
+            (when hidden
+              (set-window-parameter window 'mode-line-format (car hidden))
+              (set-window-parameter window 'my-read-hidden-mode-line nil))))))))
+
+(add-hook 'window-state-change-functions #'my/read--hide-utility-mode-lines)
+
 (defun my/read--setup-frame (frame &optional kindle-buffer)
   "Build the my-read layout inside FRAME.
 When KINDLE-BUFFER is live, expose it with the center document tabs."
@@ -537,6 +560,7 @@ When KINDLE-BUFFER is live, expose it with the center document tabs."
       (set-frame-parameter frame 'my-reading-kindle-buffer kindle-buffer)
       (set-frame-parameter frame 'my-reading-translate-window translate-window)
       (set-frame-parameter frame 'my-reading-note-window note-window)
+      (my/read--hide-utility-mode-lines frame)
       ;; Lookup otherwise honors the user's global fractional height (0.7 in
       ;; this setup), which leaves too little room for dictionary content.
       (set-frame-parameter frame 'lookup-window-height
