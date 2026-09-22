@@ -54,6 +54,9 @@ callbackは `reader-speech-queue-attach-process` / `reader-speech-queue-request-
 
 - cache keyに正規化後text・backend・voice・rate/speed・volume・接続先を反映する。
 - 発話とprefetchで同じsentence/chunkを生成する。PDFのページ境界を跨がない。
+  Kindleの次ページを一時バッファで分割する場合も、元バッファの音声backend・
+  文数設定・syntax tableを引き継ぐ。macOS固定の複数文チャンクを作ると、
+  Kokoro/HTTP経由の1文再生とキーが一致せず、ページ境界で停止・再生成が起きる。
 - reserve/chunk/loadedは再生完了ではない。実deviceのfinishedだけが正常な文送りを許可する。
 - stop後のqueue entryと古いsession/processからの結果を破棄する。
 - remote playbackのsession、delivery capability、chunk順序・重複拒否を維持する。

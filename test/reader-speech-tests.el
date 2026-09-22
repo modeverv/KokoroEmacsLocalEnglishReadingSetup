@@ -855,11 +855,39 @@
              (text . "Next page one. Next page two."))
             ((fingerprint . "later")
              (text . "Later page one. Later page two."))))
-         (english-reading-mode-macos-continuous-sentence-count 2))
+         (english-reading-mode-macos-continuous-sentence-count 2)
+         (kokoro-reader-backend 'macos))
      (should
       (equal (my-read-k--continuous-prefetch-page-texts nil 2)
              '("Next page one. Next page two."
                "Later page one. Later page two."))))))
+
+(ert-deftest my-read-k-page-prefetch-matches-source-backend-and-local-chunk-size ()
+  (my-read-k-test--isolated
+   (dolist (backend '(kokoro irodori macos))
+     (with-temp-buffer
+       (setq-local kokoro-reader-backend backend)
+       (setq-local sentence-end-double-space nil)
+       ;; A buffer-local override must survive the temporary prefetch buffer.
+       (setq-local english-reading-mode-macos-continuous-sentence-count 3)
+       (let* ((page "First sentence. Second sentence. Third sentence. Fourth sentence.")
+              (my-read-k--last-fingerprint "current")
+              (my-read-k--prefetch-source-fingerprint "current")
+              (my-read-k--prefetch-queue
+               `(((fingerprint . "future") (text . ,page))))
+              (english-reading-mode--continuous-state
+               (list :buffer (current-buffer)))
+              (prefetched (my-read-k--continuous-prefetch-page-texts nil 4)))
+         ;; Materialize the page exactly as normal Kindle playback does.
+         (insert (my-read-k--one-sentence-per-line page))
+         (let ((playback (english-reading-mode--speech-texts-after-position
+                          (current-buffer) (point-min) 4)))
+           (should (equal prefetched playback))
+           (should (= (length prefetched) (if (eq backend 'macos) 2 4)))
+           (should (equal (car prefetched)
+                          (if (eq backend 'macos)
+                              "First sentence. Second sentence. Third sentence."
+                            "First sentence.")))))))))
 
 (ert-deftest my-read-k-continuous-reading-turns-page-with-continuation-intent ()
   (my-read-k-test--isolated

@@ -383,16 +383,23 @@ When ERROR-P is non-nil, mark the Kindle header as disconnected."
               my-read-k--last-fingerprint)))
 
 (defun my-read-k--continuous-prefetch-page-texts (_context count)
-  "Return up to COUNT speech chunks from cached future Kindle pages."
+  "Return up to COUNT speech chunks from cached future Kindle pages.
+Use the source buffer's chunking settings so lookahead keys match playback."
   (when (and (> count 0) (my-read-k--prefetch-valid-p))
-    (let (chunks)
+    (let ((backend kokoro-reader-backend)
+          (sentence-count english-reading-mode-macos-continuous-sentence-count)
+          (source-syntax (syntax-table))
+          chunks)
       (dolist (page my-read-k--prefetch-queue)
         (when (< (length chunks) count)
           (when-let* ((text (my-read-k--alist-get 'text page)))
             (with-temp-buffer
               (insert (my-read-k--one-sentence-per-line text))
+              (set-syntax-table source-syntax)
               (setq-local sentence-end-double-space nil)
-              (setq-local kokoro-reader-backend 'macos)
+              (setq-local kokoro-reader-backend backend)
+              (setq-local english-reading-mode-macos-continuous-sentence-count
+                          sentence-count)
               (let ((english-reading-mode--continuous-state
                      (list :buffer (current-buffer))))
                 (setq chunks
