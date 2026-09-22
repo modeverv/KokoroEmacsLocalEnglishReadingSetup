@@ -11,12 +11,10 @@ import re
 import select
 import socket
 import subprocess
-import tempfile
 import threading
 import wave
 import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 RATE = 24000
 MAX_BODY = 100_000
@@ -85,7 +83,7 @@ def validate(data):
                 rate=rate, lang_code=lang_code)
 
 
-def split_text(text, limit=240):
+def split_text(text, limit=240, protected_words=()):
     """Keep punctuation, bound long sentences, never drop non-whitespace text."""
     for sentence in re.split(r"(?<=[。！？.!?])\s*|\n+", text):
         sentence = sentence.strip()
@@ -93,6 +91,10 @@ def split_text(text, limit=240):
             cut = sentence.rfind(" ", 0, limit + 1)
             if cut < limit // 2:
                 cut = limit
+            for word in protected_words:
+                start = sentence.find(word, max(0, cut - len(word) + 1), cut + len(word))
+                if 0 < start < cut < start + len(word):
+                    cut = start
             yield sentence[:cut]
             sentence = sentence[cut:].lstrip()
         if sentence:
@@ -106,7 +108,11 @@ Model backends retain sentence-sized jobs. Reader requests already contain
 bounded visual chunks; batching here does not change their playback IDs.
 """
     pending = ""
-    for text in split_text(options["text"], limit):
+    words = ()
+    if options["backend"] == "macos":
+        from speech_http.pronunciation import DictionaryStore
+        words = [entry["word"] for entry in DictionaryStore().read()["entries"]]
+    for text in split_text(options["text"], limit, words):
         if options["backend"] != "macos":
             yield text
             continue
@@ -149,13 +155,8 @@ def synthesize(text, options):
     """Return canonical PCM WAV; model backends run on their serial worker."""
     backend, voice, speed = (options[k] for k in ("backend", "voice", "speed"))
     if backend == "macos":
-        with tempfile.TemporaryDirectory(prefix="reader-speech-") as directory:
-            source, output = Path(directory) / "text.txt", Path(directory) / "speech.wav"
-            source.write_text(text, encoding="utf-8")
-            subprocess.run(["/usr/bin/say", "-v", voice, "-r", str(options.get("rate") or round(250 * speed)),
-                            "-f", str(source), "-o", str(output), "--file-format=WAVE",
-                            "--data-format=LEI16@24000"], check=True, capture_output=True, timeout=180)
-            wav = output.read_bytes()
+        from speech_http.native import synthesize as native_synthesize
+        wav = native_synthesize(text, voice, options.get("rate") or round(250 * speed))
     elif backend == "irodori":
         import irodori_backend
         wav = irodori_backend.synthesize(text, voice, speed)
@@ -175,7 +176,7 @@ class SpeechServer(ThreadingHTTPServer):
         self.token = token
         self.playback_targets = playback_targets or {}
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="speech-model")
-        # say runs in isolated processes and has substantial startup latency.
+        # Each thread owns a resident AVSpeechSynthesizer bridge process.
         # Two prefetch requests can render concurrently without blocking the
         # single-threaded MLX model worker or exceeding the four HTTP slots.
         self.macos_worker = ThreadPoolExecutor(max_workers=2, thread_name_prefix="speech-macos")
@@ -205,8 +206,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
+            from speech_http.pronunciation import DictionaryStore
+            try:
+                revision = DictionaryStore().read()["revision"]
+            except (ValueError, OSError):
+                return self.reply(503, {"ok": False, "error": "invalid pronunciation dictionary"})
             self.reply(200, {"ok": True, "service": "reader-speech", "protocol": 1,
                              "sample_rate": RATE, "pid": os.getpid(),
+                             "macos_engine": "AVSpeechSynthesizer",
+                             "dictionary_revision": revision,
+                             "dictionary_url": getattr(self.server, "dictionary_url", None),
                              "host": self.server.server_address[0], "port": self.server.server_port})
         else:
             self.reply(404, {"error": "not found"})
@@ -301,12 +310,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--dictionary-port", type=int, help="loopback dictionary UI port (default: speech port + 2)")
     args = parser.parse_args()
     from speech_http.delivery import targets_from_json
     targets = targets_from_json(os.getenv("READER_SPEECH_PLAYBACK_TARGETS", "{}"))
-    with SpeechServer((args.host, args.port), token=os.getenv("READER_SPEECH_TOKEN", ""),
+    from speech_http.dictionary_ui import running_ui
+    dictionary_port = args.dictionary_port or args.port + 2
+    with running_ui(dictionary_port), SpeechServer((args.host, args.port), token=os.getenv("READER_SPEECH_TOKEN", ""),
                       playback_targets=targets) as server:
+        server.dictionary_url = f"http://127.0.0.1:{dictionary_port}"
         print(f"Speech server http://{args.host}:{args.port}", flush=True)
+        print(f"Pronunciation dictionary {server.dictionary_url}", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

@@ -16,7 +16,9 @@ class CompanionLayoutTests(unittest.TestCase):
         expected = {"docs", "companion-implementations", "my-read", "my-read.el",
                     "README.md", "LICENSE", "Makefile", ".gitignore", "mise.toml",
                     "uv.lock", "test", "scripts"}
-        actual = {p.name for p in ROOT.iterdir() if p.name not in {".git", ".DS_Store"}}
+        local_data = {".git", ".DS_Store", "pronunciations.json", "pronunciations.lock"}
+        actual = {p.name for p in ROOT.iterdir()
+                  if p.name not in local_data and not p.name.startswith(".pronunciations-")}
         self.assertEqual(actual, expected)
 
     def test_uv_uses_one_root_lockfile(self):

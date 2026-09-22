@@ -207,6 +207,14 @@ In EPUB this reads the current chapter.  For PDF, select extracted text."
                   :buffer "*Speech Server GUI*"
                   :command (list reader-http-speech-python "-m" "speech_http.gui"))))
 
+(defun reader-http-speech-open-dictionary ()
+  "Open the local FastAPI pronunciation dictionary editor."
+  (interactive)
+  (let ((default-directory reader-http-speech--directory))
+    (make-process :name "reader-speech-dictionary-launcher" :noquery t
+                  :buffer "*Speech Dictionary*"
+                  :command (list reader-http-speech-python "-m" "speech_http.dictionary_ui"))))
+
 (defvar reader-http-speech-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c h r") #'reader-http-speech-read)

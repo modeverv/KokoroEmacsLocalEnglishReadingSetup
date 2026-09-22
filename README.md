@@ -121,6 +121,12 @@ EmacsなしのGUI起動と、同じMacからLANアドレス経由の音声取得
 別のLAN端末からの疎通確認は未完了です。
 [詳しい起動手順・API・認証・検証結果](docs/http-speech.md)を参照してください。
 
+macOS音声はHTTP・直接合成ともに同じAVSpeechSynthesizerブリッジを使います。
+`make speech-dictionary`（または `M-x reader-http-speech-open-dictionary`）で
+[読み辞書Web UI](http://127.0.0.1:8767/)を開き、単語とひらがなだけで読みを登録できます。
+IPA候補の採用判定は自動で行い、不確かな場合はかな読みに戻します。
+保存先・反映方法・Kyokoの実測結果は[読み辞書](docs/pronunciation-dictionary.md)を参照してください。
+
 ## 動作画面
 
 実際に動作中のmy-readフレームを撮影したものです。左側の

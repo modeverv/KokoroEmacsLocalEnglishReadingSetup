@@ -1,7 +1,8 @@
 # HTTP読み上げサーバー
 
 Emacsの本文・言語・音声・速度をHTTPで送り、生成されたWAVチャンクを順番に再生します。
-GUIはmacOSのネイティブAppKitアプリです。Web GUIと8766番の管理HTTPサーバーは廃止しました。
+起動・停止のGUIはmacOSのネイティブAppKitアプリです。旧8766番の管理HTTPサーバーは廃止しました。
+読み辞書の登録には、生成サーバーと一緒に起動するFastAPI Web UI（localhost:8767）を使います。
 
 Emacsと別端末で音を出す場合は、[生成・再生サーバーの分離](remote-playback.md)を利用できます。
 既存の `/v1/speech/stream` は要求元へWAVを返し、追加の `/v1/speech/deliver` は登録済みの再生先へ直接転送します。
@@ -52,7 +53,10 @@ launchdの起動定義・ログは `~/Library/Caches/ReaderSpeechServer/8765/` �
 
 既存の `companion-implementations/.venv`（Python 3.11以上）を使います。音声合成側に `ffmpeg`、
 独立した再生クライアントには `ffplay` が必要です。通常のEmacs読書は既存の常駐音声ブリッジで再生します。
-Kokoro/Irodoriは既存のMLX環境・モデル、macOS音声は `/usr/bin/say` を使用します。
+Kokoro/Irodoriは既存のMLX環境・モデルを使います。macOS音声はネイティブブリッジと同じ
+`AVSpeechSynthesizer` の `writeUtterance:toBufferCallback:` を使用します。`/usr/bin/say` は呼びません。
+HTTPのmacOSワーカー2本は、それぞれ常駐ブリッジを保持して音声をファイルに生成します。
+音声選択・速度変換・辞書適用は、Emacsの直接合成と同じObjective-C実装です。
 
 ネイティブアプリのビルドにはAppleのCommand Line Toolsが必要です。
 `make speech-app-build` でビルドでき、`make speech-gui` は未ビルド・ソース更新時に自動ビルドします。
@@ -92,7 +96,9 @@ Emacsのネイティブ音声ブリッジは、ダウンロードしたWAVの連
 ```
 
 言語変更は読書本文ペインで行います。設定変更時に古い先読みを破棄し、`s` / `SPC` で再開すると
-新しい設定を送ります。macOS音声は `rate` に語/分をそのまま送るため、540なども変換せず反映します。
+新しい設定を送ります。macOS音声は `rate` に既存の語/分設定（540など）をそのまま送ります。
+ブリッジ内では直接合成と同じ式 `AVSpeechUtteranceDefaultSpeechRate * rate / 180` で
+AVSpeechの速度範囲に変換・制限します。旧 `say` と実時間の速さが完全に一致する保証はありません。
 Kokoro/Irodoriは `speed` に0.5〜2.0の倍率を送ります。声・バックエンド・英語の発音言語コードも
 バッファの設定を毎回取得します。日本語Irodoriは既存の [Irodori手順](README-irodori.md) を参照してください。
 
@@ -215,7 +221,7 @@ LAN外で使用する際はHTTPSプロキシ等で暗号化してください。
 
 ## 連続読み上げの生成待ち対策
 
-macOS音声は短い文を最大240文字までまとめて生成し、`say` の起動回数を減らします。
+macOS音声は短い文を最大240文字までまとめて生成し、常駐AVSpeechSynthesizerへの要求回数を減らします。
 同時に2件まで生成できる専用ワーカーを使い、Kokoro/Irodoriのモデル処理は従来どおり直列です。
 すでに24kHz・モノラルPCM16のWAVは再変換せず、そのまま転送します。
 Emacsの表示・ハイライト区間と読み上げ速度は変更しません。

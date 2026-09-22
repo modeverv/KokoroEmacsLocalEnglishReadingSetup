@@ -19,7 +19,7 @@ my-read-k-build:
 	swift build --package-path companion-implementations/my-read-k2/bridge --configuration release
 
 my-read-speech-build:
-	clang -fobjc-arc -O2 -Wall -Wextra \
+	clang -fobjc-arc -O2 -Wall -Wextra -mmacosx-version-min=13.0 \
 		-framework Foundation -framework AVFoundation \
 		companion-implementations/macos-speech-bridge/main.m \
 		-o companion-implementations/macos-speech-bridge/my-read-speech-bridge
@@ -60,6 +60,10 @@ speech-server:
 
 speech-gui:
 	$(PYTHON) -m speech_http.gui
+
+.PHONY: speech-dictionary
+speech-dictionary:
+	$(PYTHON) -m speech_http.dictionary_ui
 
 speech-http-test:
 	$(PYTHON) -m unittest discover -s test -p test_speech_http.py -v

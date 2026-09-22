@@ -9,6 +9,7 @@
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSMutableArray<AVAudioPCMBuffer *> *> *buffers;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, AVSpeechSynthesizer *> *renderers;
 @property(nonatomic, strong) NSMutableSet<NSNumber *> *completed;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *outputPaths;
 @property(nonatomic, strong) NSMutableArray<NSNumber *> *scheduledIdentifiers;
 @property(nonatomic, strong) NSNumber *playingIdentifier;
 @property(nonatomic) BOOL engineConfigured;
@@ -16,6 +17,9 @@
 @property(nonatomic) BOOL startDelayScheduled;
 @property(nonatomic) NSUInteger warmupTarget;
 @property(nonatomic) NSUInteger generationToken;
+@property(nonatomic, strong) NSData *dictionaryData;
+@property(nonatomic, strong) NSArray<NSDictionary *> *dictionaryEntries;
+@property(nonatomic, strong) NSString *dictionaryError;
 @end
 
 @implementation MyReadSpeechRuntime
@@ -28,10 +32,92 @@
         _buffers = [NSMutableDictionary dictionary];
         _renderers = [NSMutableDictionary dictionary];
         _completed = [NSMutableSet set];
+        _outputPaths = [NSMutableDictionary dictionary];
         _scheduledIdentifiers = [NSMutableArray array];
         _warmupTarget = 1;
+        [self reloadDictionary];
     }
     return self;
+}
+
+- (void)reloadDictionary {
+    NSString *path = NSProcessInfo.processInfo.environment[@"READER_SPEECH_DICTIONARY"];
+    if (!path.length) {
+        NSString *root = NSBundle.mainBundle.executablePath.stringByResolvingSymlinksInPath;
+        for (NSUInteger level = 0; level < 3; level++) root = root.stringByDeletingLastPathComponent;
+        path = [root stringByAppendingPathComponent:@"pronunciations.json"];
+    }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        self.dictionaryData = nil;
+        self.dictionaryEntries = @[];
+        self.dictionaryError = nil;
+        return;
+    }
+    NSError *error = nil;
+    NSData *data = [NSData dataWithContentsOfFile:path options:0 error:&error];
+    if (data && [data isEqualToData:self.dictionaryData]) {
+        self.dictionaryError = nil;
+        return;
+    }
+    id root = data.length <= 2 * 1024 * 1024 && data ?
+        [NSJSONSerialization JSONObjectWithData:data options:0 error:&error] : nil;
+    BOOL valid = [root isKindOfClass:[NSDictionary class]] &&
+        [root[@"version"] isEqual:@1] && [root[@"entries"] isKindOfClass:[NSArray class]];
+    if (valid) for (id entry in root[@"entries"]) {
+        if (![entry isKindOfClass:[NSDictionary class]] ||
+            ![entry[@"word"] isKindOfClass:[NSString class]] || ![entry[@"word"] length] ||
+            ![entry[@"reading"] isKindOfClass:[NSString class]] || ![entry[@"reading"] length]) {
+            valid = NO;
+            break;
+        }
+    }
+    if (!valid) {
+        self.dictionaryError = error.localizedDescription ?: @"invalid pronunciation dictionary";
+        return;
+    }
+    self.dictionaryData = data;
+    self.dictionaryError = nil;
+    self.dictionaryEntries = [root[@"entries"] sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        NSUInteger x = [a[@"word"] length], y = [b[@"word"] length];
+        return x > y ? NSOrderedAscending : x < y ? NSOrderedDescending : NSOrderedSame;
+    }];
+}
+
+- (NSMutableAttributedString *)pronouncedText:(NSString *)text voice:(AVSpeechSynthesisVoice *)voice {
+    NSMutableAttributedString *result = [[NSMutableAttributedString alloc] init];
+    NSCharacterSet *latin = [NSCharacterSet characterSetWithCharactersInString:
+        @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"];
+    NSUInteger offset = 0;
+    while (offset < text.length) {
+        NSDictionary *match = nil;
+        if ([voice.language hasPrefix:@"ja"]) for (NSDictionary *entry in self.dictionaryEntries) {
+            NSString *word = entry[@"word"];
+            if (word.length > text.length - offset ||
+                ![[text substringWithRange:NSMakeRange(offset, word.length)] isEqualToString:word]) continue;
+            if ([latin characterIsMember:[word characterAtIndex:0]] && offset &&
+                [latin characterIsMember:[text characterAtIndex:offset - 1]]) continue;
+            NSUInteger end = offset + word.length;
+            if ([latin characterIsMember:[word characterAtIndex:word.length - 1]] && end < text.length &&
+                [latin characterIsMember:[text characterAtIndex:end]]) continue;
+            match = entry;
+            break;
+        }
+        if (match) {
+            BOOL ipa = [match[@"strategy"] isEqual:@"ipa"] && [match[@"ipa"] isKindOfClass:[NSString class]] &&
+                [match[@"voice_identifier"] isEqual:voice.identifier] &&
+                [match[@"os_version"] isEqual:NSProcessInfo.processInfo.operatingSystemVersionString];
+            NSString *spoken = ipa ? match[@"word"] : match[@"reading"];
+            if (!ipa) spoken = [spoken stringByApplyingTransform:NSStringTransformHiraganaToKatakana reverse:NO];
+            NSDictionary *attributes = ipa ? @{AVSpeechSynthesisIPANotationAttribute: match[@"ipa"]} : @{};
+            [result appendAttributedString:[[NSAttributedString alloc] initWithString:spoken attributes:attributes]];
+            offset += [match[@"word"] length];
+        } else {
+            NSRange range = [text rangeOfComposedCharacterSequenceAtIndex:offset];
+            [result appendAttributedString:[[NSAttributedString alloc] initWithString:[text substringWithRange:range]]];
+            offset = NSMaxRange(range);
+        }
+    }
+    return result;
 }
 
 - (void)emit:(NSString *)event id:(NSNumber *)identifier message:(NSString *)message
@@ -42,6 +128,8 @@
     if (voice) {
         payload[@"voice"] = voice.name;
         payload[@"language"] = voice.language;
+        payload[@"voiceIdentifier"] = voice.identifier;
+        payload[@"osVersion"] = NSProcessInfo.processInfo.operatingSystemVersionString;
     }
     if (rate) payload[@"rate"] = rate;
     [self writeEvent:payload];
@@ -118,7 +206,18 @@
         self.engine = [[AVAudioEngine alloc] init];
         self.player = [[AVAudioPlayerNode alloc] init];
         [self.engine attachNode:self.player];
-        [self.engine connect:self.player to:self.engine.mainMixerNode format:format];
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 270000
+        if (@available(macOS 27.0, *)) {
+            NSError *connectionError = nil;
+            if (![self.engine connect:self.player to:self.engine.mainMixerNode format:format error:&connectionError]) {
+                [self emit:@"error" id:identifier message:connectionError.localizedDescription voice:nil rate:nil];
+                return NO;
+            }
+        } else
+#endif
+        {
+            [self.engine connect:self.player to:self.engine.mainMixerNode format:format];
+        }
         [self.engine prepare];
     } @catch (NSException *exception) {
         [self emit:@"error" id:identifier message:exception.reason voice:nil rate:nil];
@@ -137,7 +236,18 @@
     if (self.playingIdentifier || self.scheduledIdentifiers.count == 0) return;
     self.playingIdentifier = self.scheduledIdentifiers.firstObject;
     [self emit:@"started" id:self.playingIdentifier message:nil voice:nil rate:nil];
-    [self.player play];
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 270000
+    if (@available(macOS 27.0, *)) {
+        NSError *error = nil;
+        if (![self.player playAndReturnError:&error]) {
+            [self emit:@"error" id:self.playingIdentifier message:error.localizedDescription voice:nil rate:nil];
+            self.playingIdentifier = nil;
+        }
+    } else
+#endif
+    {
+        [self.player play];
+    }
 }
 
 - (void)beginPlaybackIfReady {
@@ -222,6 +332,27 @@
         return;
     }
     [self.renderers removeObjectForKey:identifier];
+    NSString *output = self.outputPaths[identifier];
+    if (output) {
+        NSArray<AVAudioPCMBuffer *> *chunks = self.buffers[identifier];
+        NSError *error = nil;
+        @autoreleasepool {
+            AVAudioFile *file = chunks.count ? [[AVAudioFile alloc]
+                initForWriting:[NSURL fileURLWithPath:output]
+                settings:chunks.firstObject.format.settings error:&error] : nil;
+            for (AVAudioPCMBuffer *chunk in chunks) {
+                if (!file || ![file writeFromBuffer:chunk error:&error]) break;
+            }
+        }
+        [self emit:(!chunks.count || error) ? @"error" : @"rendered" id:identifier
+            message:error.localizedDescription ?: (!chunks.count ? @"speech synthesis produced no audio" : nil)
+            voice:nil rate:nil];
+        [self.outputPaths removeObjectForKey:identifier];
+        [self.buffers removeObjectForKey:identifier];
+        [self.renderOrder removeObject:identifier];
+        [self flushCompletedInOrder:token];
+        return;
+    }
     [self emitLoaded:identifier buffers:self.buffers[identifier]];
     [self.completed addObject:identifier];
     [self flushCompletedInOrder:token];
@@ -248,15 +379,46 @@
         return;
     }
     AVSpeechSynthesisVoice *voice = [self voiceNamed:command[@"voice"]];
+    if (!voice) {
+        [self emit:@"error" id:identifier message:@"requested voice is unavailable" voice:nil rate:nil];
+        return;
+    }
     NSNumber *rate = @([self rateForWordsPerMinute:command[@"rate"]]);
     NSNumber *requestedVolume = command[@"volume"];
     float volume = requestedVolume ? MIN(MAX(requestedVolume.floatValue, 0.0f), 1.0f) : 1.0f;
-    AVSpeechUtterance *utterance = [AVSpeechUtterance speechUtteranceWithString:text];
+    [self reloadDictionary];
+    BOOL useDictionary = !command[@"useDictionary"] || [command[@"useDictionary"] boolValue];
+    if (useDictionary && self.dictionaryError) {
+        [self emit:@"error" id:identifier message:self.dictionaryError voice:nil rate:nil];
+        return;
+    }
+    NSMutableAttributedString *attributed = useDictionary ? [self pronouncedText:text voice:voice] :
+        [[NSMutableAttributedString alloc] initWithString:text];
+    // Explicit spans are used by the local pronunciation capability probe.
+    for (NSDictionary *span in command[@"ipaSpans"]) {
+        NSUInteger location = [span[@"location"] unsignedIntegerValue];
+        NSUInteger length = [span[@"length"] unsignedIntegerValue];
+        if (location <= attributed.length && length <= attributed.length - location &&
+            [span[@"ipa"] isKindOfClass:[NSString class]]) {
+            [attributed addAttribute:AVSpeechSynthesisIPANotationAttribute value:span[@"ipa"]
+                range:NSMakeRange(location, length)];
+        }
+    }
+    AVSpeechUtterance *utterance = [AVSpeechUtterance speechUtteranceWithAttributedString:attributed];
     utterance.voice = voice;
     utterance.rate = rate.floatValue;
     utterance.volume = volume;
 
     if (![self reserveIdentifier:identifier]) return;
+    if ([command[@"command"] isEqualToString:@"render"]) {
+        NSString *path = command[@"path"];
+        if (![path isKindOfClass:[NSString class]] || !path.isAbsolutePath) {
+            [self discardIdentifier:identifier];
+            [self emit:@"error" id:identifier message:@"render requires an absolute output path" voice:nil rate:nil];
+            return;
+        }
+        self.outputPaths[identifier] = path;
+    }
     AVSpeechSynthesizer *renderer = [[AVSpeechSynthesizer alloc] init];
     self.renderers[identifier] = renderer;
     NSUInteger token = self.generationToken;
@@ -315,6 +477,7 @@
     [self.renderOrder removeObject:identifier];
     [self.buffers removeObjectForKey:identifier];
     [self.completed removeObject:identifier];
+    [self.outputPaths removeObjectForKey:identifier];
     [self emit:@"cancelled" id:identifier message:nil voice:nil rate:nil];
     [self flushCompletedInOrder:self.generationToken];
 }
@@ -337,6 +500,7 @@
     [self.buffers removeAllObjects];
     [self.renderers removeAllObjects];
     [self.completed removeAllObjects];
+    [self.outputPaths removeAllObjects];
     [self.scheduledIdentifiers removeAllObjects];
     self.playingIdentifier = nil;
     self.holdPlayback = NO;
@@ -347,7 +511,7 @@
 
 - (void)handleCommand:(NSDictionary *)command {
     NSString *name = command[@"command"];
-    if ([name isEqualToString:@"enqueue"]) {
+    if ([name isEqualToString:@"enqueue"] || [name isEqualToString:@"render"]) {
         [self enqueue:command];
     } else if ([name isEqualToString:@"reserve"]) {
         NSNumber *identifier = command[@"id"];
@@ -376,6 +540,10 @@
                              voice.name, voice.language, voice.identifier]];
         }
         [self emit:@"voices" id:nil message:[rows componentsJoinedByString:@"\n"] voice:nil rate:nil];
+    } else if ([name isEqualToString:@"describeVoice"]) {
+        AVSpeechSynthesisVoice *voice = [self voiceNamed:command[@"voice"]];
+        [self emit:voice ? @"voice" : @"error" id:command[@"id"]
+            message:voice ? nil : @"requested voice is unavailable" voice:voice rate:nil];
     } else {
         [self emit:@"error" id:command[@"id"]
             message:[NSString stringWithFormat:@"unknown command: %@", name ?: @"(nil)"]

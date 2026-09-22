@@ -1,6 +1,9 @@
 __pycache__/
 .DS_Store
 *.elc
+/pronunciations.json
+/pronunciations.lock
+/.pronunciations-*
 /companion-implementations/.venv/
 /companion-implementations/.playback-venv/
 /companion-implementations/my-read-k2/bridge/.build/
