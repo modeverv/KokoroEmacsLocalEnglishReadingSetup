@@ -1,0 +1,114 @@
+{
+  "engine": "qwen",
+  "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+  "load_seconds": 2.3907414579880424,
+  "reference_sha256": "5dea6d756171d91adfed81e949e0671ea478fad03bafbf786c97894917f28d1c",
+  "settings": {
+    "lang_code": "Japanese",
+    "ref_text": "みなさん、お久しぶり！ 惣流・アスカ・ラングレーです！",
+    "temperature": 0.9,
+    "top_k": 50,
+    "top_p": 1.0,
+    "repetition_penalty": 1.5,
+    "max_tokens": 2048
+  },
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "versions": {
+    "mlx": "0.32.2",
+    "mlx-audio": "0.4.7",
+    "numpy": "2.4.6"
+  },
+  "runs": [
+    {
+      "file": "qwen-00-short.wav",
+      "text": "こんにちは。今日は、音声合成の聞き比べをします。窓の外には青い空が広がっています。",
+      "phase": "cold",
+      "generation_seconds": 8.710481666988926,
+      "write_seconds": 0.001725749985780567,
+      "audio_seconds": 6.96,
+      "sample_rate": 24000,
+      "rtf": 1.25150598663634,
+      "peak": 0.623645544052124,
+      "rms": 0.07300505042076111,
+      "clipped_fraction": 0.0
+    },
+    {
+      "file": "qwen-01-short.wav",
+      "text": "こんにちは。今日は、音声合成の聞き比べをします。窓の外には青い空が広がっています。",
+      "phase": "warm",
+      "generation_seconds": 7.3820214589941315,
+      "write_seconds": 0.029152457980671898,
+      "audio_seconds": 6.96,
+      "sample_rate": 24000,
+      "rtf": 1.060635267096858,
+      "peak": 0.623645544052124,
+      "rms": 0.07300505042076111,
+      "clipped_fraction": 0.0
+    },
+    {
+      "file": "qwen-02-short.wav",
+      "text": "こんにちは。今日は、音声合成の聞き比べをします。窓の外には青い空が広がっています。",
+      "phase": "warm",
+      "generation_seconds": 6.4932892080105375,
+      "write_seconds": 0.0014737089804839343,
+      "audio_seconds": 6.96,
+      "sample_rate": 24000,
+      "rtf": 0.932943851725652,
+      "peak": 0.623645544052124,
+      "rms": 0.07300505042076111,
+      "clipped_fraction": 0.0
+    },
+    {
+      "file": "qwen-03-short.wav",
+      "text": "こんにちは。今日は、音声合成の聞き比べをします。窓の外には青い空が広がっています。",
+      "phase": "warm",
+      "generation_seconds": 6.534963957994478,
+      "write_seconds": 0.003669666009955108,
+      "audio_seconds": 6.96,
+      "sample_rate": 24000,
+      "rtf": 0.9389316031601261,
+      "peak": 0.623645544052124,
+      "rms": 0.07300505042076111,
+      "clipped_fraction": 0.0
+    },
+    {
+      "file": "qwen-04-reading.wav",
+      "text": "午後三時、駅前の小さな喫茶店で友人を待っていました。温かいコーヒーを一口飲むと、雨に濡れた街の景色が、少しだけ明るく見えました。「お待たせ。久しぶりだね」と、懐かしい声が聞こえます。",
+      "phase": "warm",
+      "generation_seconds": 14.87559991699527,
+      "write_seconds": 0.0027404159773141146,
+      "audio_seconds": 15.698708333333334,
+      "sample_rate": 24000,
+      "rtf": 0.9475683986949204,
+      "peak": 0.6316205263137817,
+      "rms": 0.06577786803245544,
+      "clipped_fraction": 0.0
+    },
+    {
+      "file": "qwen-05-reading.wav",
+      "text": "午後三時、駅前の小さな喫茶店で友人を待っていました。温かいコーヒーを一口飲むと、雨に濡れた街の景色が、少しだけ明るく見えました。「お待たせ。久しぶりだね」と、懐かしい声が聞こえます。",
+      "phase": "warm",
+      "generation_seconds": 15.820618833997287,
+      "write_seconds": 0.003174875018885359,
+      "audio_seconds": 15.698708333333334,
+      "sample_rate": 24000,
+      "rtf": 1.0077656389350897,
+      "peak": 0.6316205263137817,
+      "rms": 0.06577786803245544,
+      "clipped_fraction": 0.0
+    },
+    {
+      "file": "qwen-06-reading.wav",
+      "text": "午後三時、駅前の小さな喫茶店で友人を待っていました。温かいコーヒーを一口飲むと、雨に濡れた街の景色が、少しだけ明るく見えました。「お待たせ。久しぶりだね」と、懐かしい声が聞こえます。",
+      "phase": "warm",
+      "generation_seconds": 15.606712000007974,
+      "write_seconds": 0.0026073750050272793,
+      "audio_seconds": 15.698708333333334,
+      "sample_rate": 24000,
+      "rtf": 0.9941398788121936,
+      "peak": 0.6316205263137817,
+      "rms": 0.06577786803245544,
+      "clipped_fraction": 0.0
+    }
+  ]
+}

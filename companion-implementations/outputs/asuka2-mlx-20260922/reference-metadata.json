@@ -1,0 +1,10 @@
+{
+  "source": "/Users/seijiro/Sync/emacs.d/reader/companion-implementations/assets/asuka2.wav",
+  "source_sha256": "2b5fd5a13d2ae7791f57a6c4ab36e978cd49d891afe9ff7d7c1830b8f1f22e2f",
+  "start_seconds": 0,
+  "end_seconds": 4.8,
+  "channels": "stereo averaged to mono",
+  "transcript": "ASR, proper name normalized",
+  "peak": 0.7382965087890625,
+  "clipped_fraction": 0.0
+}

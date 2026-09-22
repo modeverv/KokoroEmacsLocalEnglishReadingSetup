@@ -1,0 +1,20 @@
+{
+  "short": {
+    "order": [
+      "qwen",
+      "1 second silence",
+      "irodori"
+    ],
+    "rms_dbfs": -23.0,
+    "second_start_seconds": 7.96
+  },
+  "reading": {
+    "order": [
+      "qwen",
+      "1 second silence",
+      "irodori"
+    ],
+    "rms_dbfs": -23.0,
+    "second_start_seconds": 16.698708333333336
+  }
+}

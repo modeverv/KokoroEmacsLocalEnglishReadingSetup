@@ -1,0 +1,42 @@
+[
+  {
+    "engine": "qwen",
+    "text": "short",
+    "load_seconds": 2.3907414579880424,
+    "generation_median_seconds": 6.534963957994478,
+    "generation_min_seconds": 6.4932892080105375,
+    "generation_max_seconds": 7.3820214589941315,
+    "audio_median_seconds": 6.96,
+    "rtf_median": 0.9389316031601261
+  },
+  {
+    "engine": "qwen",
+    "text": "reading",
+    "load_seconds": 2.3907414579880424,
+    "generation_median_seconds": 15.606712000007974,
+    "generation_min_seconds": 14.87559991699527,
+    "generation_max_seconds": 15.820618833997287,
+    "audio_median_seconds": 15.698708333333334,
+    "rtf_median": 0.9941398788121936
+  },
+  {
+    "engine": "irodori",
+    "text": "short",
+    "load_seconds": 2.2630959170055576,
+    "generation_median_seconds": 7.107377166976221,
+    "generation_min_seconds": 7.0673349169956055,
+    "generation_max_seconds": 7.681874625006458,
+    "audio_median_seconds": 8.08,
+    "rtf_median": 0.8796258870020075
+  },
+  {
+    "engine": "irodori",
+    "text": "reading",
+    "load_seconds": 2.2630959170055576,
+    "generation_median_seconds": 14.926053000002867,
+    "generation_min_seconds": 14.309662041981937,
+    "generation_max_seconds": 15.213264582998818,
+    "audio_median_seconds": 19.08,
+    "rtf_median": 0.7822878930819113
+  }
+]

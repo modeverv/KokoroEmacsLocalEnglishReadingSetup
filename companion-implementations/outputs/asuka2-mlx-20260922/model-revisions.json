@@ -1,0 +1,6 @@
+{
+  "models--llm-jp--llm-jp-3-150m": "b112feef602fff752e4dac4c30af6a2c2fa41c7a",
+  "models--mlx-community--Qwen3-TTS-12Hz-1.7B-Base-8bit": "e7dd0585652209fa0d7783659aad4e8a324de11c",
+  "models--mlx-community--whisper-small-mlx": "45f3915923c7a79a5a5b5a7d909d39aeb0e5630e",
+  "models--mlx-community--Irodori-TTS-500M-v3-8bit": "43b5d5539d8f07da46c7cd58d9f0ebed50ec1cc9"
+}

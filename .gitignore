@@ -9,6 +9,6 @@ __pycache__/
 /companion-implementations/my-read-k2/bridge/.build/
 /companion-implementations/macos-speech-bridge/.build/
 /companion-implementations/macos-speech-bridge/my-read-speech-bridge
-/companion-implementations/assets/asuka.wav
+*.wav
 /companion-implementations/speech-http-app/build/
 /companion-implementations/playback-app/build/

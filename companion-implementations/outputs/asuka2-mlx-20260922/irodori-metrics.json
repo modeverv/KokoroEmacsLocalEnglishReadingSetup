@@ -1,0 +1,112 @@
+{
+  "engine": "irodori",
+  "model": "mlx-community/Irodori-TTS-500M-v3-8bit",
+  "load_seconds": 2.2630959170055576,
+  "reference_sha256": "5dea6d756171d91adfed81e949e0671ea478fad03bafbf786c97894917f28d1c",
+  "settings": {
+    "num_steps": 24,
+    "t_schedule_mode": "sway",
+    "sway_coeff": -1.0,
+    "duration_scale": 1.0,
+    "rng_seed": 42
+  },
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "versions": {
+    "mlx": "0.32.2",
+    "mlx-audio": "0.4.7",
+    "numpy": "2.4.6"
+  },
+  "runs": [
+    {
+      "file": "irodori-00-short.wav",
+      "text": "こんにちは。今日は、音声合成の聞き比べをします。窓の外には青い空が広がっています。",
+      "phase": "cold",
+      "generation_seconds": 7.220935374993132,
+      "write_seconds": 0.0030352910107467324,
+      "audio_seconds": 8.08,
+      "sample_rate": 48000,
+      "rtf": 0.8936801206674668,
+      "peak": 0.9999662041664124,
+      "rms": 0.1346672922372818,
+      "clipped_fraction": 0.0
+    },
+    {
+      "file": "irodori-01-short.wav",
+      "text": "こんにちは。今日は、音声合成の聞き比べをします。窓の外には青い空が広がっています。",
+      "phase": "warm",
+      "generation_seconds": 7.681874625006458,
+      "write_seconds": 0.004767957987496629,
+      "audio_seconds": 8.08,
+      "sample_rate": 48000,
+      "rtf": 0.9507270575503042,
+      "peak": 0.9999662041664124,
+      "rms": 0.1346672922372818,
+      "clipped_fraction": 0.0
+    },
+    {
+      "file": "irodori-02-short.wav",
+      "text": "こんにちは。今日は、音声合成の聞き比べをします。窓の外には青い空が広がっています。",
+      "phase": "warm",
+      "generation_seconds": 7.0673349169956055,
+      "write_seconds": 0.0037681669928133488,
+      "audio_seconds": 8.08,
+      "sample_rate": 48000,
+      "rtf": 0.8746701629945056,
+      "peak": 0.9999662041664124,
+      "rms": 0.1346672922372818,
+      "clipped_fraction": 0.0
+    },
+    {
+      "file": "irodori-03-short.wav",
+      "text": "こんにちは。今日は、音声合成の聞き比べをします。窓の外には青い空が広がっています。",
+      "phase": "warm",
+      "generation_seconds": 7.107377166976221,
+      "write_seconds": 0.007115208019968122,
+      "audio_seconds": 8.08,
+      "sample_rate": 48000,
+      "rtf": 0.8796258870020075,
+      "peak": 0.9999662041664124,
+      "rms": 0.1346672922372818,
+      "clipped_fraction": 0.0
+    },
+    {
+      "file": "irodori-04-reading.wav",
+      "text": "午後三時、駅前の小さな喫茶店で友人を待っていました。温かいコーヒーを一口飲むと、雨に濡れた街の景色が、少しだけ明るく見えました。「お待たせ。久しぶりだね」と、懐かしい声が聞こえます。",
+      "phase": "warm",
+      "generation_seconds": 15.213264582998818,
+      "write_seconds": 0.010667458001989871,
+      "audio_seconds": 19.08,
+      "sample_rate": 48000,
+      "rtf": 0.7973409110586384,
+      "peak": 0.9999937415122986,
+      "rms": 0.1301146000623703,
+      "clipped_fraction": 0.0
+    },
+    {
+      "file": "irodori-05-reading.wav",
+      "text": "午後三時、駅前の小さな喫茶店で友人を待っていました。温かいコーヒーを一口飲むと、雨に濡れた街の景色が、少しだけ明るく見えました。「お待たせ。久しぶりだね」と、懐かしい声が聞こえます。",
+      "phase": "warm",
+      "generation_seconds": 14.926053000002867,
+      "write_seconds": 0.012218999996548519,
+      "audio_seconds": 19.08,
+      "sample_rate": 48000,
+      "rtf": 0.7822878930819113,
+      "peak": 0.9999937415122986,
+      "rms": 0.1301146000623703,
+      "clipped_fraction": 0.0
+    },
+    {
+      "file": "irodori-06-reading.wav",
+      "text": "午後三時、駅前の小さな喫茶店で友人を待っていました。温かいコーヒーを一口飲むと、雨に濡れた街の景色が、少しだけ明るく見えました。「お待たせ。久しぶりだね」と、懐かしい声が聞こえます。",
+      "phase": "warm",
+      "generation_seconds": 14.309662041981937,
+      "write_seconds": 0.008926667011110112,
+      "audio_seconds": 19.08,
+      "sample_rate": 48000,
+      "rtf": 0.7499822873156152,
+      "peak": 0.9999937415122986,
+      "rms": 0.1301146000623703,
+      "clipped_fraction": 0.0
+    }
+  ]
+}
